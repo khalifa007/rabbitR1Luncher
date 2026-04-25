@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Activity theme. Compose draws the UI itself; this just gets us:
+          - fullscreen / no action bar
+          - dark status+nav backgrounds so any system bar bleed matches our bg
+        We inherit from a plain Android theme (no AppCompat/Material dep).
+    -->
+    <style name="Theme.R1Launcher" parent="android:Theme.Material.NoActionBar.Fullscreen">
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="android:navigationBarColor">@color/bg</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+    </style>
+</resources>
