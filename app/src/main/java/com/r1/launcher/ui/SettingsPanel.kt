@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -40,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -53,6 +55,7 @@ private val TRACK_OFF = Color(0xFF333333)
 internal sealed class SettingsItem(val label: String) {
     class Standard(label: String) : SettingsItem(label)
     class Toggle(label: String, val checked: Boolean, val subtitle: String = "") : SettingsItem(label)
+    class Info(label: String, val value: String) : SettingsItem(label)
 }
 
 @Composable
@@ -67,13 +70,21 @@ fun SettingsPanel(
         exit = fadeOut(tween(ANIM_CLOSE_MS)) +
             slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
     ) {
+        val context = LocalContext.current
+        val versionName = remember {
+            runCatching {
+                context.packageManager.getPackageInfo(context.packageName, 0).versionName
+            }.getOrDefault("?")
+        }
+
         val items = listOf(
             SettingsItem.Standard("< back"),
             SettingsItem.Standard("network"),
             SettingsItem.Standard("brightness"),
             SettingsItem.Standard("volume"),
             SettingsItem.Toggle("show key debug", state.showDebugBar),
-            SettingsItem.Standard("check for updates")
+            SettingsItem.Standard("check for updates"),
+            SettingsItem.Info("about", "R1 Launcher v$versionName"),
         )
 
         val listState = rememberLazyListState()
@@ -93,13 +104,20 @@ fun SettingsPanel(
                 modifier = Modifier.fillMaxSize(),
             ) {
                 itemsIndexed(items) { idx, item ->
-                    SettingsRow(
-                        label = item.label,
-                        focused = idx == state.settingsFocus,
-                        toggleChecked = (item as? SettingsItem.Toggle)?.checked,
-                        subtitle = (item as? SettingsItem.Toggle)?.subtitle ?: "",
-                        onClick = { onRowClick(idx) },
-                    )
+                    when (item) {
+                        is SettingsItem.Info -> AboutRow(
+                            label = item.label,
+                            value = item.value,
+                            focused = idx == state.settingsFocus,
+                        )
+                        else -> SettingsRow(
+                            label = item.label,
+                            focused = idx == state.settingsFocus,
+                            toggleChecked = (item as? SettingsItem.Toggle)?.checked,
+                            subtitle = (item as? SettingsItem.Toggle)?.subtitle ?: "",
+                            onClick = { onRowClick(idx) },
+                        )
+                    }
                 }
             }
         }
@@ -190,3 +208,36 @@ internal fun MinimalSwitch(checked: Boolean, focused: Boolean, modifier: Modifie
     }
 }
 
+@Composable
+internal fun AboutRow(
+    label: String,
+    value: String,
+    focused: Boolean,
+) {
+    val bgColor = if (focused) HIGHLIGHT_BG else Color.Transparent
+    val type = LocalR1Type.current
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(bgColor)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+    ) {
+        Text(
+            text = label,
+            color = if (focused) Color.Black else Color.White,
+            fontSize = 24.sp,
+            fontFamily = type.appCard.fontFamily,
+            fontWeight = FontWeight.Medium,
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = value,
+            color = if (focused) Color(0xFF1A1A1A) else Color(0xFFFF4500),
+            fontSize = 14.sp,
+            fontFamily = type.appCard.fontFamily,
+            fontWeight = FontWeight.Normal,
+        )
+    }
+}
