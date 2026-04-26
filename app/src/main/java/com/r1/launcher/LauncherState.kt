@@ -81,6 +81,14 @@ class LauncherState {
 
     // --- openclaw chat panel ---
     val chatMessages = mutableStateListOf<ChatMessage>()
+    /** Cap message list so very long sessions don't degrade UI responsiveness. */
+    val chatMessagesMax = 500
+    /** Live assistant streaming preview — shown as a single bubble at the bottom
+     *  while a `delta` is in flight. Replaced by the canonical bubble after the
+     *  next `chat.history` refresh on terminal events. */
+    var chatStreamingText by mutableStateOf("")
+    /** Run IDs initiated by us; used to filter stream events from other operators. */
+    val chatPendingRunIds = mutableStateListOf<String>()
     var chatStatus by mutableStateOf("connecting")
     var chatRecording by mutableStateOf(false)
     var chatBusy by mutableStateOf(false)

@@ -156,7 +156,7 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.SETTINGS -> {
             val prev = settingsFocus
-            settingsFocus = (settingsFocus + 1).coerceAtMost(4) // updated to 4 rows
+            settingsFocus = (settingsFocus + 1).coerceAtMost(5)
             if (prev != settingsFocus) host.navTone()
         }
         Panel.NETWORK -> {
@@ -226,6 +226,7 @@ fun LauncherState.activate(host: LauncherHost) {
             2 -> { openBrightness(); host.selectTone() }
             3 -> { openVolume(); host.selectTone() }
             4 -> { showDebugBar = !showDebugBar; host.popTone() }
+            5 -> { host.checkForUpdate(); host.selectTone() }
         }
         Panel.NETWORK -> when (networkFocus) {
             0 -> { back(); host.backTone() }

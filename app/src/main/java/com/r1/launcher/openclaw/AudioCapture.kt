@@ -9,11 +9,8 @@ import android.os.Looper
 /**
  * Mic → WAV capture for the openclaw chat panel. Records 16 kHz mono PCM_16BIT
  * into memory (capped at 30 s ≈ 960 KB), wraps it in a 44-byte WAV header on
- * stop, returns the bytes via callback. The gateway transcribes server-side
- * (Whisper or equivalent), so there's no on-device STT here at all.
- *
- * Replaces the previous Vosk-based VoiceRecognizer — accuracy on the R1's mic
- * was poor enough that server-side transcription is the better path.
+ * stop, returns the bytes via callback. Transcription is done by the OpenAI
+ * Whisper API (see WhisperClient) — no on-device STT.
  */
 class AudioCapture {
 
