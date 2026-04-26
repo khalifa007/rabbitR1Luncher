@@ -90,10 +90,10 @@ fun LauncherRoot(
             onRowClick = { idx ->
                 when (idx) {
                     0 -> { state.back(); host.backTone() }
-                    1 -> { state.openBrightness(); host.selectTone() }
-                    2 -> { state.openVolume(); host.selectTone() }
-                    3 -> { state.showDebugBar = !state.showDebugBar; host.selectTone() }
-                    4 -> { state.openNetwork(); host.selectTone() }
+                    1 -> { state.openNetwork(); host.selectTone() }
+                    2 -> { state.openBrightness(); host.selectTone() }
+                    3 -> { state.openVolume(); host.selectTone() }
+                    4 -> { host.checkForUpdate(); host.selectTone() }
                 }
             },
         )
@@ -156,6 +156,17 @@ fun LauncherRoot(
             onPasteKey = { host.openClawPasteOpenaiKey() },
             onClearKey = { host.openClawClearOpenaiKey() },
             onOpenSettings = { state.openOpenClawSettings(); host.selectTone() },
+            onSwitchSession = { key -> host.openClawSwitchSession(key); host.selectTone() },
+            onOpenSessions = {
+                state.openOpenClawSessions()
+                host.openClawRefreshSessions() // best-effort fresh fetch on entry
+                host.selectTone()
+            },
+        )
+
+        OpenClawSessionsPanel(
+            state = state,
+            onRowClick = { idx -> host.openClawSessionsRowActivate(idx) },
         )
 
         OpenClawSettingsPanel(
@@ -164,6 +175,7 @@ fun LauncherRoot(
             onSave = { key -> host.openClawSaveOpenaiKey(key) },
             onPasteFromClipboard = { host.openClawPasteOpenaiKey() },
             onClear = { host.openClawClearOpenaiKey() },
+            onRowClick = { idx -> host.openClawSettingsRowActivate(idx) },
             onFontSizeChange = { size -> host.openClawSetFontSize(size) },
         )
 
@@ -181,23 +193,5 @@ fun LauncherRoot(
             Topbar(state = state)
         }
 
-        // Debug keycode overlay.
-        if (state.debugKeyVisible) {
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 4.dp)
-                    .background(Color(0xAA000000))
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                    .wrapContentSize(),
-            ) {
-                Text(
-                    state.debugKeyText,
-                    style = LocalR1Type.current.mono,
-                    color = colors.accent,
-                )
-            }
-        }
     }
 }

@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.atomic.AtomicBoolean
@@ -46,6 +47,7 @@ class GatewaySession(
         object Idle : State()
         object Connecting : State()
         data class Live(val sessionKey: String) : State()
+        data class Switching(val sessionKey: String) : State()
         data class Error(val message: String) : State()
     }
 
@@ -62,8 +64,18 @@ class GatewaySession(
     private val scope = CoroutineScope(Dispatchers.IO + parentJob)
 
     @Volatile private var socket: WebSocket? = null
-    @Volatile private var sessionKey: String = "main"
+    /** Seeded from prefs so a returning user lands back in the thread they last used. */
+    @Volatile private var sessionKey: String = prefs.selectedSessionKey?.takeUnless { it.isBlank() } ?: "main"
+    /** Server-issued main session key from connect snapshot. */
+    @Volatile private var cachedMainSessionKey: String = prefs.lastMainSessionKey?.takeUnless { it.isBlank() } ?: "main"
+    /** Monotonic switch token — onHistory callbacks tagged with stale tokens are dropped. */
+    private val switchToken = java.util.concurrent.atomic.AtomicLong(0L)
     private val isClosed = AtomicBoolean(false)
+    /** True only when the user explicitly called stop(). Prevents auto-reconnect. */
+    private val userStopped = AtomicBoolean(false)
+    /** Current reconnect backoff delay in ms. Reset on successful connect. */
+    @Volatile private var reconnectDelayMs = 2_000L
+    private val MAX_RECONNECT_DELAY_MS = 16_000L
 
     var onState: (State) -> Unit = {}
     /** Streaming `delta` events — text accumulates server-side; latest text is sent each tick. */
@@ -71,10 +83,15 @@ class GatewaySession(
     /** Terminal `final`/`aborted`/`error` events — UI should refresh chat.history. */
     var onChatTerminal: (runId: String?, state: String, errorMessage: String?) -> Unit = { _, _, _ -> }
     var onHistory: (List<ChatMessage>) -> Unit = {}
+    /** Available threads from `sessions.list`. Empty list = unknown / not yet fetched. */
+    var onSessions: (List<SessionEntry>) -> Unit = {}
+    /** Server-snapshot main session key, fired once per `connect` after handshake. */
+    var onMainSessionKey: (String) -> Unit = {}
 
     fun start() {
         if (socket != null) return
         isClosed.set(false)
+        userStopped.set(false)
         val url = prefs.gatewayUrl ?: run {
             onState(State.Error("no gateway url"))
             return
@@ -89,6 +106,7 @@ class GatewaySession(
     }
 
     fun stop() {
+        userStopped.set(true)
         if (isClosed.compareAndSet(false, true)) failPending("session stopped")
         runCatching { socket?.close(1000, "panel closed") }
         socket = null
@@ -96,6 +114,21 @@ class GatewaySession(
         // `scope.cancel()` would make any subsequent start() a silent no-op
         // because the scope itself would be dead.
         parentJob.cancelChildren()
+    }
+
+    /** Schedule a reconnect unless the user explicitly stopped the session. */
+    private fun scheduleReconnect() {
+        if (userStopped.get()) return
+        val delayMs = reconnectDelayMs
+        reconnectDelayMs = (reconnectDelayMs * 2).coerceAtMost(MAX_RECONNECT_DELAY_MS)
+        android.util.Log.i("OpenClaw", "reconnecting in ${delayMs}ms")
+        scope.launch {
+            delay(delayMs)
+            if (!userStopped.get()) {
+                socket = null
+                start()
+            }
+        }
     }
 
     /** Drain pending JSON-RPC waiters with an error so callers don't hang until timeout. */
@@ -157,6 +190,7 @@ class GatewaySession(
 
     fun refreshHistory() {
         scope.launch {
+            val token = switchToken.get()
             try {
                 val hist = request("chat.history", buildJsonObject {
                     put("sessionKey", JsonPrimitive(sessionKey))
@@ -164,9 +198,98 @@ class GatewaySession(
                 val msgs = ((hist["payload"] as? JsonObject)?.get("messages") as? JsonArray)
                     ?.mapNotNull { (it as? JsonObject)?.let(::parseHistoryMessage) }
                     .orEmpty()
-                onHistory(msgs)
+                if (token == switchToken.get()) onHistory(msgs)
             } catch (t: Throwable) {
                 android.util.Log.w("OpenClaw", "refreshHistory threw", t)
+            }
+        }
+    }
+
+    /**
+     * Switch the active thread without dropping the WebSocket. Re-subscribes via
+     * `node.event(chat.subscribe)` and re-fetches history for the new key. Stale
+     * switches (rapid pill taps) are tagged with a monotonic token; only the
+     * latest token's history is delivered to the UI.
+     */
+    fun switchSession(newKey: String) {
+        val trimmed = newKey.trim()
+        if (trimmed.isEmpty() || trimmed == sessionKey) return
+        sessionKey = trimmed
+        prefs.selectedSessionKey = trimmed
+        val token = switchToken.incrementAndGet()
+        onState(State.Switching(trimmed))
+        scope.launch {
+            try {
+                request("node.event", buildJsonObject {
+                    put("event", JsonPrimitive("chat.subscribe"))
+                    put("payloadJSON", JsonPrimitive(buildJsonObject {
+                        put("sessionKey", JsonPrimitive(trimmed))
+                    }.toString()))
+                }, timeoutMs = 10_000L)
+            } catch (t: Throwable) {
+                android.util.Log.w("OpenClaw", "switch subscribe threw", t)
+            }
+            if (token != switchToken.get()) return@launch
+            try {
+                val hist = request("chat.history", buildJsonObject {
+                    put("sessionKey", JsonPrimitive(trimmed))
+                }, timeoutMs = 15_000L)
+                val msgs = ((hist["payload"] as? JsonObject)?.get("messages") as? JsonArray)
+                    ?.mapNotNull { (it as? JsonObject)?.let(::parseHistoryMessage) }
+                    .orEmpty()
+                if (token == switchToken.get()) {
+                    onHistory(msgs)
+                    onState(State.Live(trimmed))
+                }
+            } catch (t: Throwable) {
+                android.util.Log.w("OpenClaw", "switch history threw", t)
+                if (token == switchToken.get()) {
+                    onState(State.Error(t.message ?: "switch failed"))
+                }
+            }
+        }
+    }
+
+    /**
+     * Fetch the list of available threads. Tries direct `sessions.list` first,
+     * falls back to `node.event(sessions.list)` on permission errors (the
+     * bootstrap profile may not grant `operator.admin` for direct invocation,
+     * mirroring the same constraint that affects `chat.subscribe`).
+     */
+    fun listSessions() {
+        scope.launch {
+            try {
+                val params = buildJsonObject {
+                    put("includeGlobal", JsonPrimitive(true))
+                    put("includeUnknown", JsonPrimitive(false))
+                    put("limit", JsonPrimitive(50))
+                }
+                var res = runCatching {
+                    request("sessions.list", params, timeoutMs = 10_000L)
+                }.getOrNull()
+                val ok = res?.get("ok")?.jsonPrimitive?.booleanOrNull ?: false
+                if (!ok) {
+                    // Retry wrapped — same pattern we use for chat.subscribe.
+                    res = runCatching {
+                        request("node.event", buildJsonObject {
+                            put("event", JsonPrimitive("sessions.list"))
+                            put("payloadJSON", JsonPrimitive(params.toString()))
+                        }, timeoutMs = 10_000L)
+                    }.getOrNull()
+                }
+                val arr = (res?.get("payload") as? JsonObject)?.get("sessions") as? JsonArray
+                val parsed = arr?.mapNotNull { el ->
+                    val obj = el as? JsonObject ?: return@mapNotNull null
+                    val key = obj["key"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                    if (key.isEmpty()) return@mapNotNull null
+                    val updatedAt = obj["updatedAt"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+                    val displayName = obj["displayName"]?.jsonPrimitive?.contentOrNull
+                    SessionEntry(key = key, updatedAtMs = updatedAt, displayName = displayName)
+                }.orEmpty()
+                onSessions(parsed)
+            } catch (t: Throwable) {
+                android.util.Log.w("OpenClaw", "listSessions threw", t)
+                onSessions(emptyList())
             }
         }
     }
@@ -189,7 +312,12 @@ class GatewaySession(
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             socket = null
             if (isClosed.compareAndSet(false, true)) failPending("ws closed: $reason")
-            onState(State.Idle)
+            if (!userStopped.get()) {
+                onState(State.Connecting)
+                scheduleReconnect()
+            } else {
+                onState(State.Idle)
+            }
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -197,7 +325,12 @@ class GatewaySession(
             if (isClosed.compareAndSet(false, true)) {
                 failPending("ws failure: ${t.message ?: t.javaClass.simpleName}")
             }
-            onState(State.Error(t.message ?: "ws failure"))
+            if (!userStopped.get()) {
+                onState(State.Connecting)
+                scheduleReconnect()
+            } else {
+                onState(State.Error(t.message ?: "ws failure"))
+            }
         }
     }
 
@@ -293,8 +426,22 @@ class GatewaySession(
             val snap = payload?.get("snapshot") as? JsonObject
             val sessDefaults = snap?.get("sessionDefaults") as? JsonObject
             val main = sessDefaults?.get("mainSessionKey")?.jsonPrimitive?.contentOrNull
-            if (!main.isNullOrBlank()) sessionKey = main
+            if (!main.isNullOrBlank()) {
+                cachedMainSessionKey = main
+                prefs.lastMainSessionKey = main
+                onMainSessionKey(main)
+            }
+            // Honor the persisted user pick over the snapshot main — otherwise
+            // a returning user gets snapped back to "main" every connect.
+            val persisted = prefs.selectedSessionKey?.takeUnless { it.isBlank() }
+            sessionKey = when {
+                !persisted.isNullOrBlank() -> persisted
+                !main.isNullOrBlank() -> main
+                else -> sessionKey
+            }
 
+            // Reset backoff on successful connect
+            reconnectDelayMs = 2_000L
             onState(State.Live(sessionKey))
 
             // chat.subscribe is delivered via node.event (the openclaw client
@@ -311,6 +458,7 @@ class GatewaySession(
             } catch (t: Throwable) {
                 android.util.Log.w("OpenClaw", "node.event(chat.subscribe) threw", t)
             }
+            val initialToken = switchToken.get()
             try {
                 val hist = request("chat.history", buildJsonObject {
                     put("sessionKey", JsonPrimitive(sessionKey))
@@ -319,7 +467,7 @@ class GatewaySession(
                 val msgs = ((hist["payload"] as? JsonObject)?.get("messages") as? JsonArray)
                     ?.mapNotNull { (it as? JsonObject)?.let(::parseHistoryMessage) }
                     .orEmpty()
-                onHistory(msgs)
+                if (initialToken == switchToken.get()) onHistory(msgs)
             } catch (t: Throwable) {
                 android.util.Log.w("OpenClaw", "chat.history threw", t)
             }
