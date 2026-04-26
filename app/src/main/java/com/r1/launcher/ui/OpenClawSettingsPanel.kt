@@ -38,6 +38,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.font.FontWeight
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
 
@@ -49,6 +51,7 @@ fun OpenClawSettingsPanel(
     onPasteFromClipboard: () -> Unit,
     onClear: () -> Unit,
     onRowClick: (Int) -> Unit = {},
+    onFontSizeChange: (Int) -> Unit = {},
 ) {
     AnimatedVisibility(
         visible = state.panel == Panel.OPENCLAW_SETTINGS,
@@ -75,6 +78,7 @@ fun OpenClawSettingsPanel(
             SettingsItem.Standard("< back"),
             SettingsItem.Standard("whisper key"),
             SettingsItem.Toggle("hide text input", state.openClawHideChat),
+            SettingsItem.Info("font size", "${state.chatFontSize} sp"),
             SettingsItem.Standard("clear history"),
             SettingsItem.Standard("disconnect gate"),
         )
@@ -97,18 +101,27 @@ fun OpenClawSettingsPanel(
                 modifier = Modifier.fillMaxSize(),
             ) {
                 itemsIndexed(items) { idx, item ->
-                    SettingsRow(
-                        label = item.label,
-                        focused = idx == state.openClawSettingsFocus,
-                        toggleChecked = (item as? SettingsItem.Toggle)?.checked,
-                        onClick = {
-                            if (idx == 1) {
-                                showKeyboard = true
-                            } else {
-                                onRowClick(idx)
-                            }
-                        },
-                    )
+                    when (item) {
+                        is SettingsItem.Info -> FontSizeRow(
+                            label = item.label,
+                            value = item.value,
+                            focused = idx == state.openClawSettingsFocus,
+                            onDecrease = { onFontSizeChange((state.chatFontSize - 1).coerceAtLeast(8)) },
+                            onIncrease = { onFontSizeChange((state.chatFontSize + 1).coerceAtMost(28)) },
+                        )
+                        else -> SettingsRow(
+                            label = item.label,
+                            focused = idx == state.openClawSettingsFocus,
+                            toggleChecked = (item as? SettingsItem.Toggle)?.checked,
+                            onClick = {
+                                if (idx == 1) {
+                                    showKeyboard = true
+                                } else {
+                                    onRowClick(idx)
+                                }
+                            },
+                        )
+                    }
                 }
             }
 
@@ -209,4 +222,65 @@ fun OpenClawSettingsPanel(
 private fun maskKey(s: String): String {
     if (s.length <= 8) return s
     return s.take(3) + "…" + s.takeLast(4)
+}
+
+@Composable
+private fun FontSizeRow(
+    label: String,
+    value: String,
+    focused: Boolean,
+    onDecrease: () -> Unit,
+    onIncrease: () -> Unit,
+) {
+    val bgColor = if (focused) Color(0xFFFF4500) else Color.Transparent
+    val textColor = if (focused) Color.Black else Color.White
+    val btnColor = if (focused) Color.Black else Color(0xFFFF4500)
+    val type = LocalR1Type.current
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(bgColor)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                color = textColor,
+                fontSize = 24.sp,
+                fontFamily = type.appCard.fontFamily,
+                fontWeight = FontWeight.Medium,
+            )
+            Text(
+                text = value,
+                color = if (focused) Color(0xFF1A1A1A) else Color(0xFFAAAAAA),
+                fontSize = 14.sp,
+                fontFamily = type.appCard.fontFamily,
+            )
+        }
+        Text(
+            text = " − ",
+            color = btnColor,
+            fontSize = 28.sp,
+            fontFamily = type.appCard.fontFamily,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier
+                .clip(RoundedCornerShape(6.dp))
+                .clickable { onDecrease() }
+                .padding(horizontal = 6.dp),
+        )
+        Text(
+            text = " + ",
+            color = btnColor,
+            fontSize = 28.sp,
+            fontFamily = type.appCard.fontFamily,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier
+                .clip(RoundedCornerShape(6.dp))
+                .clickable { onIncrease() }
+                .padding(horizontal = 6.dp),
+        )
+    }
 }

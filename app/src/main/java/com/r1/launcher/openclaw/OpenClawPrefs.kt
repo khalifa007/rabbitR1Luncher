@@ -63,6 +63,10 @@ class OpenClawPrefs private constructor(ctx: Context) {
         get() = plain.getBoolean(KEY_HIDE_CHAT, false)
         set(value) = plain.edit { putBoolean(KEY_HIDE_CHAT, value) }
 
+    var chatFontSize: Int
+        get() = plain.getInt(KEY_CHAT_FONT_SIZE, 14)
+        set(value) = plain.edit { putInt(KEY_CHAT_FONT_SIZE, value) }
+
     fun hasPairing(): Boolean = !gatewayUrl.isNullOrBlank() &&
         (!deviceToken.isNullOrBlank() || !bootstrapToken.isNullOrBlank() || !sharedToken.isNullOrBlank())
 
@@ -80,6 +84,7 @@ class OpenClawPrefs private constructor(ctx: Context) {
         private const val KEY_INSTANCE_ID = "node.instanceId"
         private const val KEY_OPENAI_KEY = "openai.key"
         private const val KEY_HIDE_CHAT = "chat.hide"
+        private const val KEY_CHAT_FONT_SIZE = "chat.fontSize"
 
         @Volatile private var instance: OpenClawPrefs? = null
         fun get(ctx: Context): OpenClawPrefs =

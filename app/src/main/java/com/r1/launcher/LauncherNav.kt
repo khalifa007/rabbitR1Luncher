@@ -43,9 +43,7 @@ interface LauncherHost {
     fun openClawSettingsRowActivate(idx: Int)
     fun openClawClearHistory()
     fun openClawDisconnect()
-    fun audioTestActivate()
-    fun audioTestCycleSource(delta: Int)
-    fun audioTestStop()
+    fun openClawSetFontSize(size: Int)
 }
 
 fun LauncherState.wheelUp(host: LauncherHost) {
@@ -114,7 +112,6 @@ fun LauncherState.wheelUp(host: LauncherHost) {
         }
         Panel.OPENCLAW_QR -> { /* camera handles input */ }
         Panel.OPENCLAW_CHAT -> { host.openClawScrollUp(); host.navTone() }
-        Panel.AUDIO_TEST -> { host.audioTestCycleSource(-1); host.navTone() }
         Panel.OPENCLAW_SETTINGS -> {
             if (openClawSettingsFocus <= 0) {
                 back(); host.backTone()
@@ -189,10 +186,9 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.OPENCLAW_QR -> { /* camera handles input */ }
         Panel.OPENCLAW_CHAT -> { host.openClawScrollDown(); host.navTone() }
-        Panel.AUDIO_TEST -> { host.audioTestCycleSource(1); host.navTone() }
         Panel.OPENCLAW_SETTINGS -> {
             val prev = openClawSettingsFocus
-            openClawSettingsFocus = (openClawSettingsFocus + 1).coerceAtMost(4)
+            openClawSettingsFocus = (openClawSettingsFocus + 1).coerceAtMost(5)
             if (prev != openClawSettingsFocus) host.navTone()
         }
         Panel.HOME -> {
@@ -249,7 +245,6 @@ fun LauncherState.activate(host: LauncherHost) {
         Panel.BRIGHTNESS, Panel.VOLUME -> { back(); host.selectTone() }
         Panel.OPENCLAW_QR -> { /* camera scan auto-completes; activate is no-op */ }
         Panel.OPENCLAW_CHAT -> { host.openClawToggleRecord(); host.popTone() }
-        Panel.AUDIO_TEST -> { host.audioTestActivate(); host.popTone() }
         Panel.OPENCLAW_SETTINGS -> {
             host.openClawSettingsRowActivate(openClawSettingsFocus)
             host.selectTone()
@@ -265,11 +260,6 @@ fun LauncherState.activate(host: LauncherHost) {
 fun LauncherState.backPressed(host: LauncherHost) {
     if (panel == Panel.OPENCLAW_CHAT || panel == Panel.OPENCLAW_QR) {
         host.openClawCloseSession()
-        back(); host.backTone()
-        return
-    }
-    if (panel == Panel.AUDIO_TEST) {
-        host.audioTestStop()
         back(); host.backTone()
         return
     }
