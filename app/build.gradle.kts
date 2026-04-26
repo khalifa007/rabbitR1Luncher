@@ -13,8 +13,8 @@ android {
         applicationId = "com.r1.launcher"
         minSdk = 23
         targetSdk = 33
-        versionCode = 123
-        versionName = "3.5.0"
+        versionCode = 126
+        versionName = "3.6.0"
     }
 
     signingConfigs {
@@ -91,6 +91,9 @@ dependencies {
     implementation("androidx.compose.animation:animation")
     // Material3 pulled in only for the type tokens; we style everything custom.
     implementation("androidx.compose.material3:material3")
+
+    // Markdown rendering for AI chat bubbles
+    implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.24.0")
 
     // OpenClaw panel: WebSocket JSON-RPC + JSON + encrypted prefs + QR scanner.
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

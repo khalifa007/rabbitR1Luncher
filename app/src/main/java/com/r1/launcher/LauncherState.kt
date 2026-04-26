@@ -8,7 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.r1.launcher.openclaw.ChatMessage
 
-enum class Panel { HOME, SHEET, APPS, STORE, DETAIL, SETTINGS, BRIGHTNESS, VOLUME, OPENCLAW_QR, OPENCLAW_CHAT, AUDIO_TEST }
+enum class Panel { HOME, SHEET, APPS, STORE, DETAIL, SETTINGS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, BRIGHTNESS, VOLUME, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_SETTINGS, AUDIO_TEST }
 
 /**
  * Single container for all UI state. Activity mutates; Compose reads.
@@ -35,6 +35,12 @@ class LauncherState {
     var detailFocus by mutableIntStateOf(0)
     /** Settings panel rows: 0=Brightness, 1=Volume, 2=Wi-Fi, 3=Airplane/Data. */
     var settingsFocus by mutableIntStateOf(0)
+    var networkFocus by mutableIntStateOf(0)
+    var wifiScanFocus by mutableIntStateOf(0)
+    var wifiConnectedSsid by mutableStateOf("")
+    var wifiSelectedSsid by mutableStateOf("")
+    var wifiPasswordInput by mutableStateOf("")
+    val wifiScanResults = mutableStateListOf<String>()
     /** Live brightness 1..255 — pre-seeded from Settings.System on openSettings(). */
     var brightnessLevel by mutableIntStateOf(128)
     /** Live STREAM_MUSIC volume 0..volumeMax. */
@@ -45,14 +51,17 @@ class LauncherState {
     var clockText by mutableStateOf("00:00")
     var dateText by mutableStateOf("—")
 
-    // --- topbar ---
+    // --- topbar & network toggles ---
     var wifiOn by mutableStateOf(false)
+    var wifiEnabled by mutableStateOf(false)
+    var cellularOn by mutableStateOf(false)
     var btOn by mutableStateOf(false)
     /** 0=hidden, 1=half (checking), 2=full + rotate (downloading/installing). */
     var updateIconState by mutableIntStateOf(0)
     var batteryPct by mutableFloatStateOf(1f)
     var simPresent by mutableStateOf(false)
     var simOperator by mutableStateOf("")
+    var networkType by mutableStateOf("")
     /** 0..4 */
     var signalLevel by mutableIntStateOf(0)
 
@@ -80,6 +89,18 @@ class LauncherState {
     var chatPartialText by mutableStateOf("")
     /** Last QR-decode error to surface in the QR panel. Null = no error shown. */
     var qrError by mutableStateOf<String?>(null)
+    /** OpenAI Whisper key state — true if a key is saved. Header pill reads this. */
+    var chatHasOpenaiKey by mutableStateOf(false)
+    /** Last 4 chars of saved Whisper key for visual confirmation. Empty if unset. */
+    var chatOpenaiKeyTail by mutableStateOf("")
+    /** True between "stop recording" and either transcript-back or error. */
+    var chatTranscribing by mutableStateOf(false)
+    /** Buffer for the openclaw settings input field. */
+    var chatSettingsKeyInput by mutableStateOf("")
+    /** Focus index for the openclaw settings menu. */
+    var openClawSettingsFocus by mutableIntStateOf(0)
+    /** Toggle to hide chat messages in the chat panel. */
+    var openClawHideChat by mutableStateOf(false)
 
     // --- audio test panel ---
     /** Index into AudioTester.Source.values() — wheel up/down cycles when idle. */
@@ -130,6 +151,22 @@ class LauncherState {
         panel = Panel.SETTINGS
     }
 
+    fun openNetwork() {
+        networkFocus = 0
+        panel = Panel.NETWORK
+    }
+
+    fun openWifiScan() {
+        wifiScanFocus = 0
+        panel = Panel.WIFI_SCAN
+    }
+
+    fun openWifiPassword(ssid: String) {
+        wifiSelectedSsid = ssid
+        wifiPasswordInput = ""
+        panel = Panel.WIFI_PASSWORD
+    }
+
     fun openBrightness() {
         panel = Panel.BRIGHTNESS
     }
@@ -152,6 +189,14 @@ class LauncherState {
         panel = Panel.OPENCLAW_CHAT
     }
 
+    fun openOpenClawSettings() {
+        // Pre-fill input with the current key (masked rendering happens in UI).
+        // Empty string when no key is set.
+        chatSettingsKeyInput = ""
+        openClawSettingsFocus = 0
+        panel = Panel.OPENCLAW_SETTINGS
+    }
+
     fun openAudioTest() {
         audioTestStatus = "idle"
         audioTestLevel = 0
@@ -167,10 +212,13 @@ class LauncherState {
     fun back() {
         panel = when (panel) {
             Panel.DETAIL -> Panel.STORE
-            Panel.BRIGHTNESS, Panel.VOLUME -> Panel.SETTINGS
+            Panel.NETWORK, Panel.BRIGHTNESS, Panel.VOLUME -> Panel.SETTINGS
+            Panel.WIFI_SCAN -> Panel.NETWORK
+            Panel.WIFI_PASSWORD -> Panel.WIFI_SCAN
             Panel.SETTINGS -> Panel.APPS
             Panel.STORE, Panel.APPS, Panel.SHEET -> Panel.HOME
             Panel.OPENCLAW_QR, Panel.OPENCLAW_CHAT, Panel.AUDIO_TEST -> Panel.APPS
+            Panel.OPENCLAW_SETTINGS -> Panel.OPENCLAW_CHAT
             Panel.HOME -> Panel.HOME
         }
         if (panel != Panel.DETAIL) detailEntry = null
