@@ -156,7 +156,7 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.SETTINGS -> {
             val prev = settingsFocus
-            settingsFocus = (settingsFocus + 1).coerceAtMost(5)
+            settingsFocus = (settingsFocus + 1).coerceAtMost(6)
             if (prev != settingsFocus) host.navTone()
         }
         Panel.NETWORK -> {
