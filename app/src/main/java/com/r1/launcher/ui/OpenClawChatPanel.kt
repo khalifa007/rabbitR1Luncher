@@ -32,6 +32,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -56,6 +57,7 @@ import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
 import com.mikepenz.markdown.model.markdownAnnotator
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.runtime.mutableStateOf
 
@@ -69,6 +71,8 @@ fun OpenClawChatPanel(
     onPasteKey: () -> Unit = {},
     onClearKey: () -> Unit = {},
     onOpenSettings: () -> Unit = {},
+    onSwitchSession: (String) -> Unit = {},
+    onOpenSessions: () -> Unit = {},
 ) {
     AnimatedVisibility(
         visible = state.panel == Panel.OPENCLAW_CHAT,
@@ -106,6 +110,7 @@ fun OpenClawChatPanel(
                     }
                 }
                 Spacer(Modifier.width(8.dp))
+                ChatThreadsPill(onClick = onOpenSessions)
                 SettingsPill(
                     keySet = state.chatHasOpenaiKey,
                     onClick = onOpenSettings,
@@ -138,6 +143,20 @@ fun OpenClawChatPanel(
                     .weight(1f)
                     .fillMaxWidth(),
             ) {
+                // Typing indicator — shows while waiting for assistant to start
+                // streaming. Sits at item 0 (bottom with reverseLayout=true).
+                if (state.chatBusy && state.chatStreamingText.isBlank()) {
+                    item("typing") {
+                        Bubble(
+                            ChatMessage(
+                                role = "assistant",
+                                text = "writing",
+                                streaming = true,
+                            ),
+                            fontSize = state.chatFontSize,
+                        )
+                    }
+                }
                 // Live assistant streaming preview — sits at item 0 so with
                 // reverseLayout=true it renders at the bottom of the chat,
                 // beneath the most recent persisted bubble. Cleared when the
@@ -273,6 +292,24 @@ private fun EmptyHint(status: String) {
 }
 
 @Composable
+private fun ChatThreadsPill(onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(CircleShape)
+            .clickable(onClick = onClick)
+            .padding(8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.List,
+            contentDescription = "threads",
+            tint = Color(0xFFFF4500),
+            modifier = Modifier.size(24.dp),
+        )
+    }
+}
+
+@Composable
 private fun SettingsPill(keySet: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
@@ -318,14 +355,25 @@ private fun Bubble(msg: ChatMessage, fontSize: Int = 14) {
                         color = Color.Black,
                     )
                 } else {
-                    // Jersey 15 font for code spans — the library defaults to
-                    // FontFamily.Monospace internally, so we override via annotator.
-                    val codeSpanStyle = chatStyle.copy(
-                        fontSize = (fontSize - 2).coerceAtLeast(8).sp,
-                        color = Color(0xFFFF4500),
-                    ).toSpanStyle()
+                    // Convert inline `code` → **code** so the library renders it
+                    // as bold (Jersey 15) instead of monospace CODE_SPAN.
+                    // Fenced code blocks are also stripped to plain text.
+                    val rawContent = msg.text.ifEmpty { if (msg.streaming) "…" else "" }
+                    val cleaned = rawContent
+                        .replace(Regex("```[\\s\\S]*?```")) { m ->
+                            val inner = m.value.removeSurrounding("```")
+                            val nl = inner.indexOf('\n')
+                            // Strip the first line only if it looks like a bare
+                            // language tag (letters/digits/+-_), so "```js\nfoo"
+                            // doesn't eat the "foo".
+                            if (nl > 0 && inner.substring(0, nl).all {
+                                    it.isLetterOrDigit() || it == '+' || it == '-' || it == '_'
+                                }) inner.substring(nl + 1).trim('\n')
+                            else inner.trim('\n')
+                        }
+                        .replace(Regex("`([^`\n]+)`"), "**$1**") // inline code → bold
                     Markdown(
-                        content = msg.text.ifEmpty { if (msg.streaming) "…" else "" },
+                        content = cleaned,
                         colors = markdownColor(
                             text = Color.White,
                             codeText = Color(0xFFFF4500),
@@ -333,7 +381,7 @@ private fun Bubble(msg: ChatMessage, fontSize: Int = 14) {
                         ),
                         typography = markdownTypography(
                             text = chatStyle,
-                            code = chatStyle.copy(fontSize = (fontSize - 2).coerceAtLeast(8).sp),
+                            code = chatStyle,
                             paragraph = chatStyle,
                             quote = chatStyle,
                             list = chatStyle,
@@ -346,12 +394,24 @@ private fun Bubble(msg: ChatMessage, fontSize: Int = 14) {
                             h5 = chatStyle.copy(fontSize = fontSize.sp, fontWeight = FontWeight.Bold),
                             h6 = chatStyle.copy(fontSize = (fontSize - 1).coerceAtLeast(8).sp, fontWeight = FontWeight.Bold)
                         ),
+                        // Color bold/italic text orange — since we convert `code` to **code**.
+                        // We consume the node (return true), strip the markdown markers
+                        // ourselves, and pop the span so the color doesn't leak into
+                        // following text.
                         annotator = markdownAnnotator { content, node ->
-                            if (node.type.name == "CODE_SPAN") {
-                                pushStyle(codeSpanStyle)
-                                append(content.substring(node.startOffset + 1, node.endOffset - 1))
+                            if (node.type.name == "STRONG" || node.type.name == "EMPH") {
+                                val raw = content.substring(node.startOffset, node.endOffset)
+                                val stripped = when {
+                                    raw.startsWith("**") && raw.endsWith("**") -> raw.substring(2, raw.length - 2)
+                                    raw.startsWith("__") && raw.endsWith("__") -> raw.substring(2, raw.length - 2)
+                                    raw.startsWith("*") && raw.endsWith("*") -> raw.substring(1, raw.length - 1)
+                                    raw.startsWith("_") && raw.endsWith("_") -> raw.substring(1, raw.length - 1)
+                                    else -> raw
+                                }
+                                pushStyle(SpanStyle(color = Color(0xFFFF4500)))
+                                append(stripped)
                                 pop()
-                                true // handled — skip default monospace
+                                true
                             } else false
                         },
                     )

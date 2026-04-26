@@ -19,6 +19,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+
 import android.telephony.PhoneStateListener
 import android.telephony.SignalStrength
 import android.telephony.TelephonyManager
@@ -193,7 +194,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
         state.openClawHideChat = openClawPrefs.hideChat
         state.chatFontSize = openClawPrefs.chatFontSize
-
         loadApps()
 
         setContent {
@@ -443,6 +443,10 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
     private fun openClawStartSession() {
         if (openClawSession != null) return
+        // Hydrate session state from prefs so the chat panel can render pills
+        // and pick the right thread before the WebSocket finishes its handshake.
+        state.selectedSessionKey = openClawPrefs.selectedSessionKey?.takeUnless { it.isBlank() } ?: "main"
+        state.mainSessionKey = openClawPrefs.lastMainSessionKey?.takeUnless { it.isBlank() } ?: "main"
         val session = GatewaySession(this, openClawPrefs)
         session.onState = { st ->
             ui.post {
@@ -450,7 +454,19 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     GatewaySession.State.Idle -> "idle"
                     GatewaySession.State.Connecting -> "connecting"
                     is GatewaySession.State.Live -> "live"
+                    is GatewaySession.State.Switching -> "switching"
                     is GatewaySession.State.Error -> "error: ${st.message}"
+                }
+                if (st is GatewaySession.State.Live) {
+                    state.selectedSessionKey = st.sessionKey
+                    // One-shot fetch of available threads after the gateway is up.
+                    if (state.chatSessions.isEmpty() && !state.sessionsLoading) {
+                        state.sessionsLoading = true
+                        openClawSession?.listSessions()
+                    }
+                }
+                if (st is GatewaySession.State.Switching) {
+                    state.selectedSessionKey = st.sessionKey
                 }
                 // Self-recover if the saved bootstrap is dead. Wipe the bad
                 // token + (still-empty) device key, route back to the QR panel
@@ -496,13 +512,24 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         session.onChatTerminal = { runId, evState, errMsg ->
             ui.post {
                 if (runId != null) state.chatPendingRunIds.remove(runId)
+                // Clear the streaming preview so it doesn't duplicate the
+                // final message that refreshHistory() is about to load.
                 state.chatStreamingText = ""
                 state.chatBusy = false
-                if (evState == "error" && !errMsg.isNullOrBlank()) toast("chat: $errMsg")
-                // Server is authoritative — refresh history on every terminal
-                // event so slash commands, multi-operator changes, and errors
-                // all converge on the canonical state.
                 openClawSession?.refreshHistory()
+            }
+        }
+        session.onMainSessionKey = { key ->
+            ui.post {
+                state.mainSessionKey = key
+                openClawPrefs.lastMainSessionKey = key
+            }
+        }
+        session.onSessions = { list ->
+            ui.post {
+                state.chatSessions.clear()
+                state.chatSessions.addAll(list)
+                state.sessionsLoading = false
             }
         }
         openClawSession = session
@@ -521,6 +548,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         openClawCapture = null
         runCatching { openClawSession?.stop() }
         openClawSession = null
+
         state.chatRecording = false
         state.chatBusy = false
         state.chatPartialText = ""
@@ -1007,12 +1035,64 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         toast("gateway disconnected")
     }
 
+    override fun openClawSwitchSession(key: String) {
+        val target = key.trim()
+        if (target.isEmpty() || target == state.selectedSessionKey) return
+        val session = openClawSession ?: return
+        // Reset chat UI immediately so the user sees the switch take effect even
+        // before the new history lands. GatewaySession.switchSession will fire
+        // onHistory once the new thread's messages are fetched.
+        state.chatMessages.clear()
+        state.chatStreamingText = ""
+        state.chatPendingRunIds.clear()
+        state.chatScrollIndex = 0
+        state.chatBusy = false
+        state.selectedSessionKey = target
+        openClawPrefs.selectedSessionKey = target
+        session.switchSession(target)
+    }
+
+    override fun openClawRefreshSessions() {
+        val session = openClawSession ?: return
+        if (state.sessionsLoading) return
+        state.sessionsLoading = true
+        session.listSessions()
+    }
+
+    override fun openClawSessionsRowActivate(idx: Int) {
+        // Mirrors OpenClawSessionsPanel row order:
+        //   0           "< back"
+        //   1..choices  switch to that thread
+        //   choices+1   "refresh"
+        if (idx == 0) {
+            state.back(); backTone(); return
+        }
+        val choices = com.r1.launcher.openclaw.resolveSessionChoices(
+            currentSessionKey = state.selectedSessionKey,
+            sessions = state.chatSessions.toList(),
+            mainSessionKey = state.mainSessionKey,
+        )
+        val refreshIdx = 1 + choices.size.coerceAtLeast(1)
+        if (idx == refreshIdx) {
+            openClawRefreshSessions()
+            popTone()
+            return
+        }
+        val choice = choices.getOrNull(idx - 1) ?: return
+        if (choice.key != state.selectedSessionKey) {
+            openClawSwitchSession(choice.key)
+        }
+        state.back()
+    }
+
     override fun openClawSetFontSize(size: Int) {
         val clamped = size.coerceIn(8, 28)
         state.chatFontSize = clamped
         openClawPrefs.chatFontSize = clamped
         popTone()
     }
+
+
 
     private fun refreshOpenaiKeyState() {
         val k = openClawPrefs.openaiKey
@@ -1114,9 +1194,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val code = event.keyCode
-        if (event.action == KeyEvent.ACTION_DOWN && !event.isLongPress) {
-            showDebugKey(code, event)
-        }
 
         // Side button is remapped from HOME → BUTTON_1 in the keylayout
         // (/data/system/devices/keylayout/mtk-kpd.kl). HOME-mapped keys collapse
@@ -1124,13 +1201,24 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         // BUTTON_1 has no framework handling, so we get raw DOWN/UP here.
         if (code == KeyEvent.KEYCODE_BUTTON_1) {
             if (state.panel == Panel.OPENCLAW_CHAT) {
+                // PTT diagnostic logging — capture every DOWN/UP with flags so
+                // we can see what's cutting the recording short on long holds.
+                val canceled = (event.flags and KeyEvent.FLAG_CANCELED) != 0
+                android.util.Log.d(
+                    "LauncherActivity",
+                    "BUTTON_1 action=${event.action} rpt=${event.repeatCount} " +
+                        "canceled=$canceled flags=0x${Integer.toHexString(event.flags)} " +
+                        "down=${event.downTime} event=${event.eventTime}"
+                )
                 when (event.action) {
                     KeyEvent.ACTION_DOWN -> {
                         if (event.repeatCount == 0) openClawRecordStart()
                         return true
                     }
                     KeyEvent.ACTION_UP -> {
-                        openClawRecordStop()
+                        // Ignore framework-canceled UPs (long-press intercept,
+                        // focus loss, etc.) — only stop on a real release.
+                        if (!canceled) openClawRecordStop()
                         return true
                     }
                 }
@@ -1197,16 +1285,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         else -> false
     }
 
-    private val hideDebug = Runnable { state.debugKeyVisible = false }
-
-    private fun showDebugKey(code: Int, ev: KeyEvent) {
-        if (!state.showDebugBar) return
-        val name = KeyEvent.keyCodeToString(code)
-        state.debugKeyText = "key $code sc ${ev.scanCode}  $name"
-        state.debugKeyVisible = true
-        ui.removeCallbacks(hideDebug)
-        ui.postDelayed(hideDebug, 2500)
-    }
 
     // --- misc helpers ---
 

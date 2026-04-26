@@ -67,12 +67,29 @@ class OpenClawPrefs private constructor(ctx: Context) {
         get() = plain.getInt(KEY_CHAT_FONT_SIZE, 14)
         set(value) = plain.edit { putInt(KEY_CHAT_FONT_SIZE, value) }
 
+
+
+    var selectedSessionKey: String?
+        get() = plain.getString(KEY_SELECTED_SESSION, null)
+        set(value) = plain.edit {
+            if (value.isNullOrBlank()) remove(KEY_SELECTED_SESSION) else putString(KEY_SELECTED_SESSION, value)
+        }
+
+    var lastMainSessionKey: String?
+        get() = plain.getString(KEY_LAST_MAIN_SESSION, null)
+        set(value) = plain.edit {
+            if (value.isNullOrBlank()) remove(KEY_LAST_MAIN_SESSION) else putString(KEY_LAST_MAIN_SESSION, value)
+        }
+
     fun hasPairing(): Boolean = !gatewayUrl.isNullOrBlank() &&
         (!deviceToken.isNullOrBlank() || !bootstrapToken.isNullOrBlank() || !sharedToken.isNullOrBlank())
 
     fun clear() {
         secure.edit {
             remove(KEY_URL); remove(KEY_BOOTSTRAP); remove(KEY_DEVICE_TOKEN); remove(KEY_SHARED_TOKEN)
+        }
+        plain.edit {
+            remove(KEY_SELECTED_SESSION); remove(KEY_LAST_MAIN_SESSION)
         }
     }
 
@@ -85,6 +102,9 @@ class OpenClawPrefs private constructor(ctx: Context) {
         private const val KEY_OPENAI_KEY = "openai.key"
         private const val KEY_HIDE_CHAT = "chat.hide"
         private const val KEY_CHAT_FONT_SIZE = "chat.fontSize"
+
+        private const val KEY_SELECTED_SESSION = "chat.selectedSessionKey"
+        private const val KEY_LAST_MAIN_SESSION = "chat.lastMainSessionKey"
 
         @Volatile private var instance: OpenClawPrefs? = null
         fun get(ctx: Context): OpenClawPrefs =

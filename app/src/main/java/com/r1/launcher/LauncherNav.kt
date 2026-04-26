@@ -44,6 +44,9 @@ interface LauncherHost {
     fun openClawClearHistory()
     fun openClawDisconnect()
     fun openClawSetFontSize(size: Int)
+    fun openClawSwitchSession(key: String)
+    fun openClawRefreshSessions()
+    fun openClawSessionsRowActivate(idx: Int)
 }
 
 fun LauncherState.wheelUp(host: LauncherHost) {
@@ -119,6 +122,13 @@ fun LauncherState.wheelUp(host: LauncherHost) {
                 openClawSettingsFocus--; host.navTone()
             }
         }
+        Panel.OPENCLAW_SESSIONS -> {
+            if (openClawSessionsFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                openClawSessionsFocus--; host.navTone()
+            }
+        }
         Panel.HOME -> {
             val prev = homeFocus
             homeFocus = (homeFocus - 1).coerceAtLeast(0)
@@ -153,7 +163,7 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.SETTINGS -> {
             val prev = settingsFocus
-            settingsFocus = (settingsFocus + 1).coerceAtMost(6)
+            settingsFocus = (settingsFocus + 1).coerceAtMost(5)
             if (prev != settingsFocus) host.navTone()
         }
         Panel.NETWORK -> {
@@ -191,6 +201,22 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             openClawSettingsFocus = (openClawSettingsFocus + 1).coerceAtMost(5)
             if (prev != openClawSettingsFocus) host.navTone()
         }
+        Panel.OPENCLAW_SESSIONS -> {
+            // Row layout matches OpenClawSessionsPanel:
+            //   0           "< back"
+            //   1..choices  one row per resolveSessionChoices entry
+            //              (or a single placeholder row when choices is empty)
+            //   choices+1   "refresh"
+            val choiceCount = com.r1.launcher.openclaw.resolveSessionChoices(
+                currentSessionKey = selectedSessionKey,
+                sessions = chatSessions.toList(),
+                mainSessionKey = mainSessionKey,
+            ).size.coerceAtLeast(1)
+            val max = 1 + choiceCount // back + choices + refresh = 2+choices, last index = 1+choices
+            val prev = openClawSessionsFocus
+            openClawSessionsFocus = (openClawSessionsFocus + 1).coerceAtMost(max)
+            if (prev != openClawSessionsFocus) host.navTone()
+        }
         Panel.HOME -> {
             openApps()
             host.selectTone()
@@ -221,8 +247,8 @@ fun LauncherState.activate(host: LauncherHost) {
             1 -> { openNetwork(); host.selectTone() }
             2 -> { openBrightness(); host.selectTone() }
             3 -> { openVolume(); host.selectTone() }
-            4 -> { showDebugBar = !showDebugBar; host.popTone() }
-            5 -> { host.checkForUpdate(); host.selectTone() }
+            4 -> { host.checkForUpdate(); host.selectTone() }
+            5 -> { /* Info row */ }
         }
         Panel.NETWORK -> when (networkFocus) {
             0 -> { back(); host.backTone() }
@@ -247,6 +273,10 @@ fun LauncherState.activate(host: LauncherHost) {
         Panel.OPENCLAW_CHAT -> { host.openClawToggleRecord(); host.popTone() }
         Panel.OPENCLAW_SETTINGS -> {
             host.openClawSettingsRowActivate(openClawSettingsFocus)
+            host.selectTone()
+        }
+        Panel.OPENCLAW_SESSIONS -> {
+            host.openClawSessionsRowActivate(openClawSessionsFocus)
             host.selectTone()
         }
         Panel.HOME -> when (homeFocus) {

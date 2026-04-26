@@ -82,7 +82,6 @@ fun SettingsPanel(
             SettingsItem.Standard("network"),
             SettingsItem.Standard("brightness"),
             SettingsItem.Standard("volume"),
-            SettingsItem.Toggle("show key debug", state.showDebugBar),
             SettingsItem.Standard("check for updates"),
             SettingsItem.Info("about", "R1 Launcher v$versionName"),
         )

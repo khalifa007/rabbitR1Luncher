@@ -1,26 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">R1 Home</string>
-    <string name="folder_network">System</string>
-    <string name="folder_store">Store</string>
-    <string name="store_install">Install</string>
-    <string name="store_installed">Installed</string>
-    <string name="store_update">Update</string>
     <string name="store_empty">Catalog empty</string>
     <string name="store_error">Couldn\'t load catalog</string>
-    <string name="store_detail_open">Open</string>
-    <string name="store_detail_uninstall">Uninstall</string>
-    <string name="back">← Back</string>
     <string name="item_wifi">Wi-Fi</string>
     <string name="item_mobile">Reboot</string>
     <string name="item_bluetooth">Power off</string>
     <string name="item_update">Check for update</string>
-    <string name="close">Close</string>
-    <string name="apps_header">APPS</string>
-    <string name="system_header">System</string>
-    <string name="apps_title">Apps</string>
     <string name="store_title">Store</string>
     <string name="home_back">Home</string>
-    <string name="home_hint">scroll wheel · click to open</string>
     <string name="accessibility_description">Lets the R1 Launcher open the system Power Dialog. Required for the Power and Reboot buttons.</string>
 </resources>

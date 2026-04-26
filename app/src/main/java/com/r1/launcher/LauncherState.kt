@@ -7,8 +7,9 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.r1.launcher.openclaw.ChatMessage
+import com.r1.launcher.openclaw.SessionEntry
 
-enum class Panel { HOME, SHEET, APPS, STORE, DETAIL, SETTINGS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, BRIGHTNESS, VOLUME, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_SETTINGS }
+enum class Panel { HOME, SHEET, APPS, STORE, DETAIL, SETTINGS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, BRIGHTNESS, VOLUME, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS }
 
 /**
  * Single container for all UI state. Activity mutates; Compose reads.
@@ -111,12 +112,18 @@ class LauncherState {
     var openClawHideChat by mutableStateOf(false)
     /** Chat font size in sp. Adjustable from OpenClaw settings. */
     var chatFontSize by mutableIntStateOf(14)
-
-    // --- debug key overlay ---
-    var debugKeyText by mutableStateOf("")
-    var debugKeyVisible by mutableStateOf(false)
-    /** User-toggled in Settings: when false, key codes never light up the overlay. */
-    var showDebugBar by mutableStateOf(true)
+    /** Auto-speak assistant replies via Android TextToSpeech when terminal events fire. */
+    var chatTtsEnabled by mutableStateOf(false)
+    /** Available threads from sessions.list. Driven by GatewaySession.onSessions. */
+    val chatSessions = mutableStateListOf<SessionEntry>()
+    /** Currently active thread key. Persisted across launches via OpenClawPrefs. */
+    var selectedSessionKey by mutableStateOf("main")
+    /** Server-snapshot main session key from connect response. */
+    var mainSessionKey by mutableStateOf("main")
+    /** True while a sessions.list refresh is in flight. */
+    var sessionsLoading by mutableStateOf(false)
+    /** Focus index for the OPENCLAW_SESSIONS panel rows. */
+    var openClawSessionsFocus by mutableIntStateOf(0)
 
     // --- state transitions ---
 
@@ -184,6 +191,11 @@ class LauncherState {
         panel = Panel.OPENCLAW_CHAT
     }
 
+    fun openOpenClawSessions() {
+        openClawSessionsFocus = 0
+        panel = Panel.OPENCLAW_SESSIONS
+    }
+
     fun openOpenClawSettings() {
         // Pre-fill input with the current key (masked rendering happens in UI).
         // Empty string when no key is set.
@@ -206,7 +218,7 @@ class LauncherState {
             Panel.SETTINGS -> Panel.APPS
             Panel.STORE, Panel.APPS, Panel.SHEET -> Panel.HOME
             Panel.OPENCLAW_QR, Panel.OPENCLAW_CHAT -> Panel.APPS
-            Panel.OPENCLAW_SETTINGS -> Panel.OPENCLAW_CHAT
+            Panel.OPENCLAW_SETTINGS, Panel.OPENCLAW_SESSIONS -> Panel.OPENCLAW_CHAT
             Panel.HOME -> Panel.HOME
         }
         if (panel != Panel.DETAIL) detailEntry = null
