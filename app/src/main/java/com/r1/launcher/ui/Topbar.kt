@@ -12,6 +12,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -29,6 +30,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -74,7 +76,15 @@ fun Topbar(state: LauncherState, modifier: Modifier = Modifier) {
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.weight(1f),
         ) {
-            if (state.simPresent) {
+            if (state.simPresent && state.cellularOn) {
+                if (state.networkType.isNotEmpty()) {
+                    Text(
+                        text = state.networkType,
+                        style = type.appCard.copy(fontSize = 12.sp, fontWeight = FontWeight.Bold),
+                        color = Color(0xFFFF6B00),
+                        modifier = Modifier.padding(end = 4.dp)
+                    )
+                }
                 Image(
                     painter = painterResource(R.drawable.ic_signal_bars),
                     contentDescription = null,
@@ -83,7 +93,7 @@ fun Topbar(state: LauncherState, modifier: Modifier = Modifier) {
                 )
                 IconSpacer()
             }
-            if (state.wifiOn) {
+            if (state.wifiEnabled && state.wifiOn) {
                 Image(
                     painter = painterResource(R.drawable.ic_wifi_arc),
                     contentDescription = null,
@@ -105,12 +115,6 @@ fun Topbar(state: LauncherState, modifier: Modifier = Modifier) {
                 UpdateIcon(rotating = state.updateIconState == 2, halfAlpha = state.updateIconState == 1)
                 IconSpacer()
             }
-            Text(
-                text = "${(state.batteryPct * 100).toInt()}%",
-                style = type.appCard.copy(fontSize = 16.sp),
-                color = Color(0xFFFF6B00),
-                modifier = Modifier.padding(end = 6.dp)
-            )
             BatteryPill(pct = state.batteryPct)
         }
     }
@@ -147,30 +151,31 @@ private fun UpdateIcon(rotating: Boolean, halfAlpha: Boolean) {
     )
 }
 
-/**
- * Battery pill — 18x9dp border box, inner fill scales horizontally to pct (min 8%).
- * Pivot is left edge so the fill "drains from the right" like a real battery.
- */
 @Composable
 private fun BatteryPill(pct: Float) {
-    val fillColors = LocalR1Colors.current
     val scale = pct.coerceIn(0.08f, 1f)
     Box(
+        contentAlignment = Alignment.Center,
         modifier = Modifier
-            .size(width = 18.dp, height = 9.dp)
+            .size(width = 26.dp, height = 12.dp)
             .border(1.dp, Color(0xFFFF6B00), RoundedCornerShape(3.dp))
             .padding(1.dp),
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(7.dp)
+                .fillMaxHeight()
                 .graphicsLayer {
                     scaleX = scale
                     transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0.5f)
                 }
                 .clip(RoundedCornerShape(2.dp))
                 .background(Color(0xFFFF6B00)),
+        )
+        Text(
+            text = "${(pct * 100).toInt()}",
+            style = LocalR1Type.current.appCard.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
+            color = if (pct > 0.5f) Color.Black else Color.White,
         )
     }
 }

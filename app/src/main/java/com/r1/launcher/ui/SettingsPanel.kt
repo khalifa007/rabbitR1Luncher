@@ -13,6 +13,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -49,9 +50,9 @@ import com.r1.launcher.Panel
 private val HIGHLIGHT_BG = Color(0xFFFF4500) // Orange pill background
 private val TRACK_OFF = Color(0xFF333333)
 
-private sealed class Item(val label: String) {
-    class Standard(label: String) : Item(label)
-    class Toggle(label: String, val checked: Boolean) : Item(label)
+internal sealed class SettingsItem(val label: String) {
+    class Standard(label: String) : SettingsItem(label)
+    class Toggle(label: String, val checked: Boolean, val subtitle: String = "") : SettingsItem(label)
 }
 
 @Composable
@@ -67,10 +68,11 @@ fun SettingsPanel(
             slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
     ) {
         val items = listOf(
-            Item.Standard("< back"),
-            Item.Standard("brightness"),
-            Item.Standard("volume"),
-            Item.Toggle("show key debug", state.showDebugBar),
+            SettingsItem.Standard("< back"),
+            SettingsItem.Standard("network"),
+            SettingsItem.Standard("brightness"),
+            SettingsItem.Standard("volume"),
+            SettingsItem.Toggle("show key debug", state.showDebugBar),
         )
 
         val listState = rememberLazyListState()
@@ -93,7 +95,8 @@ fun SettingsPanel(
                     SettingsRow(
                         label = item.label,
                         focused = idx == state.settingsFocus,
-                        toggleChecked = (item as? Item.Toggle)?.checked,
+                        toggleChecked = (item as? SettingsItem.Toggle)?.checked,
+                        subtitle = (item as? SettingsItem.Toggle)?.subtitle ?: "",
                         onClick = { onRowClick(idx) },
                     )
                 }
@@ -103,10 +106,11 @@ fun SettingsPanel(
 }
 
 @Composable
-private fun SettingsRow(
+internal fun SettingsRow(
     label: String,
     focused: Boolean,
-    toggleChecked: Boolean?,
+    toggleChecked: Boolean? = null,
+    subtitle: String = "",
     onClick: () -> Unit,
 ) {
     val bgColor = if (focused) HIGHLIGHT_BG else Color.Transparent
@@ -125,14 +129,24 @@ private fun SettingsRow(
                 .background(bgColor)
                 .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
-            Text(
-                text = label,
-                color = textColor,
-                fontSize = 24.sp,
-                fontFamily = type.appCard.fontFamily,
-                fontWeight = FontWeight.Medium,
-            )
-            
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = label,
+                    color = textColor,
+                    fontSize = 24.sp,
+                    fontFamily = type.appCard.fontFamily,
+                    fontWeight = FontWeight.Medium,
+                )
+                if (subtitle.isNotEmpty()) {
+                    Text(
+                        text = subtitle,
+                        color = Color(0xFFFF4500),
+                        fontSize = 14.sp,
+                        fontFamily = type.appCard.fontFamily,
+                        fontWeight = FontWeight.Normal,
+                    )
+                }
+            }
             if (toggleChecked != null) {
                 Spacer(modifier = Modifier.width(8.dp))
                 MinimalSwitch(
@@ -145,7 +159,7 @@ private fun SettingsRow(
 }
 
 @Composable
-private fun MinimalSwitch(checked: Boolean, focused: Boolean, modifier: Modifier = Modifier) {
+internal fun MinimalSwitch(checked: Boolean, focused: Boolean, modifier: Modifier = Modifier) {
     val thumbOffset by animateDpAsState(
         targetValue = if (checked) 16.dp else 0.dp,
         animationSpec = tween(160),

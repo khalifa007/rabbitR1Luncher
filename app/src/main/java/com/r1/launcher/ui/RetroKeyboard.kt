@@ -34,7 +34,7 @@ fun RetroKeyboard(
     var isNumeric by remember { mutableStateOf(false) }
 
     val row1 = if (isNumeric) listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0") else listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p")
-    val row2 = if (isNumeric) listOf("@", "#", "$", "%", "&", "-", "+", "(", ")") else listOf("a", "s", "d", "f", "g", "h", "j", "k", "l")
+    val row2 = if (isNumeric) listOf("@", "#", "$", "%", "&", "-", "+", "(", ")") else listOf("a", "s", "d", "f", "g", "h", "j", "k", "l", "/")
     val row3 = if (isNumeric) listOf("*", "\"", "'", ":", ";", "!", "?", "/", "<") else listOf("^", "z", "x", "c", "v", "b", "n", "m", "<")
     val row4 = listOf(if (isNumeric) "abc" else "123", ",", "space", ".", "hide")
 

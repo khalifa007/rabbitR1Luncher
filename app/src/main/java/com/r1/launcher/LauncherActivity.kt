@@ -120,6 +120,25 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
     }
 
+    // adb-installable openai key receiver:
+    //   adb shell "am broadcast -a com.r1.launcher.SET_OPENAI_KEY --es key sk-..."
+    // Lets the user inject the Whisper API key without typing it on a 480x480
+    // round screen. Receiver is exported so adb (uid 2000) can reach it.
+    private val openaiKeyRx = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent?) {
+            val k = i?.getStringExtra("key")?.trim().orEmpty()
+            when {
+                k.isEmpty() -> toast("--es key missing")
+                !k.startsWith("sk-") || k.length < 20 -> toast("not an openai key")
+                else -> {
+                    openClawPrefs.openaiKey = k
+                    refreshOpenaiKeyState()
+                    toast("key saved via adb")
+                }
+            }
+        }
+    }
+
     private val tick: Runnable = object : Runnable {
         override fun run() {
             val now = Date()
@@ -169,6 +188,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         appStore = AppStore(this).apply {
             setStatusListener { phase, slug, pct, msg -> onStoreStatus(phase, slug, pct, msg) }
         }
+
+        state.openClawHideChat = openClawPrefs.hideChat
 
         loadApps()
 
@@ -240,6 +261,13 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
         registerReceiver(packageRx, pkgFilter)
 
+        val keyFilter = IntentFilter("com.r1.launcher.SET_OPENAI_KEY")
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(openaiKeyRx, keyFilter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(openaiKeyRx, keyFilter)
+        }
+
         runCatching {
             telephony?.listen(phoneListener, PhoneStateListener.LISTEN_SIGNAL_STRENGTHS)
         }
@@ -260,6 +288,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         runCatching { unregisterReceiver(netRx) }
         runCatching { unregisterReceiver(batteryRx) }
         runCatching { unregisterReceiver(packageRx) }
+        runCatching { unregisterReceiver(openaiKeyRx) }
         runCatching { telephony?.listen(phoneListener, PhoneStateListener.LISTEN_NONE) }
     }
 
@@ -298,6 +327,27 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             }
         }
         state.wifiOn = wifiConnected
+        runCatching {
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            if (wm != null) state.wifiEnabled = wm.isWifiEnabled
+        }
+
+        // Asynchronously fetch connected SSID name via root shell
+        if (state.wifiOn) {
+            Thread {
+                if (sendToCarroot("cmd wifi status > /data/local/tmp/wifi_status.txt && chmod 666 /data/local/tmp/wifi_status.txt")) {
+                    Thread.sleep(300)
+                    try {
+                        val txt = java.io.File("/data/local/tmp/wifi_status.txt").readText()
+                        val match = Regex("Wifi is connected to \"(.*?)\"").find(txt)
+                        val ssid = match?.groupValues?.get(1) ?: ""
+                        ui.post { state.wifiConnectedSsid = ssid }
+                    } catch (e: Exception) {}
+                }
+            }.start()
+        } else {
+            state.wifiConnectedSsid = ""
+        }
     }
 
     private fun refreshBluetooth() {
@@ -319,6 +369,33 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             state.simOperator = tm.networkOperatorName
                 ?: tm.simOperatorName
                 ?: "SIM"
+            runCatching {
+                state.cellularOn = tm.isDataEnabled
+            }
+
+            // Fetch data network type via carroot
+            if (state.cellularOn) {
+                Thread {
+                    if (sendToCarroot("dumpsys telephony.registry > /data/local/tmp/telephony.txt && chmod 666 /data/local/tmp/telephony.txt")) {
+                        Thread.sleep(300)
+                        try {
+                            val txt = java.io.File("/data/local/tmp/telephony.txt").readText()
+                            val match = Regex("network type: ([A-Za-z0-9_]+)").find(txt)
+                            val type = match?.groupValues?.get(1) ?: ""
+                            val displayType = when (type) {
+                                "LTE", "LTE_CA" -> "4G"
+                                "NR" -> "5G"
+                                "HSPAP", "HSPA", "UMTS", "WCDMA" -> "3G"
+                                "EDGE", "GPRS" -> "2G"
+                                else -> type
+                            }
+                            ui.post { state.networkType = displayType }
+                        } catch (e: Exception) {}
+                    }
+                }.start()
+            } else {
+                state.networkType = ""
+            }
         }
     }
 
@@ -349,6 +426,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             AppEntry.OpenClaw -> {
                 selectTone()
                 if (openClawPrefs.hasPairing()) {
+                    refreshOpenaiKeyState()
                     openClawStartSession()
                     state.openOpenClawChat()
                 } else {
@@ -407,6 +485,17 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
         session.onChatStream = { msg, evState ->
             ui.post {
+                val terminal = evState == "final" || evState == "error" || evState == "aborted"
+                // Slash commands fire a terminal event with no message text —
+                // surface as a state-only update (clear busy, no empty bubble).
+                if (terminal && msg.text.isBlank()) {
+                    val tail = state.chatMessages.lastOrNull()
+                    if (tail != null && tail.streaming) {
+                        state.chatMessages[state.chatMessages.lastIndex] = tail.copy(streaming = false)
+                    }
+                    state.chatBusy = false
+                    return@post
+                }
                 val last = state.chatMessages.lastOrNull()
                 if (last != null && last.streaming && last.role == msg.role) {
                     state.chatMessages[state.chatMessages.lastIndex] =
@@ -414,7 +503,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 } else {
                     state.chatMessages.add(msg.copy(streaming = evState == "delta"))
                 }
-                if (evState == "final" || evState == "error" || evState == "aborted") {
+                if (terminal) {
                     val tail = state.chatMessages.lastOrNull()
                     if (tail != null && tail.streaming) {
                         state.chatMessages[state.chatMessages.lastIndex] = tail.copy(streaming = false)
@@ -553,6 +642,95 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.back()
     }
 
+    override fun toggleWifi(enable: Boolean) {
+        state.wifiEnabled = enable
+        val cmd = if (enable) "svc wifi enable" else "svc wifi disable"
+        Thread {
+            if (sendToCarroot(cmd)) {
+                // Wait briefly and refresh UI state
+                Thread.sleep(1500)
+                ui.post { refreshNetwork() }
+            } else {
+                ui.post { 
+                    state.wifiEnabled = !enable
+                    toast("Root shell unavailable for Wi-Fi toggle") 
+                }
+            }
+        }.start()
+    }
+
+    override fun toggleCellular(enable: Boolean) {
+        state.cellularOn = enable
+        val cmd = if (enable) "svc data enable" else "svc data disable"
+        Thread {
+            if (sendToCarroot(cmd)) {
+                Thread.sleep(1500)
+                ui.post { refreshSim() }
+            } else {
+                ui.post { 
+                    state.cellularOn = !enable
+                    toast("Root shell unavailable for data toggle") 
+                }
+            }
+        }.start()
+    }
+
+    override fun startWifiScan() {
+        state.wifiScanResults.clear()
+        state.wifiScanResults.add("Scanning...")
+        Thread {
+            if (sendToCarroot("cmd wifi start-scan")) {
+                Thread.sleep(2000)
+                sendToCarroot("cmd wifi list-scan-results > /data/local/tmp/wifi.txt && chmod 666 /data/local/tmp/wifi.txt")
+                Thread.sleep(500)
+                try {
+                    val lines = java.io.File("/data/local/tmp/wifi.txt").readLines()
+                    val ssids = mutableSetOf<String>()
+                    for (i in 1 until lines.size) {
+                        val line = lines[i].trim()
+                        if (line.isEmpty()) continue
+                        val parts = line.split(Regex("\\s+"))
+                        if (parts.size >= 6) {
+                            val ssid = parts.drop(4).dropLast(1).joinToString(" ").trim()
+                            if (ssid.isNotBlank()) ssids.add(ssid)
+                        }
+                    }
+                    ui.post {
+                        state.wifiScanResults.clear()
+                        if (ssids.isEmpty()) {
+                            state.wifiScanResults.add("No networks found")
+                        } else {
+                            state.wifiScanResults.addAll(ssids.sorted())
+                        }
+                    }
+                } catch (e: Exception) {
+                    ui.post {
+                        state.wifiScanResults.clear()
+                        state.wifiScanResults.add("Error reading scan")
+                    }
+                }
+            } else {
+                ui.post {
+                    state.wifiScanResults.clear()
+                    state.wifiScanResults.add("Root shell unavailable")
+                }
+            }
+        }.start()
+    }
+
+    override fun connectToWifi(ssid: String, pass: String) {
+        state.back()
+        toast("Connecting to $ssid...")
+        Thread {
+            val escapedSsid = ssid.replace("\"", "\\\"")
+            val escapedPass = pass.replace("\"", "\\\"")
+            val cmd = "cmd wifi connect-network \"$escapedSsid\" wpa2 \"$escapedPass\""
+            sendToCarroot(cmd)
+            Thread.sleep(2000)
+            ui.post { refreshNetwork() }
+        }.start()
+    }
+
     override fun requestReboot(powerOff: Boolean) {
         state.back()
         val cmd = if (powerOff) "reboot -p" else "reboot"
@@ -639,18 +817,20 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     override fun openClawToggleRecord() {
+        val cap = openClawCapture
+        if (cap != null && cap.isRecording) openClawRecordStop() else openClawRecordStart()
+    }
+
+    override fun openClawRecordStart() {
         val session = openClawSession ?: return
         if (state.chatStatus.startsWith("error") || state.chatStatus == "idle") return
         if (!ensureAudioPerm()) return
         val cap = openClawCapture ?: com.r1.launcher.openclaw.AudioCapture().also { openClawCapture = it }
-        if (cap.isRecording) {
-            // Toggle off — feeder thread will fire onDone with the WAV bytes.
-            cap.stop()
-            state.chatRecording = false
-        } else {
-            state.chatPartialText = ""
-            state.chatRecording = true
-            cap.start(object : com.r1.launcher.openclaw.AudioCapture.Callback {
+        if (cap.isRecording) return
+        if (movingSoundId != 0) soundPool?.play(movingSoundId, 1f, 1f, 0, 0, 1f)
+        state.chatPartialText = ""
+        state.chatRecording = true
+        cap.start(object : com.r1.launcher.openclaw.AudioCapture.Callback {
                 override fun onDone(wavBytes: ByteArray, durationMs: Int, peakPct: Int) {
                     ui.post {
                         state.chatRecording = false
@@ -659,25 +839,55 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                             toast(if (peakPct < 2) "no audio captured" else "too short")
                             return@post
                         }
-                        val b64 = android.util.Base64.encodeToString(
-                            wavBytes, android.util.Base64.NO_WRAP,
-                        )
-                        state.chatBusy = true
-                        // Empty text + audio attachment — gateway transcribes.
-                        // Optimistic bubble is skipped; the user message will
-                        // appear once gateway history syncs back the transcript.
-                        session.send(text = "", audioBase64 = b64)
+                        val key = openClawPrefs.openaiKey
+                        if (key.isNullOrBlank()) {
+                            toast("set openai key first (tap key pill)")
+                            return@post
+                        }
+                        // Hand the WAV to Whisper. While it's in flight, show
+                        // a transcribing indicator in the header.
+                        state.chatTranscribing = true
+                        com.r1.launcher.openclaw.WhisperClient.transcribe(
+                            wavBytes = wavBytes,
+                            apiKey = key,
+                        ) { transcript, err ->
+                            state.chatTranscribing = false
+                            if (err != null) {
+                                toast("whisper: $err")
+                                return@transcribe
+                            }
+                            val text = transcript?.trim().orEmpty()
+                            if (text.isEmpty()) {
+                                toast("whisper: empty transcript")
+                                return@transcribe
+                            }
+                            state.chatMessages.add(
+                                com.r1.launcher.openclaw.ChatMessage(
+                                    role = "user", text = text,
+                                )
+                            )
+                            state.chatScrollIndex = 0
+                            state.chatBusy = true
+                            session.send(text = text, audioBase64 = null)
+                        }
                     }
                 }
-                override fun onError(msg: String) {
-                    ui.post {
-                        state.chatRecording = false
-                        state.chatPartialText = ""
-                        toast("mic: $msg")
-                    }
+            override fun onError(msg: String) {
+                ui.post {
+                    state.chatRecording = false
+                    state.chatPartialText = ""
+                    toast("mic: $msg")
                 }
-            })
-        }
+            }
+        })
+    }
+
+    override fun openClawRecordStop() {
+        val cap = openClawCapture ?: return
+        if (!cap.isRecording) return
+        cap.stop()
+        state.chatRecording = false
+        if (popSoundId != 0) soundPool?.play(popSoundId, 1f, 1f, 0, 0, 1f)
     }
 
     override fun openClawSendText(text: String) {
@@ -709,6 +919,78 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
     override fun openClawCloseSession() {
         openClawCloseSessionInternal()
+    }
+
+    override fun openClawPasteOpenaiKey() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val raw = cm?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()?.trim().orEmpty()
+        if (raw.isEmpty()) {
+            toast("clipboard empty"); return
+        }
+        if (!raw.startsWith("sk-") || raw.length < 20) {
+            toast("not an openai key"); return
+        }
+        openClawPrefs.openaiKey = raw
+        refreshOpenaiKeyState()
+        toast("key saved")
+    }
+
+    override fun openClawClearOpenaiKey() {
+        openClawPrefs.openaiKey = null
+        refreshOpenaiKeyState()
+        toast("key cleared")
+    }
+
+    override fun openClawSaveOpenaiKey(key: String) {
+        val k = key.trim()
+        when {
+            k.isEmpty() -> { toast("key is empty"); return }
+            !k.startsWith("sk-") || k.length < 20 -> { toast("not an openai key"); return }
+            else -> {
+                openClawPrefs.openaiKey = k
+                refreshOpenaiKeyState()
+                toast("key saved")
+                state.back()
+            }
+        }
+    }
+
+    override fun openClawSettingsRowActivate(idx: Int) {
+        when (idx) {
+            0 -> { state.back(); backTone() }
+            // 1 (whisper key) is handled entirely by UI (toggles keyboard)
+            2 -> {
+                val newHide = !state.openClawHideChat
+                state.openClawHideChat = newHide
+                openClawPrefs.hideChat = newHide
+                popTone()
+            }
+            3 -> { openClawClearHistory(); popTone() }
+            4 -> { openClawDisconnect(); popTone() }
+        }
+    }
+
+    override fun openClawClearHistory() {
+        state.chatMessages.clear()
+        toast("chat history cleared")
+    }
+
+    override fun openClawDisconnect() {
+        openClawPrefs.clear()
+        runCatching { openClawCloseSessionInternal() }
+        state.back()
+        toast("gateway disconnected")
+    }
+
+    private fun refreshOpenaiKeyState() {
+        val k = openClawPrefs.openaiKey
+        if (k.isNullOrBlank()) {
+            state.chatHasOpenaiKey = false
+            state.chatOpenaiKeyTail = ""
+        } else {
+            state.chatHasOpenaiKey = true
+            state.chatOpenaiKeyTail = k.takeLast(4)
+        }
     }
 
     // --- audio test panel ---
@@ -870,6 +1152,47 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             showDebugKey(code, event)
         }
 
+        // Side button is remapped from HOME → BUTTON_1 in the keylayout
+        // (/data/system/devices/keylayout/mtk-kpd.kl). HOME-mapped keys collapse
+        // into one onNewIntent fire and lose the down/up timing we need for PTT.
+        // BUTTON_1 has no framework handling, so we get raw DOWN/UP here.
+        if (code == KeyEvent.KEYCODE_BUTTON_1) {
+            if (state.panel == Panel.OPENCLAW_CHAT) {
+                when (event.action) {
+                    KeyEvent.ACTION_DOWN -> {
+                        if (event.repeatCount == 0) openClawRecordStart()
+                        return true
+                    }
+                    KeyEvent.ACTION_UP -> {
+                        openClawRecordStop()
+                        return true
+                    }
+                }
+                return true
+            }
+            // Non-chat: replicate the pre-remap side-button HOME behavior.
+            // Fire on UP so a deliberate hold doesn't repeat-trigger.
+            if (event.action == KeyEvent.ACTION_UP) {
+                if (state.panel == Panel.HOME) lockScreen() else state.activate(this)
+            }
+            return true
+        }
+
+        // Legacy PTT path on activate keycodes (DPAD_CENTER, ENTER, etc.) —
+        // kept for hardware that does emit those, but the R1 doesn't.
+        if (state.panel == Panel.OPENCLAW_CHAT && isActivateKey(code)) {
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> {
+                    if (event.repeatCount == 0) openClawRecordStart()
+                    return true
+                }
+                KeyEvent.ACTION_UP -> {
+                    openClawRecordStop()
+                    return true
+                }
+            }
+        }
+
         if (event.action != KeyEvent.ACTION_DOWN) {
             return if (isHandled(code)) true else super.dispatchKeyEvent(event)
         }
@@ -899,6 +1222,20 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
             else -> super.dispatchKeyEvent(event)
         }
+    }
+
+    private fun isActivateKey(code: Int): Boolean = when (code) {
+        KeyEvent.KEYCODE_DPAD_CENTER,
+        KeyEvent.KEYCODE_ENTER,
+        KeyEvent.KEYCODE_NUMPAD_ENTER,
+        KeyEvent.KEYCODE_SPACE,
+        KeyEvent.KEYCODE_HEADSETHOOK,
+        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+        KeyEvent.KEYCODE_CALL,
+        KeyEvent.KEYCODE_ASSIST,
+        KeyEvent.KEYCODE_VOICE_ASSIST,
+        KeyEvent.KEYCODE_POWER -> true
+        else -> false
     }
 
     private fun isHandled(code: Int): Boolean = when (code) {

@@ -92,11 +92,45 @@ fun LauncherRoot(
                     0 -> { state.back(); host.backTone() }
                     1 -> { state.openBrightness(); host.selectTone() }
                     2 -> { state.openVolume(); host.selectTone() }
-                    3 -> host.openWifiSettings()
-                    4 -> host.openAirplaneSettings()
-                    5 -> { state.showDebugBar = !state.showDebugBar; host.selectTone() }
+                    3 -> { state.showDebugBar = !state.showDebugBar; host.selectTone() }
+                    4 -> { state.openNetwork(); host.selectTone() }
                 }
             },
+        )
+
+        NetworkPanel(
+            state = state,
+            onRowClick = { idx ->
+                when (idx) {
+                    0 -> { state.back(); host.backTone() }
+                    1 -> { host.toggleWifi(!state.wifiEnabled); host.popTone() }
+                    2 -> { host.toggleCellular(!state.cellularOn); host.popTone() }
+                    3 -> { host.startWifiScan(); state.openWifiScan(); host.selectTone() }
+                }
+            },
+        )
+
+        WifiScanPanel(
+            state = state,
+            onRowClick = { idx ->
+                if (idx == 0) {
+                    state.back(); host.backTone()
+                } else {
+                    val ssid = state.wifiScanResults.getOrNull(idx - 1)
+                    if (ssid != null) {
+                        state.openWifiPassword(ssid)
+                        host.selectTone()
+                    }
+                }
+            },
+        )
+
+        WifiPasswordPanel(
+            state = state,
+            onBack = { state.back(); host.backTone() },
+            onSubmit = {
+                host.connectToWifi(state.wifiSelectedSsid, state.wifiPasswordInput)
+            }
         )
 
         BrightnessPanel(
@@ -118,7 +152,18 @@ fun LauncherRoot(
         OpenClawChatPanel(
             state = state,
             onBack = { host.openClawCloseSession(); state.back(); host.backTone() },
-            onSend = { text -> host.openClawSendText(text) }
+            onSend = { text -> host.openClawSendText(text) },
+            onPasteKey = { host.openClawPasteOpenaiKey() },
+            onClearKey = { host.openClawClearOpenaiKey() },
+            onOpenSettings = { state.openOpenClawSettings(); host.selectTone() },
+        )
+
+        OpenClawSettingsPanel(
+            state = state,
+            onBack = { state.back(); host.backTone() },
+            onSave = { key -> host.openClawSaveOpenaiKey(key) },
+            onPasteFromClipboard = { host.openClawPasteOpenaiKey() },
+            onClear = { host.openClawClearOpenaiKey() },
         )
 
         AudioTestPanel(

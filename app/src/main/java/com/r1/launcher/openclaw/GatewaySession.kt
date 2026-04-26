@@ -121,10 +121,32 @@ class GatewaySession(
                     onState(State.Error("send rejected: ${err ?: "unknown"}"))
                 } else {
                     android.util.Log.i("OpenClaw", "chat.send accepted: ${res["payload"]}")
+                    // Slash commands (/new, /reset, /compact, /stop) mutate
+                    // session state but produce no assistant text. Refresh
+                    // history so the UI reflects the new server-side state.
+                    if (text.trim().startsWith("/")) {
+                        refreshHistory()
+                    }
                 }
             } catch (t: Throwable) {
                 android.util.Log.w("OpenClaw", "chat.send threw", t)
                 onState(State.Error(t.message ?: "send failed"))
+            }
+        }
+    }
+
+    fun refreshHistory() {
+        scope.launch {
+            try {
+                val hist = request("chat.history", buildJsonObject {
+                    put("sessionKey", JsonPrimitive(sessionKey))
+                }, timeoutMs = 15_000L)
+                val msgs = ((hist["payload"] as? JsonObject)?.get("messages") as? JsonArray)
+                    ?.mapNotNull { (it as? JsonObject)?.let(::parseHistoryMessage) }
+                    .orEmpty()
+                onHistory(msgs)
+            } catch (t: Throwable) {
+                android.util.Log.w("OpenClaw", "refreshHistory threw", t)
             }
         }
     }
@@ -283,7 +305,7 @@ class GatewaySession(
     }
 
     private suspend fun handleFrame(text: String) {
-        android.util.Log.v("OpenClaw", "<- ${text.take(500)}")
+        android.util.Log.i("OpenClaw", "<- ${text.take(500)}")
         val obj = runCatching { json.parseToJsonElement(text) as? JsonObject }.getOrNull() ?: return
         when (obj["type"]?.jsonPrimitive?.contentOrNull) {
             "res" -> {
@@ -318,7 +340,9 @@ class GatewaySession(
             if (params != null) put("params", params)
         }
         val ws = socket ?: throw IllegalStateException("not connected")
-        if (!ws.send(frame.toString())) {
+        val frameStr = frame.toString()
+        android.util.Log.i("OpenClaw", "-> ${frameStr.take(500)}")
+        if (!ws.send(frameStr)) {
             pending.remove(id)
             throw IllegalStateException("ws send failed")
         }

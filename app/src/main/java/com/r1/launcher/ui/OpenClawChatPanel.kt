@@ -31,6 +31,9 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -49,6 +52,9 @@ import androidx.compose.ui.unit.sp
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
 import com.r1.launcher.openclaw.ChatMessage
+import com.mikepenz.markdown.m3.Markdown
+import com.mikepenz.markdown.m3.markdownColor
+import com.mikepenz.markdown.m3.markdownTypography
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.runtime.mutableStateOf
 
@@ -61,6 +67,9 @@ fun OpenClawChatPanel(
     state: LauncherState,
     onBack: () -> Unit,
     onSend: (String) -> Unit,
+    onPasteKey: () -> Unit = {},
+    onClearKey: () -> Unit = {},
+    onOpenSettings: () -> Unit = {},
 ) {
     AnimatedVisibility(
         visible = state.panel == Panel.OPENCLAW_CHAT,
@@ -83,21 +92,25 @@ fun OpenClawChatPanel(
                 BackPill(label = "home", onClick = onBack)
                 Spacer(Modifier.weight(1f))
                 StatusDot(state.chatStatus)
-                if (state.chatRecording) {
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = "rec",
-                        style = type.appCard,
-                        color = Color(0xFFFF4500)
-                    )
-                } else if (state.chatBusy) {
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = "...",
-                        style = type.appCard,
-                        color = Color.White
-                    )
+                when {
+                    state.chatRecording -> {
+                        Spacer(Modifier.width(6.dp))
+                        Text("rec", style = type.appCard, color = Color(0xFFFF4500))
+                    }
+                    state.chatTranscribing -> {
+                        Spacer(Modifier.width(6.dp))
+                        Text("stt", style = type.appCard, color = Color(0xFFFFC107))
+                    }
+                    state.chatBusy -> {
+                        Spacer(Modifier.width(6.dp))
+                        Text("...", style = type.appCard, color = Color.White)
+                    }
                 }
+                Spacer(Modifier.width(8.dp))
+                SettingsPill(
+                    keySet = state.chatHasOpenaiKey,
+                    onClick = onOpenSettings,
+                )
             }
 
             val listState = rememberLazyListState()
@@ -159,48 +172,50 @@ fun OpenClawChatPanel(
             var inputText by remember { mutableStateOf("") }
             var showKeyboard by remember { mutableStateOf(false) }
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .border(2.dp, Color(0xFFFF4500), RoundedCornerShape(12.dp))
-                    .background(Color.Black)
-                    .clickable { showKeyboard = !showKeyboard }
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = if (inputText.isEmpty()) "type here..." else inputText + if (showKeyboard) "_" else "",
-                    style = type.appCard,
-                    color = if (inputText.isEmpty()) Color.Gray else Color.White,
-                    modifier = Modifier.weight(1f)
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = "send",
-                    style = type.appCard,
-                    color = Color(0xFFFF4500),
-                    modifier = Modifier.clickable {
-                        if (inputText.isNotBlank()) {
-                            onSend(inputText)
-                            inputText = ""
-                            showKeyboard = false
+            if (!state.openClawHideChat) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .border(2.dp, Color(0xFFFF4500), RoundedCornerShape(12.dp))
+                        .background(Color.Black)
+                        .clickable { showKeyboard = !showKeyboard }
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (inputText.isEmpty()) "type here..." else inputText + if (showKeyboard) "_" else "",
+                        style = type.appCard,
+                        color = if (inputText.isEmpty()) Color.Gray else Color.White,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "send",
+                        style = type.appCard,
+                        color = Color(0xFFFF4500),
+                        modifier = Modifier.clickable {
+                            if (inputText.isNotBlank()) {
+                                onSend(inputText)
+                                inputText = ""
+                                showKeyboard = false
+                            }
                         }
-                    }
-                )
-            }
-            
-            AnimatedVisibility(
-                visible = showKeyboard,
-                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
-            ) {
-                RetroKeyboard(
-                    onKeyPress = { char -> inputText += char },
-                    onBackspace = { if (inputText.isNotEmpty()) inputText = inputText.dropLast(1) },
-                    onDismiss = { showKeyboard = false }
-                )
+                    )
+                }
+                
+                AnimatedVisibility(
+                    visible = showKeyboard,
+                    enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                    exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
+                ) {
+                    RetroKeyboard(
+                        onKeyPress = { char -> inputText += char },
+                        onBackspace = { if (inputText.isNotEmpty()) inputText = inputText.dropLast(1) },
+                        onDismiss = { showKeyboard = false }
+                    )
+                }
             }
         }
     }
@@ -243,6 +258,24 @@ private fun EmptyHint(status: String) {
 }
 
 @Composable
+private fun SettingsPill(keySet: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(CircleShape)
+            .clickable(onClick = onClick)
+            .padding(8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = Icons.Default.Settings,
+            contentDescription = "settings",
+            tint = Color(0xFFFF4500),
+            modifier = Modifier.size(24.dp)
+        )
+    }
+}
+
+@Composable
 private fun Bubble(msg: ChatMessage) {
     val colors = LocalR1Colors.current
     val type = LocalR1Type.current
@@ -261,11 +294,34 @@ private fun Bubble(msg: ChatMessage) {
                 .padding(horizontal = 10.dp, vertical = 7.dp),
         ) {
             Row(verticalAlignment = Alignment.Bottom) {
-                Text(
-                    text = msg.text.ifEmpty { if (msg.streaming) "…" else "" },
-                    style = type.appCard,
-                    color = if (isUser) Color.Black else Color.White,
-                )
+                if (isUser) {
+                    Text(
+                        text = msg.text.ifEmpty { if (msg.streaming) "…" else "" },
+                        style = type.appCard,
+                        color = Color.Black,
+                    )
+                } else {
+                    Markdown(
+                        content = msg.text.ifEmpty { if (msg.streaming) "…" else "" },
+                        colors = markdownColor(
+                            text = Color.White,
+                            codeText = Color(0xFFFF4500),
+                            codeBackground = Color.Transparent
+                        ),
+                        typography = markdownTypography(
+                            text = type.appCard,
+                            code = type.appCard,
+                            paragraph = type.appCard,
+                            quote = type.appCard,
+                            h1 = type.appCard.copy(fontSize = androidx.compose.ui.unit.TextUnit(24f, androidx.compose.ui.unit.TextUnitType.Sp)),
+                            h2 = type.appCard.copy(fontSize = androidx.compose.ui.unit.TextUnit(22f, androidx.compose.ui.unit.TextUnitType.Sp)),
+                            h3 = type.appCard.copy(fontSize = androidx.compose.ui.unit.TextUnit(20f, androidx.compose.ui.unit.TextUnitType.Sp)),
+                            h4 = type.appCard.copy(fontSize = androidx.compose.ui.unit.TextUnit(18f, androidx.compose.ui.unit.TextUnitType.Sp)),
+                            h5 = type.appCard.copy(fontSize = androidx.compose.ui.unit.TextUnit(16f, androidx.compose.ui.unit.TextUnitType.Sp)),
+                            h6 = type.appCard.copy(fontSize = androidx.compose.ui.unit.TextUnit(14f, androidx.compose.ui.unit.TextUnitType.Sp))
+                        )
+                    )
+                }
                 if (msg.streaming) {
                     Spacer(Modifier.width(2.dp))
                     StreamingCaret()

@@ -28,10 +28,27 @@ fun extractText(content: JsonArray?): String {
     return sb.toString()
 }
 
+// Strips openclaw's gateway noise from inbound user messages so the chat bubble
+// shows only the human-typed body. The gateway prepends `System: [ts] ...` event
+// lines (WhatsApp connect/disconnect, model switches, etc.) and wraps the body
+// in a `[channel from ts]` envelope header — both are useful prompt context for
+// the LLM but pure clutter in the UI.
+private val SYSTEM_LINE = Regex("^\\s*System:\\s*\\[[^\\]]*\\].*$")
+private val ENVELOPE_PREFIX = Regex("^\\[[^\\]]+\\]\\s*")
+
+private fun cleanInboundText(raw: String): String {
+    val kept = raw.lineSequence()
+        .filterNot { SYSTEM_LINE.matches(it) }
+        .joinToString("\n")
+        .trim()
+    return ENVELOPE_PREFIX.replaceFirst(kept, "")
+}
+
 fun parseHistoryMessage(obj: JsonObject): ChatMessage? {
     val role = obj["role"]?.jsonPrimitive?.contentOrNull ?: return null
     val content = obj["content"] as? JsonArray ?: return null
-    val text = extractText(content)
+    val raw = extractText(content)
+    val text = if (role == "user") cleanInboundText(raw) else raw
     val ts = obj["timestamp"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
         ?: System.currentTimeMillis()
     return ChatMessage(role = role, text = text, timestamp = ts)
@@ -39,8 +56,12 @@ fun parseHistoryMessage(obj: JsonObject): ChatMessage? {
 
 fun parseStreamMessage(payload: JsonObject): Pair<ChatMessage, String>? {
     val state = payload["state"]?.jsonPrimitive?.contentOrNull ?: return null
-    val msg = payload["message"] as? JsonObject ?: return null
-    val role = msg["role"]?.jsonPrimitive?.contentOrNull ?: "assistant"
-    val text = extractText(msg["content"] as? JsonArray)
+    // Slash commands (/new, /reset, ...) emit a `final` event with no message
+    // body — the run finished but produced no assistant text. We still need to
+    // surface the state transition so the UI can clear the busy spinner.
+    val msg = payload["message"] as? JsonObject
+    val role = msg?.get("role")?.jsonPrimitive?.contentOrNull ?: "assistant"
+    val raw = if (msg != null) extractText(msg["content"] as? JsonArray) else ""
+    val text = if (role == "user") cleanInboundText(raw) else raw
     return ChatMessage(role = role, text = text, streaming = state == "delta") to state
 }
