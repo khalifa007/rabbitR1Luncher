@@ -6,9 +6,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -62,13 +63,18 @@ class GatewaySession(
 
     @Volatile private var socket: WebSocket? = null
     @Volatile private var sessionKey: String = "main"
+    private val isClosed = AtomicBoolean(false)
 
     var onState: (State) -> Unit = {}
-    var onChatStream: (ChatMessage, String /* state: delta|final|error|aborted */) -> Unit = { _, _ -> }
+    /** Streaming `delta` events — text accumulates server-side; latest text is sent each tick. */
+    var onChatDelta: (runId: String?, text: String) -> Unit = { _, _ -> }
+    /** Terminal `final`/`aborted`/`error` events — UI should refresh chat.history. */
+    var onChatTerminal: (runId: String?, state: String, errorMessage: String?) -> Unit = { _, _, _ -> }
     var onHistory: (List<ChatMessage>) -> Unit = {}
 
     fun start() {
         if (socket != null) return
+        isClosed.set(false)
         val url = prefs.gatewayUrl ?: run {
             onState(State.Error("no gateway url"))
             return
@@ -83,14 +89,29 @@ class GatewaySession(
     }
 
     fun stop() {
+        if (isClosed.compareAndSet(false, true)) failPending("session stopped")
         runCatching { socket?.close(1000, "panel closed") }
         socket = null
-        pending.values.forEach { runCatching { it.completeExceptionally(IllegalStateException("closed")) } }
-        pending.clear()
-        scope.coroutineContext.cancel()
+        // Cancel in-flight launches but keep the SupervisorJob alive — calling
+        // `scope.cancel()` would make any subsequent start() a silent no-op
+        // because the scope itself would be dead.
+        parentJob.cancelChildren()
     }
 
-    fun send(text: String, audioBase64: String? = null) {
+    /** Drain pending JSON-RPC waiters with an error so callers don't hang until timeout. */
+    private fun failPending(reason: String) {
+        val snapshot = pending.toMap()
+        pending.clear()
+        snapshot.values.forEach {
+            runCatching { it.completeExceptionally(IllegalStateException(reason)) }
+        }
+    }
+
+    fun send(
+        text: String,
+        audioBase64: String? = null,
+        onAck: (success: Boolean, runId: String?, error: String?) -> Unit = { _, _, _ -> },
+    ) {
         scope.launch {
             try {
                 val params = buildJsonObject {
@@ -119,18 +140,17 @@ class GatewaySession(
                     }
                     android.util.Log.w("OpenClaw", "chat.send rejected: $res")
                     onState(State.Error("send rejected: ${err ?: "unknown"}"))
+                    onAck(false, null, err)
                 } else {
-                    android.util.Log.i("OpenClaw", "chat.send accepted: ${res["payload"]}")
-                    // Slash commands (/new, /reset, /compact, /stop) mutate
-                    // session state but produce no assistant text. Refresh
-                    // history so the UI reflects the new server-side state.
-                    if (text.trim().startsWith("/")) {
-                        refreshHistory()
-                    }
+                    val runId = (res["payload"] as? JsonObject)
+                        ?.get("runId")?.jsonPrimitive?.contentOrNull
+                    android.util.Log.v("OpenClaw", "chat.send accepted runId=$runId")
+                    onAck(true, runId, null)
                 }
             } catch (t: Throwable) {
                 android.util.Log.w("OpenClaw", "chat.send threw", t)
                 onState(State.Error(t.message ?: "send failed"))
+                onAck(false, null, t.message)
             }
         }
     }
@@ -168,11 +188,15 @@ class GatewaySession(
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             socket = null
+            if (isClosed.compareAndSet(false, true)) failPending("ws closed: $reason")
             onState(State.Idle)
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             socket = null
+            if (isClosed.compareAndSet(false, true)) {
+                failPending("ws failure: ${t.message ?: t.javaClass.simpleName}")
+            }
             onState(State.Error(t.message ?: "ws failure"))
         }
     }
@@ -305,7 +329,7 @@ class GatewaySession(
     }
 
     private suspend fun handleFrame(text: String) {
-        android.util.Log.i("OpenClaw", "<- ${text.take(500)}")
+        android.util.Log.v("OpenClaw", "<- ${text.take(500)}")
         val obj = runCatching { json.parseToJsonElement(text) as? JsonObject }.getOrNull() ?: return
         when (obj["type"]?.jsonPrimitive?.contentOrNull) {
             "res" -> {
@@ -320,11 +344,33 @@ class GatewaySession(
                         val nonce = payload["nonce"]?.jsonPrimitive?.contentOrNull ?: return
                         scope.launch { handshake(nonce) }
                     }
-                    "chat" -> {
-                        val pair = parseStreamMessage(payload) ?: return
-                        onChatStream(pair.first, pair.second)
-                    }
+                    "chat" -> handleChatEvent(payload)
                 }
+            }
+        }
+    }
+
+    /**
+     * Mirrors the official client (`apps/android/.../ChatController.kt:340`):
+     *   - `delta` → live preview text (UI shows as a single streaming line).
+     *   - `final|aborted|error` → tell UI to refresh `chat.history`. Server is
+     *     authoritative; this avoids races with slash commands, multi-operator
+     *     scenarios, and out-of-order events.
+     */
+    private fun handleChatEvent(payload: JsonObject) {
+        val state = payload["state"]?.jsonPrimitive?.contentOrNull ?: return
+        val runId = payload["runId"]?.jsonPrimitive?.contentOrNull
+        when (state) {
+            "delta" -> {
+                val msg = payload["message"] as? JsonObject ?: return
+                val deltaText = extractText(msg["content"] as? JsonArray)
+                if (deltaText.isNotEmpty()) onChatDelta(runId, deltaText)
+            }
+            "final", "aborted", "error" -> {
+                val errMsg = if (state == "error") {
+                    payload["errorMessage"]?.jsonPrimitive?.contentOrNull
+                } else null
+                onChatTerminal(runId, state, errMsg)
             }
         }
     }
@@ -341,7 +387,7 @@ class GatewaySession(
         }
         val ws = socket ?: throw IllegalStateException("not connected")
         val frameStr = frame.toString()
-        android.util.Log.i("OpenClaw", "-> ${frameStr.take(500)}")
+        android.util.Log.v("OpenClaw", "-> ${frameStr.take(500)}")
         if (!ws.send(frameStr)) {
             pending.remove(id)
             throw IllegalStateException("ws send failed")

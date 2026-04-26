@@ -40,5 +40,7 @@ jobs:
           tag_name: "v${{ env.VERSION_NAME }}"
           name: "Release v${{ env.VERSION_NAME }}"
           files: app/build/outputs/apk/debug/app-debug.apk
+          fail_on_unmatched_files: true
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

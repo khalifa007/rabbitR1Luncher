@@ -6,12 +6,14 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.util.UUID
 
 data class ChatMessage(
     val role: String,
     val text: String,
     val streaming: Boolean = false,
     val timestamp: Long = System.currentTimeMillis(),
+    val id: String = UUID.randomUUID().toString(),
 )
 
 fun extractText(content: JsonArray?): String {
@@ -54,14 +56,3 @@ fun parseHistoryMessage(obj: JsonObject): ChatMessage? {
     return ChatMessage(role = role, text = text, timestamp = ts)
 }
 
-fun parseStreamMessage(payload: JsonObject): Pair<ChatMessage, String>? {
-    val state = payload["state"]?.jsonPrimitive?.contentOrNull ?: return null
-    // Slash commands (/new, /reset, ...) emit a `final` event with no message
-    // body — the run finished but produced no assistant text. We still need to
-    // surface the state transition so the UI can clear the busy spinner.
-    val msg = payload["message"] as? JsonObject
-    val role = msg?.get("role")?.jsonPrimitive?.contentOrNull ?: "assistant"
-    val raw = if (msg != null) extractText(msg["content"] as? JsonArray) else ""
-    val text = if (role == "user") cleanInboundText(raw) else raw
-    return ChatMessage(role = role, text = text, streaming = state == "delta") to state
-}

@@ -73,6 +73,7 @@ fun SettingsPanel(
             SettingsItem.Standard("brightness"),
             SettingsItem.Standard("volume"),
             SettingsItem.Toggle("show key debug", state.showDebugBar),
+            SettingsItem.Standard("check for updates")
         )
 
         val listState = rememberLazyListState()

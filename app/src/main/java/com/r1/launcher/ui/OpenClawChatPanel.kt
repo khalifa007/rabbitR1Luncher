@@ -59,8 +59,6 @@ import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.runtime.mutableStateOf
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.ui.graphics.SolidColor
 
 @Composable
 fun OpenClawChatPanel(
@@ -139,7 +137,22 @@ fun OpenClawChatPanel(
                     .weight(1f)
                     .fillMaxWidth(),
             ) {
-                if (state.chatMessages.isEmpty()) {
+                // Live assistant streaming preview — sits at item 0 so with
+                // reverseLayout=true it renders at the bottom of the chat,
+                // beneath the most recent persisted bubble. Cleared when the
+                // run reaches a terminal state and chat.history refreshes.
+                if (state.chatStreamingText.isNotBlank()) {
+                    item("streaming") {
+                        Bubble(
+                            ChatMessage(
+                                role = "assistant",
+                                text = state.chatStreamingText,
+                                streaming = true,
+                            )
+                        )
+                    }
+                }
+                if (state.chatMessages.isEmpty() && state.chatStreamingText.isBlank()) {
                     item {
                         EmptyHint(state.chatStatus)
                     }

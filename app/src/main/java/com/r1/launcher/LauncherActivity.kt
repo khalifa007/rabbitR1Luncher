@@ -36,6 +36,7 @@ import com.r1.launcher.openclaw.OpenClawPrefs
 import com.r1.launcher.openclaw.decodeGatewaySetupCode
 import com.r1.launcher.ui.LauncherRoot
 import com.r1.launcher.ui.R1Theme
+import com.r1.launcher.updater.OTAUpdater
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -66,7 +67,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     private val state = LauncherState()
-    private lateinit var updater: Updater
     private lateinit var appStore: AppStore
     private var tone: ToneGenerator? = null
     private var soundPool: SoundPool? = null
@@ -182,11 +182,14 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             afd.close()
         }
 
-        updater = Updater(this).apply {
-            setListener { phase, _, msg -> onUpdaterStatus(phase, msg) }
-        }
         appStore = AppStore(this).apply {
             setStatusListener { phase, slug, pct, msg -> onStoreStatus(phase, slug, pct, msg) }
+        }
+        
+        // Initialize OTA Updater
+        OTAUpdater.executeRootCommand = { cmd -> sendToCarroot(cmd) }
+        OTAUpdater.checkForUpdates(this, state, forcePrompt = false) { msg ->
+            toast(msg)
         }
 
         state.openClawHideChat = openClawPrefs.hideChat
@@ -296,11 +299,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         super.onDestroy()
         runCatching { openClawCloseSessionInternal() }
         runCatching { audioTester.close() }
+        // Clean up UI handlers
+        runCatching { ui.removeCallbacksAndMessages(null) }
         runCatching { tone?.release() }
         tone = null
         runCatching { soundPool?.release() }
         soundPool = null
-        runCatching { updater.shutdown() }
         runCatching { appStore.shutdown() }
     }
 
@@ -479,42 +483,44 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         session.onHistory = { msgs ->
             ui.post {
                 state.chatMessages.clear()
-                state.chatMessages.addAll(msgs)
+                val capped = if (msgs.size > state.chatMessagesMax) {
+                    msgs.takeLast(state.chatMessagesMax)
+                } else msgs
+                state.chatMessages.addAll(capped)
                 state.chatScrollIndex = 0
             }
         }
-        session.onChatStream = { msg, evState ->
+        session.onChatDelta = { runId, text ->
             ui.post {
-                val terminal = evState == "final" || evState == "error" || evState == "aborted"
-                // Slash commands fire a terminal event with no message text —
-                // surface as a state-only update (clear busy, no empty bubble).
-                if (terminal && msg.text.isBlank()) {
-                    val tail = state.chatMessages.lastOrNull()
-                    if (tail != null && tail.streaming) {
-                        state.chatMessages[state.chatMessages.lastIndex] = tail.copy(streaming = false)
-                    }
-                    state.chatBusy = false
-                    return@post
+                // Only show streaming preview for runs *we* initiated. Other
+                // operators talking to the same agent shouldn't bleed into our
+                // local UI (matches official client ChatController.kt:347).
+                if (runId == null || state.chatPendingRunIds.contains(runId)) {
+                    state.chatStreamingText = text
                 }
-                val last = state.chatMessages.lastOrNull()
-                if (last != null && last.streaming && last.role == msg.role) {
-                    state.chatMessages[state.chatMessages.lastIndex] =
-                        last.copy(text = msg.text, streaming = evState == "delta")
-                } else {
-                    state.chatMessages.add(msg.copy(streaming = evState == "delta"))
-                }
-                if (terminal) {
-                    val tail = state.chatMessages.lastOrNull()
-                    if (tail != null && tail.streaming) {
-                        state.chatMessages[state.chatMessages.lastIndex] = tail.copy(streaming = false)
-                    }
-                    state.chatBusy = false
-                }
-                state.chatScrollIndex = 0
+            }
+        }
+        session.onChatTerminal = { runId, evState, errMsg ->
+            ui.post {
+                if (runId != null) state.chatPendingRunIds.remove(runId)
+                state.chatStreamingText = ""
+                state.chatBusy = false
+                if (evState == "error" && !errMsg.isNullOrBlank()) toast("chat: $errMsg")
+                // Server is authoritative — refresh history on every terminal
+                // event so slash commands, multi-operator changes, and errors
+                // all converge on the canonical state.
+                openClawSession?.refreshHistory()
             }
         }
         openClawSession = session
         session.start()
+    }
+
+    /** Cap chat list at chatMessagesMax, dropping oldest. Call after each add. */
+    private fun trimChatMessages() {
+        while (state.chatMessages.size > state.chatMessagesMax) {
+            state.chatMessages.removeAt(0)
+        }
     }
 
     private fun openClawCloseSessionInternal() {
@@ -525,6 +531,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.chatRecording = false
         state.chatBusy = false
         state.chatPartialText = ""
+        state.chatStreamingText = ""
+        state.chatPendingRunIds.clear()
     }
 
     private fun seedSettingsLevels() {
@@ -585,6 +593,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     override fun lockScreen() {
         val ok = PowerService.lockScreen()
         if (!ok) toast("Enable Accessibility → R1 Launcher to lock screen")
+    }
+
+    override fun checkForUpdate() {
+        OTAUpdater.checkForUpdates(this, state, forcePrompt = true) { msg ->
+            toast(msg)
+        }
     }
 
     override fun openAirplaneSettings() {
@@ -758,12 +772,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         false
     }
 
-    override fun checkForUpdate() {
-        state.back()
-        toast("Checking for update...")
-        updater.checkNow()
-    }
-
     override fun storeActivate(entry: AppStore.Entry) {
         val local = appStore.installedVersionCode(entry.pkg)
         if (state.downloadingSlug != null) { toast("Busy…"); return }
@@ -861,14 +869,26 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                                 toast("whisper: empty transcript")
                                 return@transcribe
                             }
-                            state.chatMessages.add(
-                                com.r1.launcher.openclaw.ChatMessage(
-                                    role = "user", text = text,
-                                )
+                            val optimistic = com.r1.launcher.openclaw.ChatMessage(
+                                role = "user", text = text,
                             )
+                            state.chatMessages.add(optimistic)
+                            trimChatMessages()
                             state.chatScrollIndex = 0
                             state.chatBusy = true
-                            session.send(text = text, audioBase64 = null)
+                            session.send(text = text, audioBase64 = null) { ok, runId, err ->
+                                ui.post {
+                                    if (!ok) {
+                                        val idx = state.chatMessages
+                                            .indexOfFirst { it.id == optimistic.id }
+                                        if (idx >= 0) state.chatMessages.removeAt(idx)
+                                        state.chatBusy = false
+                                        if (!err.isNullOrBlank()) toast("send failed: $err")
+                                    } else if (runId != null) {
+                                        state.chatPendingRunIds.add(runId)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -895,18 +915,29 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         if (state.chatStatus.startsWith("error") || state.chatStatus == "idle") return
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
-        
-        state.chatMessages.add(
-            com.r1.launcher.openclaw.ChatMessage(
-                role = "user",
-                text = trimmed,
-            )
-        )
+
+        val optimistic = com.r1.launcher.openclaw.ChatMessage(role = "user", text = trimmed)
+        state.chatMessages.add(optimistic)
+        trimChatMessages()
         state.chatScrollIndex = 0
         if (!trimmed.startsWith("/")) {
             state.chatBusy = true
         }
-        session.send(text = trimmed, audioBase64 = null)
+        session.send(text = trimmed, audioBase64 = null) { ok, runId, err ->
+            ui.post {
+                if (!ok) {
+                    // Roll back the optimistic bubble — the server never accepted
+                    // it. ChatMessage.id makes equality unique even if the user
+                    // sends the same text twice in the same millisecond.
+                    val idx = state.chatMessages.indexOfFirst { it.id == optimistic.id }
+                    if (idx >= 0) state.chatMessages.removeAt(idx)
+                    state.chatBusy = false
+                    if (!err.isNullOrBlank()) toast("send failed: $err")
+                } else if (runId != null) {
+                    state.chatPendingRunIds.add(runId)
+                }
+            }
+        }
     }
 
     override fun openClawScrollUp() {
@@ -1178,21 +1209,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             return true
         }
 
-        // Legacy PTT path on activate keycodes (DPAD_CENTER, ENTER, etc.) —
-        // kept for hardware that does emit those, but the R1 doesn't.
-        if (state.panel == Panel.OPENCLAW_CHAT && isActivateKey(code)) {
-            when (event.action) {
-                KeyEvent.ACTION_DOWN -> {
-                    if (event.repeatCount == 0) openClawRecordStart()
-                    return true
-                }
-                KeyEvent.ACTION_UP -> {
-                    openClawRecordStop()
-                    return true
-                }
-            }
-        }
-
         if (event.action != KeyEvent.ACTION_DOWN) {
             return if (isHandled(code)) true else super.dispatchKeyEvent(event)
         }
@@ -1222,20 +1238,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
             else -> super.dispatchKeyEvent(event)
         }
-    }
-
-    private fun isActivateKey(code: Int): Boolean = when (code) {
-        KeyEvent.KEYCODE_DPAD_CENTER,
-        KeyEvent.KEYCODE_ENTER,
-        KeyEvent.KEYCODE_NUMPAD_ENTER,
-        KeyEvent.KEYCODE_SPACE,
-        KeyEvent.KEYCODE_HEADSETHOOK,
-        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
-        KeyEvent.KEYCODE_CALL,
-        KeyEvent.KEYCODE_ASSIST,
-        KeyEvent.KEYCODE_VOICE_ASSIST,
-        KeyEvent.KEYCODE_POWER -> true
-        else -> false
     }
 
     private fun isHandled(code: Int): Boolean = when (code) {
