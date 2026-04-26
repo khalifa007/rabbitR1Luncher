@@ -13,8 +13,8 @@ android {
         applicationId = "com.r1.launcher"
         minSdk = 23
         targetSdk = 33
-        versionCode = 127
-        versionName = "3.6.1"
+        versionCode = 128
+        versionName = "3.7.0"
     }
 
     signingConfigs {

@@ -55,6 +55,7 @@ import com.r1.launcher.openclaw.ChatMessage
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
+import com.mikepenz.markdown.model.markdownAnnotator
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.runtime.mutableStateOf
 
@@ -317,6 +318,12 @@ private fun Bubble(msg: ChatMessage, fontSize: Int = 14) {
                         color = Color.Black,
                     )
                 } else {
+                    // Jersey 15 font for code spans — the library defaults to
+                    // FontFamily.Monospace internally, so we override via annotator.
+                    val codeSpanStyle = chatStyle.copy(
+                        fontSize = (fontSize - 2).coerceAtLeast(8).sp,
+                        color = Color(0xFFFF4500),
+                    ).toSpanStyle()
                     Markdown(
                         content = msg.text.ifEmpty { if (msg.streaming) "…" else "" },
                         colors = markdownColor(
@@ -329,13 +336,24 @@ private fun Bubble(msg: ChatMessage, fontSize: Int = 14) {
                             code = chatStyle.copy(fontSize = (fontSize - 2).coerceAtLeast(8).sp),
                             paragraph = chatStyle,
                             quote = chatStyle,
+                            list = chatStyle,
+                            ordered = chatStyle,
+                            bullet = chatStyle,
                             h1 = chatStyle.copy(fontSize = (fontSize + 4).sp, fontWeight = FontWeight.Bold),
                             h2 = chatStyle.copy(fontSize = (fontSize + 3).sp, fontWeight = FontWeight.Bold),
                             h3 = chatStyle.copy(fontSize = (fontSize + 2).sp, fontWeight = FontWeight.Bold),
                             h4 = chatStyle.copy(fontSize = (fontSize + 1).sp, fontWeight = FontWeight.Bold),
                             h5 = chatStyle.copy(fontSize = fontSize.sp, fontWeight = FontWeight.Bold),
                             h6 = chatStyle.copy(fontSize = (fontSize - 1).coerceAtLeast(8).sp, fontWeight = FontWeight.Bold)
-                        )
+                        ),
+                        annotator = markdownAnnotator { content, node ->
+                            if (node.type.name == "CODE_SPAN") {
+                                pushStyle(codeSpanStyle)
+                                append(content.substring(node.startOffset + 1, node.endOffset - 1))
+                                pop()
+                                true // handled — skip default monospace
+                            } else false
+                        },
                     )
                 }
                 if (msg.streaming) {
