@@ -148,7 +148,8 @@ fun OpenClawChatPanel(
                                 role = "assistant",
                                 text = state.chatStreamingText,
                                 streaming = true,
-                            )
+                            ),
+                            fontSize = state.chatFontSize,
                         )
                     }
                 }
@@ -159,7 +160,7 @@ fun OpenClawChatPanel(
                 } else {
                     val reversed = state.chatMessages.asReversed()
                     itemsIndexed(reversed) { _, msg ->
-                        Bubble(msg)
+                        Bubble(msg, fontSize = state.chatFontSize)
                     }
                 }
             }
@@ -289,12 +290,14 @@ private fun SettingsPill(keySet: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun Bubble(msg: ChatMessage) {
+private fun Bubble(msg: ChatMessage, fontSize: Int = 14) {
     val colors = LocalR1Colors.current
     val type = LocalR1Type.current
     val isUser = msg.role == "user"
     val bg = if (isUser) Color(0xFFFF4500) else colors.tile
     val align = if (isUser) Alignment.End else Alignment.Start
+    // Chat style driven by user-adjustable font size
+    val chatStyle = type.appCard.copy(fontSize = fontSize.sp)
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
@@ -310,7 +313,7 @@ private fun Bubble(msg: ChatMessage) {
                 if (isUser) {
                     Text(
                         text = msg.text.ifEmpty { if (msg.streaming) "…" else "" },
-                        style = type.appCard,
+                        style = chatStyle,
                         color = Color.Black,
                     )
                 } else {
@@ -322,16 +325,16 @@ private fun Bubble(msg: ChatMessage) {
                             codeBackground = Color.Transparent
                         ),
                         typography = markdownTypography(
-                            text = type.appCard,
-                            code = type.appCard,
-                            paragraph = type.appCard,
-                            quote = type.appCard,
-                            h1 = type.appCard.copy(fontSize = androidx.compose.ui.unit.TextUnit(24f, androidx.compose.ui.unit.TextUnitType.Sp)),
-                            h2 = type.appCard.copy(fontSize = androidx.compose.ui.unit.TextUnit(22f, androidx.compose.ui.unit.TextUnitType.Sp)),
-                            h3 = type.appCard.copy(fontSize = androidx.compose.ui.unit.TextUnit(20f, androidx.compose.ui.unit.TextUnitType.Sp)),
-                            h4 = type.appCard.copy(fontSize = androidx.compose.ui.unit.TextUnit(18f, androidx.compose.ui.unit.TextUnitType.Sp)),
-                            h5 = type.appCard.copy(fontSize = androidx.compose.ui.unit.TextUnit(16f, androidx.compose.ui.unit.TextUnitType.Sp)),
-                            h6 = type.appCard.copy(fontSize = androidx.compose.ui.unit.TextUnit(14f, androidx.compose.ui.unit.TextUnitType.Sp))
+                            text = chatStyle,
+                            code = chatStyle.copy(fontSize = (fontSize - 2).coerceAtLeast(8).sp),
+                            paragraph = chatStyle,
+                            quote = chatStyle,
+                            h1 = chatStyle.copy(fontSize = (fontSize + 4).sp, fontWeight = FontWeight.Bold),
+                            h2 = chatStyle.copy(fontSize = (fontSize + 3).sp, fontWeight = FontWeight.Bold),
+                            h3 = chatStyle.copy(fontSize = (fontSize + 2).sp, fontWeight = FontWeight.Bold),
+                            h4 = chatStyle.copy(fontSize = (fontSize + 1).sp, fontWeight = FontWeight.Bold),
+                            h5 = chatStyle.copy(fontSize = fontSize.sp, fontWeight = FontWeight.Bold),
+                            h6 = chatStyle.copy(fontSize = (fontSize - 1).coerceAtLeast(8).sp, fontWeight = FontWeight.Bold)
                         )
                     )
                 }

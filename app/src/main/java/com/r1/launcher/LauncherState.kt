@@ -8,7 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.r1.launcher.openclaw.ChatMessage
 
-enum class Panel { HOME, SHEET, APPS, STORE, DETAIL, SETTINGS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, BRIGHTNESS, VOLUME, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_SETTINGS, AUDIO_TEST }
+enum class Panel { HOME, SHEET, APPS, STORE, DETAIL, SETTINGS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, BRIGHTNESS, VOLUME, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_SETTINGS }
 
 /**
  * Single container for all UI state. Activity mutates; Compose reads.
@@ -109,21 +109,8 @@ class LauncherState {
     var openClawSettingsFocus by mutableIntStateOf(0)
     /** Toggle to hide chat messages in the chat panel. */
     var openClawHideChat by mutableStateOf(false)
-
-    // --- audio test panel ---
-    /** Index into AudioTester.Source.values() — wheel up/down cycles when idle. */
-    var audioTestSourceIndex by mutableIntStateOf(0)
-    /** "idle" | "recording" | "playing" | "done" | "error: ..." */
-    var audioTestStatus by mutableStateOf("idle")
-    /** Live RMS 0..100 — live during recording, snaps to 0 otherwise. */
-    var audioTestLevel by mutableIntStateOf(0)
-    /** Live peak 0..100 — live during recording. */
-    var audioTestPeak by mutableIntStateOf(0)
-    /** After a recording finishes: duration (ms), sample count, max peak seen. */
-    var audioTestLastDurationMs by mutableIntStateOf(0)
-    var audioTestLastSamples by mutableIntStateOf(0)
-    var audioTestLastPeakOverall by mutableIntStateOf(0)
-    var audioTestHasRecording by mutableStateOf(false)
+    /** Chat font size in sp. Adjustable from OpenClaw settings. */
+    var chatFontSize by mutableIntStateOf(14)
 
     // --- debug key overlay ---
     var debugKeyText by mutableStateOf("")
@@ -205,13 +192,6 @@ class LauncherState {
         panel = Panel.OPENCLAW_SETTINGS
     }
 
-    fun openAudioTest() {
-        audioTestStatus = "idle"
-        audioTestLevel = 0
-        audioTestPeak = 0
-        panel = Panel.AUDIO_TEST
-    }
-
     fun goHome() {
         panel = Panel.HOME
         detailEntry = null
@@ -225,7 +205,7 @@ class LauncherState {
             Panel.WIFI_PASSWORD -> Panel.WIFI_SCAN
             Panel.SETTINGS -> Panel.APPS
             Panel.STORE, Panel.APPS, Panel.SHEET -> Panel.HOME
-            Panel.OPENCLAW_QR, Panel.OPENCLAW_CHAT, Panel.AUDIO_TEST -> Panel.APPS
+            Panel.OPENCLAW_QR, Panel.OPENCLAW_CHAT -> Panel.APPS
             Panel.OPENCLAW_SETTINGS -> Panel.OPENCLAW_CHAT
             Panel.HOME -> Panel.HOME
         }

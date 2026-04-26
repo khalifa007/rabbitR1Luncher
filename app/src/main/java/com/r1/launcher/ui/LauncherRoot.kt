@@ -164,11 +164,7 @@ fun LauncherRoot(
             onSave = { key -> host.openClawSaveOpenaiKey(key) },
             onPasteFromClipboard = { host.openClawPasteOpenaiKey() },
             onClear = { host.openClawClearOpenaiKey() },
-        )
-
-        AudioTestPanel(
-            state = state,
-            onBack = { host.audioTestStop(); state.back(); host.backTone() },
+            onFontSizeChange = { size -> host.openClawSetFontSize(size) },
         )
 
         // Topbar overlay — hidden while apps or store panel (which have their own

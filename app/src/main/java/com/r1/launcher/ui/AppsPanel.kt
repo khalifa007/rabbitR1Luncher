@@ -120,7 +120,6 @@ fun AppsPanel(
                             is AppEntry.Real -> entry.info.activityInfo.packageName + "/" + entry.info.activityInfo.name
                             is AppEntry.Settings -> "settings/settings"
                             is AppEntry.OpenClaw -> "openclaw/openclaw"
-                            is AppEntry.AudioTest -> "audiotest/audiotest"
                         }
                     },
                 ) { idx, entry ->
@@ -163,14 +162,11 @@ private fun AppCard(
         is AppEntry.Real -> entry.info.activityInfo.packageName
         AppEntry.Settings -> "_r1_settings"
         AppEntry.OpenClaw -> "_r1_openclaw"
-        AppEntry.AudioTest -> "_r1_audiotest"
     }
     val isSettings = entry is AppEntry.Settings
     val isOpenClaw = entry is AppEntry.OpenClaw
-    val isAudioTest = entry is AppEntry.AudioTest
     val settingsPainter = if (isSettings) painterResource(R.drawable.ic_settings) else null
     val openClawPainter = if (isOpenClaw) painterResource(R.drawable.ic_wifi_arc) else null
-    val audioTestPainter = if (isAudioTest) painterResource(R.drawable.ic_signal_bars) else null
 
     var iconPainter by remember(pkg) {
         val cached = iconCache.get(pkg)
@@ -182,7 +178,6 @@ private fun AppCard(
                 is AppEntry.Real -> labelCache[pkg] ?: pkg.substringAfterLast('.').lowercase()
                 AppEntry.Settings -> "settings"
                 AppEntry.OpenClaw -> "openclaw"
-                AppEntry.AudioTest -> "audio test"
             }
         )
     }
@@ -248,7 +243,7 @@ private fun AppCard(
                 .fillMaxWidth()
                 .padding(start = 16.dp, end = 16.dp, top = 16.dp),
         ) {
-            val effectivePainter = settingsPainter ?: openClawPainter ?: audioTestPainter ?: iconPainter
+            val effectivePainter = settingsPainter ?: openClawPainter ?: iconPainter
             if (effectivePainter != null) {
                 Image(
                     painter = effectivePainter,

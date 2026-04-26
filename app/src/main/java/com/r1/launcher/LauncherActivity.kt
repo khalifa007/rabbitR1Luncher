@@ -77,7 +77,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private val openClawPrefs by lazy { OpenClawPrefs.get(this) }
     private var openClawSession: GatewaySession? = null
     private var openClawCapture: com.r1.launcher.openclaw.AudioCapture? = null
-    private val audioTester by lazy { com.r1.launcher.audio.AudioTester(this) }
 
     private val ui = Handler(Looper.getMainLooper())
     private val hm = SimpleDateFormat("h:mm a", Locale.getDefault())
@@ -193,6 +192,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
 
         state.openClawHideChat = openClawPrefs.hideChat
+        state.chatFontSize = openClawPrefs.chatFontSize
 
         loadApps()
 
@@ -211,7 +211,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.apps.clear()
         found.forEach { state.apps.add(AppEntry.Real(it)) }
         state.apps.add(AppEntry.OpenClaw)
-        state.apps.add(AppEntry.AudioTest)
         state.apps.add(AppEntry.Settings)
         state.appsLoaded = true
         if (state.appsFocus >= state.apps.size) state.appsFocus = 0
@@ -298,7 +297,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     override fun onDestroy() {
         super.onDestroy()
         runCatching { openClawCloseSessionInternal() }
-        runCatching { audioTester.close() }
         // Clean up UI handlers
         runCatching { ui.removeCallbacksAndMessages(null) }
         runCatching { tone?.release() }
@@ -438,11 +436,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     ensureCameraPerm()
                     state.openOpenClawQr()
                 }
-            }
-            AppEntry.AudioTest -> {
-                selectTone()
-                ensureAudioPerm()
-                state.openAudioTest()
             }
             null -> Unit
         }
@@ -996,8 +989,9 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 openClawPrefs.hideChat = newHide
                 popTone()
             }
-            3 -> { openClawClearHistory(); popTone() }
-            4 -> { openClawDisconnect(); popTone() }
+            // 3 (font size) is handled by +/- buttons in the UI
+            4 -> { openClawClearHistory(); popTone() }
+            5 -> { openClawDisconnect(); popTone() }
         }
     }
 
@@ -1013,6 +1007,13 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         toast("gateway disconnected")
     }
 
+    override fun openClawSetFontSize(size: Int) {
+        val clamped = size.coerceIn(8, 28)
+        state.chatFontSize = clamped
+        openClawPrefs.chatFontSize = clamped
+        popTone()
+    }
+
     private fun refreshOpenaiKeyState() {
         val k = openClawPrefs.openaiKey
         if (k.isNullOrBlank()) {
@@ -1022,72 +1023,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             state.chatHasOpenaiKey = true
             state.chatOpenaiKeyTail = k.takeLast(4)
         }
-    }
-
-    // --- audio test panel ---
-
-    override fun audioTestActivate() {
-        when {
-            audioTester.isRecording -> audioTester.stopRecording()
-            audioTester.isPlaying -> {
-                audioTester.stopPlayback()
-                state.audioTestStatus = "done"
-            }
-            else -> startAudioTestRecording()
-        }
-    }
-
-    override fun audioTestCycleSource(delta: Int) {
-        // Only allow source switches when nothing is happening — switching mid-record
-        // would silently leak the current AudioRecord.
-        if (audioTester.isRecording || audioTester.isPlaying) return
-        val n = com.r1.launcher.audio.AudioTester.Source.values().size
-        state.audioTestSourceIndex = ((state.audioTestSourceIndex + delta) % n + n) % n
-    }
-
-    override fun audioTestStop() {
-        runCatching { audioTester.close() }
-        state.audioTestStatus = "idle"
-        state.audioTestLevel = 0
-        state.audioTestPeak = 0
-    }
-
-    private fun startAudioTestRecording() {
-        if (!ensureAudioPerm()) {
-            toast("grant mic permission first")
-            return
-        }
-        val sources = com.r1.launcher.audio.AudioTester.Source.values()
-        val src = sources[state.audioTestSourceIndex.coerceIn(0, sources.lastIndex)]
-        state.audioTestStatus = "recording"
-        state.audioTestLevel = 0
-        state.audioTestPeak = 0
-        state.audioTestLastPeakOverall = 0
-        audioTester.startRecording(src, object : com.r1.launcher.audio.AudioTester.Callback {
-            override fun onLevel(rms: Int, peak: Int) {
-                state.audioTestLevel = rms
-                state.audioTestPeak = peak
-                if (peak > state.audioTestLastPeakOverall) state.audioTestLastPeakOverall = peak
-            }
-            override fun onRecordingDone(durationMs: Int, samples: Int, peakOverall: Int) {
-                state.audioTestLevel = 0
-                state.audioTestPeak = 0
-                state.audioTestLastDurationMs = durationMs
-                state.audioTestLastSamples = samples
-                state.audioTestLastPeakOverall = peakOverall
-                state.audioTestHasRecording = true
-                state.audioTestStatus = "playing"
-                audioTester.playback(this)
-            }
-            override fun onPlaybackDone() {
-                state.audioTestStatus = "done"
-            }
-            override fun onError(msg: String) {
-                state.audioTestStatus = "error: $msg"
-                state.audioTestLevel = 0
-                state.audioTestPeak = 0
-            }
-        })
     }
 
     private fun ensureCameraPerm(): Boolean {
