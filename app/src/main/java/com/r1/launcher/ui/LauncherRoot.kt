@@ -104,8 +104,9 @@ fun LauncherRoot(
                 when (idx) {
                     0 -> { state.back(); host.backTone() }
                     1 -> { host.toggleWifi(!state.wifiEnabled); host.popTone() }
-                    2 -> { host.toggleCellular(!state.cellularOn); host.popTone() }
-                    3 -> { host.startWifiScan(); state.openWifiScan(); host.selectTone() }
+                    2 -> { host.toggleBluetooth(!state.btOn); host.popTone() }
+                    3 -> { host.toggleCellular(!state.cellularOn); host.popTone() }
+                    4 -> { host.startWifiScan(); state.openWifiScan(); host.selectTone() }
                 }
             },
         )

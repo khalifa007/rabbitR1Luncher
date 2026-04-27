@@ -34,7 +34,7 @@ class LauncherState {
     var storeFocus by mutableIntStateOf(0)
     /** Detail overlay: 0=back, 1=open, 2=uninstall. */
     var detailFocus by mutableIntStateOf(0)
-    /** Settings panel rows: 0=Brightness, 1=Volume, 2=Wi-Fi, 3=Airplane/Data. */
+    /** Settings panel focus; network rows include Wi-Fi, Bluetooth, cellular, and scan. */
     var settingsFocus by mutableIntStateOf(0)
     var networkFocus by mutableIntStateOf(0)
     var wifiScanFocus by mutableIntStateOf(0)

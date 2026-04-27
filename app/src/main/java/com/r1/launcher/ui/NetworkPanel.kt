@@ -37,6 +37,7 @@ fun NetworkPanel(
         val items = listOf(
             SettingsItem.Standard("< back"),
             SettingsItem.Toggle("wifi", state.wifiEnabled, subtitle = if (state.wifiEnabled) state.wifiConnectedSsid else ""),
+            SettingsItem.Toggle("bluetooth", state.btOn),
             SettingsItem.Toggle("cellular data", state.cellularOn),
             SettingsItem.Standard("scan wifi networks"),
         )

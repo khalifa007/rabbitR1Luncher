@@ -369,7 +369,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
     private fun refreshBluetooth() {
         state.btOn = runCatching {
-            BluetoothAdapter.getDefaultAdapter()?.isEnabled == true
+            val globalState = Settings.Global.getInt(contentResolver, "bluetooth_on", -1)
+            if (globalState >= 0) globalState != 0 else BluetoothAdapter.getDefaultAdapter()?.isEnabled == true
         }.getOrDefault(false)
     }
 
@@ -837,6 +838,26 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 ui.post { 
                     state.wifiEnabled = !enable
                     toast("Root shell unavailable for Wi-Fi toggle") 
+                }
+            }
+        }.start()
+    }
+
+    override fun toggleBluetooth(enable: Boolean) {
+        state.btOn = enable
+        val cmd = if (enable) {
+            "svc bluetooth enable || cmd bluetooth_manager enable"
+        } else {
+            "svc bluetooth disable || cmd bluetooth_manager disable"
+        }
+        Thread {
+            if (sendToCarroot(cmd)) {
+                Thread.sleep(1500)
+                ui.post { refreshBluetooth() }
+            } else {
+                ui.post {
+                    state.btOn = !enable
+                    toast("Root shell unavailable for Bluetooth toggle")
                 }
             }
         }.start()

@@ -19,6 +19,7 @@ interface LauncherHost {
     fun setBrightness(level: Int)
     fun setVolume(level: Int)
     fun toggleWifi(enable: Boolean)
+    fun toggleBluetooth(enable: Boolean)
     fun toggleCellular(enable: Boolean)
     fun startWifiScan()
     fun connectToWifi(ssid: String, pass: String)
@@ -177,7 +178,7 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.NETWORK -> {
             val prev = networkFocus
-            networkFocus = (networkFocus + 1).coerceAtMost(3) // 4 rows: back, wifi, cellular, connect
+            networkFocus = (networkFocus + 1).coerceAtMost(4)
             if (prev != networkFocus) host.navTone()
         }
         Panel.WIFI_SCAN -> {
@@ -265,8 +266,9 @@ fun LauncherState.activate(host: LauncherHost) {
         Panel.NETWORK -> when (networkFocus) {
             0 -> { back(); host.backTone() }
             1 -> { host.toggleWifi(!wifiEnabled); host.popTone() }
-            2 -> { host.toggleCellular(!cellularOn); host.popTone() }
-            3 -> { host.startWifiScan(); openWifiScan(); host.selectTone() }
+            2 -> { host.toggleBluetooth(!btOn); host.popTone() }
+            3 -> { host.toggleCellular(!cellularOn); host.popTone() }
+            4 -> { host.startWifiScan(); openWifiScan(); host.selectTone() }
         }
         Panel.WIFI_SCAN -> {
             if (wifiScanFocus == 0) {
