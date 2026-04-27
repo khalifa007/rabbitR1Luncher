@@ -143,12 +143,19 @@ fun parseHistoryMessage(obj: JsonObject): ChatMessage? {
     if (SILENT_REPLY.matches(text) || isInternalMessage(text)) return null
     val ts = obj["timestamp"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
         ?: System.currentTimeMillis()
+    val explicitId = obj["id"]?.jsonPrimitive?.contentOrNull
+        ?: obj["messageId"]?.jsonPrimitive?.contentOrNull
+        ?: obj["__openclaw.seq"]?.jsonPrimitive?.contentOrNull
+    val messageHasImage = imageBase64 != null || hasImageRef || imageSource != null
+    val stableId = explicitId?.takeIf { it.isNotBlank() }?.let { "srv:$it" }
+        ?: "hist:${listOf(role, ts, text, imageSource.orEmpty(), messageHasImage).joinToString("|").hashCode()}"
     return ChatMessage(
         role = role,
         text = text.ifBlank { "attached image" },
         timestamp = ts,
+        id = stableId,
         imageBase64 = imageBase64,
         imageSource = imageSource,
-        hasImage = imageBase64 != null || hasImageRef || imageSource != null,
+        hasImage = messageHasImage,
     )
 }
