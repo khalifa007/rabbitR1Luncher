@@ -1,9 +1,11 @@
 package com.r1.launcher.ui
 
+import android.util.LruCache
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -21,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -38,7 +41,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.platform.LocalContext
@@ -47,16 +52,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import androidx.core.graphics.drawable.toBitmap
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.foundation.layout.offset
 import com.r1.launcher.AppEntry
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
 import com.r1.launcher.R
-
-import android.util.LruCache
-import androidx.compose.ui.graphics.ImageBitmap
 import java.util.concurrent.ConcurrentHashMap
 
 private val iconCache = LruCache<String, ImageBitmap>(50)
@@ -76,10 +75,6 @@ private val APP_PALETTE = listOf(
 private val FOCUSED_HEIGHT = 120.dp
 private val COLLAPSED_HEIGHT = 64.dp
 private val CARD_SHAPE = RoundedCornerShape(12.dp)
-private val CARD_SPRING = spring<androidx.compose.ui.unit.Dp>(
-    dampingRatio = 0.7f,
-    stiffness = Spring.StiffnessMediumLow,
-)
 
 @Composable
 fun AppsPanel(
@@ -94,60 +89,56 @@ fun AppsPanel(
         exit = fadeOut(tween(ANIM_CLOSE_MS)) +
             slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
     ) {
+        val listState = rememberLazyListState()
 
+        LaunchedEffect(state.appsFocus, state.apps.size) {
+            if (state.apps.isNotEmpty()) {
+                listState.animateScrollToItem(
+                    state.appsFocus.coerceIn(0, state.apps.lastIndex),
+                )
+            }
+        }
 
-            val listState = rememberLazyListState()
-            LaunchedEffect(state.appsFocus, state.apps.size) {
-                if (state.apps.isNotEmpty()) {
-                    listState.animateScrollToItem(
-                        state.appsFocus.coerceIn(0, state.apps.lastIndex),
+        LazyColumn(
+            state = listState,
+            contentPadding = PaddingValues(
+                start = 16.dp, end = 16.dp, top = 24.dp, bottom = 16.dp,
+            ),
+            verticalArrangement = Arrangement.spacedBy((-12).dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .wallpaper(),
+        ) {
+            itemsIndexed(
+                items = state.apps,
+                key = { _, entry -> appKey(entry) },
+                contentType = { _, entry -> appContentType(entry) },
+            ) { idx, entry ->
+                Box(
+                    modifier = Modifier
+                        .zIndex(idx.toFloat()),
+                ) {
+                    AppCard(
+                        entry = entry,
+                        focused = idx == state.appsFocus,
+                        background = APP_PALETTE[idx % APP_PALETTE.size],
+                        onClick = { onAppClick(idx) },
                     )
                 }
             }
 
-            LazyColumn(
-                state = listState,
-                contentPadding = PaddingValues(
-                    start = 16.dp, end = 16.dp, top = 24.dp, bottom = 16.dp,
-                ),
-                verticalArrangement = Arrangement.spacedBy((-12).dp),
-                modifier = Modifier.fillMaxSize().wallpaper(),
-            ) {
-                itemsIndexed(
-                    items = state.apps,
-                    key = { _, entry ->
-                        when(entry) {
-                            is AppEntry.Real -> entry.info.activityInfo.packageName + "/" + entry.info.activityInfo.name
-                            is AppEntry.Settings -> "settings/settings"
-                            is AppEntry.OpenClaw -> "openclaw/openclaw"
-                        }
-                    },
-                ) { idx, entry ->
-                    Box(
-                        modifier = Modifier
-                            .zIndex(idx.toFloat())
-                    ) {
-                        AppCard(
-                            entry = entry,
-                            focused = idx == state.appsFocus,
-                            background = APP_PALETTE[idx % APP_PALETTE.size],
-                            onClick = { onAppClick(idx) },
-                        )
-                    }
-                }
-                
-                item {
-                    FolderTray(
-                        modifier = Modifier
-                            .zIndex((state.apps.size + 1).toFloat())
-                            .fillMaxWidth()
-                            .height(120.dp)
-                            .offset(y = (-75).dp)
-                    )
-                }
+            item {
+                FolderTray(
+                    modifier = Modifier
+                        .zIndex((state.apps.size + 1).toFloat())
+                        .fillMaxWidth()
+                        .height(120.dp)
+                        .offset(y = (-75).dp),
+                )
             }
         }
     }
+}
 
 @Composable
 private fun AppCard(
@@ -178,7 +169,7 @@ private fun AppCard(
                 is AppEntry.Real -> labelCache[pkg] ?: pkg.substringAfterLast('.').lowercase()
                 AppEntry.Settings -> "settings"
                 AppEntry.OpenClaw -> "openclaw"
-            }
+            },
         )
     }
 
@@ -199,14 +190,15 @@ private fun AppCard(
         }
     }
 
-    val height by animateDpAsState(
-        if (focused) FOCUSED_HEIGHT else COLLAPSED_HEIGHT,
-        animationSpec = CARD_SPRING,
-        label = "cardHeight",
+    val height = if (focused) FOCUSED_HEIGHT else COLLAPSED_HEIGHT
+    val focusGlow by animateFloatAsState(
+        targetValue = if (focused) 1f else 0f,
+        animationSpec = tween(durationMillis = 150, easing = FastOutSlowInEasing),
+        label = "cardFocusGlow",
     )
 
     var shakeTrigger by remember { mutableStateOf(0) }
-    val offsetX = remember { androidx.compose.animation.core.Animatable(0f) }
+    val offsetX = remember { Animatable(0f) }
 
     LaunchedEffect(shakeTrigger) {
         if (shakeTrigger > 0) {
@@ -237,6 +229,14 @@ private fun AppCard(
         }
 
     Box(modifier = outer) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    alpha = focusGlow * 0.10f
+                }
+                .background(Color.White),
+        )
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
@@ -248,7 +248,7 @@ private fun AppCard(
                 Image(
                     painter = effectivePainter,
                     contentDescription = null,
-                    modifier = Modifier.size(24.dp)
+                    modifier = Modifier.size(24.dp),
                 )
             } else {
                 Box(modifier = Modifier.size(24.dp))
@@ -265,36 +265,48 @@ private fun AppCard(
     }
 }
 
+private fun appKey(entry: AppEntry): String = when (entry) {
+    is AppEntry.Real -> entry.info.activityInfo.packageName + "/" + entry.info.activityInfo.name
+    AppEntry.Settings -> "settings/settings"
+    AppEntry.OpenClaw -> "openclaw/openclaw"
+}
+
+private fun appContentType(entry: AppEntry): String = when (entry) {
+    is AppEntry.Real -> "real"
+    AppEntry.Settings -> "settings"
+    AppEntry.OpenClaw -> "openclaw"
+}
+
 class FolderShape : androidx.compose.ui.graphics.Shape {
     override fun createOutline(
         size: androidx.compose.ui.geometry.Size,
         layoutDirection: androidx.compose.ui.unit.LayoutDirection,
-        density: androidx.compose.ui.unit.Density
+        density: androidx.compose.ui.unit.Density,
     ): androidx.compose.ui.graphics.Outline {
         val path = androidx.compose.ui.graphics.Path().apply {
             val width = size.width
             val height = size.height
             val radius = 12f * density.density
-            
+
             moveTo(0f, height * 0.3f)
             cubicTo(
                 width * 0.3f, height * 0.3f,
                 width * 0.6f, height * 0.6f,
-                width, height * 0.6f
+                width, height * 0.6f,
             )
             lineTo(width, height - radius)
             arcTo(
                 rect = androidx.compose.ui.geometry.Rect(width - radius * 2, height - radius * 2, width, height),
                 startAngleDegrees = 0f,
                 sweepAngleDegrees = 90f,
-                forceMoveTo = false
+                forceMoveTo = false,
             )
             lineTo(radius, height)
             arcTo(
                 rect = androidx.compose.ui.geometry.Rect(0f, height - radius * 2, radius * 2, height),
                 startAngleDegrees = 90f,
                 sweepAngleDegrees = 90f,
-                forceMoveTo = false
+                forceMoveTo = false,
             )
             lineTo(0f, height * 0.3f)
             close()
@@ -310,6 +322,6 @@ fun FolderTray(modifier: Modifier = Modifier) {
         modifier = modifier
             .clip(folderShape)
             .background(Color(0xFFF57C00))
-            .border(2.dp, Color.Black, folderShape)
+            .border(2.dp, Color.Black, folderShape),
     )
 }

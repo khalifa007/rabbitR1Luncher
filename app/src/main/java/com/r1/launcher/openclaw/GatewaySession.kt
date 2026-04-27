@@ -143,6 +143,7 @@ class GatewaySession(
     fun send(
         text: String,
         audioBase64: String? = null,
+        imageBase64: String? = null,
         onAck: (success: Boolean, runId: String?, error: String?) -> Unit = { _, _, _ -> },
     ) {
         scope.launch {
@@ -153,14 +154,24 @@ class GatewaySession(
                     put("thinking", JsonPrimitive("off"))
                     put("timeoutMs", JsonPrimitive(60_000L))
                     put("idempotencyKey", JsonPrimitive(UUID.randomUUID().toString()))
-                    if (audioBase64 != null) {
+                    if (audioBase64 != null || imageBase64 != null) {
                         put("attachments", buildJsonArray {
-                            add(buildJsonObject {
-                                put("type", JsonPrimitive("audio"))
-                                put("mimeType", JsonPrimitive("audio/wav"))
-                                put("fileName", JsonPrimitive("voice.wav"))
-                                put("content", JsonPrimitive(audioBase64))
-                            })
+                            if (audioBase64 != null) {
+                                add(buildJsonObject {
+                                    put("type", JsonPrimitive("audio"))
+                                    put("mimeType", JsonPrimitive("audio/wav"))
+                                    put("fileName", JsonPrimitive("voice.wav"))
+                                    put("content", JsonPrimitive(audioBase64))
+                                })
+                            }
+                            if (imageBase64 != null) {
+                                add(buildJsonObject {
+                                    put("type", JsonPrimitive("image"))
+                                    put("mimeType", JsonPrimitive("image/jpeg"))
+                                    put("fileName", JsonPrimitive("r1-camera.jpg"))
+                                    put("content", JsonPrimitive(imageBase64))
+                                })
+                            }
                         })
                     }
                 }
@@ -512,7 +523,7 @@ class GatewaySession(
             "delta" -> {
                 val msg = payload["message"] as? JsonObject ?: return
                 val deltaText = extractText(msg["content"] as? JsonArray)
-                if (deltaText.isNotEmpty()) onChatDelta(runId, deltaText)
+                if (deltaText.isNotEmpty() && !isInternalMessage(deltaText)) onChatDelta(runId, deltaText)
             }
             "final", "aborted", "error" -> {
                 val errMsg = if (state == "error") {

@@ -34,6 +34,8 @@ interface LauncherHost {
     fun openClawRecordStart()
     fun openClawRecordStop()
     fun openClawSendText(text: String)
+    fun openClawOpenTalk()
+    fun openClawSetSpeaker(enabled: Boolean)
     fun openClawScrollUp()
     fun openClawScrollDown()
     fun openClawCloseSession()
@@ -47,6 +49,10 @@ interface LauncherHost {
     fun openClawSwitchSession(key: String)
     fun openClawRefreshSessions()
     fun openClawSessionsRowActivate(idx: Int)
+    fun openClawOpenCameraAsk()
+    fun openClawCameraCaptured(jpegBytes: ByteArray)
+    fun openClawCameraRetake()
+    fun openClawCameraSend(prompt: String)
 }
 
 fun LauncherState.wheelUp(host: LauncherHost) {
@@ -115,6 +121,8 @@ fun LauncherState.wheelUp(host: LauncherHost) {
         }
         Panel.OPENCLAW_QR -> { /* camera handles input */ }
         Panel.OPENCLAW_CHAT -> { host.openClawScrollUp(); host.navTone() }
+        Panel.OPENCLAW_TALK -> { host.openClawSetSpeaker(!chatTtsEnabled); host.navTone() }
+        Panel.OPENCLAW_CAMERA -> { /* camera panel owns touch/keyboard controls */ }
         Panel.OPENCLAW_SETTINGS -> {
             if (openClawSettingsFocus <= 0) {
                 back(); host.backTone()
@@ -196,6 +204,8 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.OPENCLAW_QR -> { /* camera handles input */ }
         Panel.OPENCLAW_CHAT -> { host.openClawScrollDown(); host.navTone() }
+        Panel.OPENCLAW_TALK -> { host.openClawSetSpeaker(!chatTtsEnabled); host.navTone() }
+        Panel.OPENCLAW_CAMERA -> { /* camera panel owns touch/keyboard controls */ }
         Panel.OPENCLAW_SETTINGS -> {
             val prev = openClawSettingsFocus
             openClawSettingsFocus = (openClawSettingsFocus + 1).coerceAtMost(5)
@@ -271,6 +281,8 @@ fun LauncherState.activate(host: LauncherHost) {
         Panel.BRIGHTNESS, Panel.VOLUME -> { back(); host.selectTone() }
         Panel.OPENCLAW_QR -> { /* camera scan auto-completes; activate is no-op */ }
         Panel.OPENCLAW_CHAT -> { host.openClawToggleRecord(); host.popTone() }
+        Panel.OPENCLAW_TALK -> { host.openClawToggleRecord(); host.popTone() }
+        Panel.OPENCLAW_CAMERA -> { /* touch-first capture/ask surface */ }
         Panel.OPENCLAW_SETTINGS -> {
             host.openClawSettingsRowActivate(openClawSettingsFocus)
             host.selectTone()
@@ -290,6 +302,10 @@ fun LauncherState.activate(host: LauncherHost) {
 fun LauncherState.backPressed(host: LauncherHost) {
     if (panel == Panel.OPENCLAW_CHAT || panel == Panel.OPENCLAW_QR) {
         host.openClawCloseSession()
+        back(); host.backTone()
+        return
+    }
+    if (panel == Panel.OPENCLAW_TALK || panel == Panel.OPENCLAW_CAMERA) {
         back(); host.backTone()
         return
     }

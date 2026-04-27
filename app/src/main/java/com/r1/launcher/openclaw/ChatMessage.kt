@@ -12,6 +12,8 @@ data class ChatMessage(
     val streaming: Boolean = false,
     val timestamp: Long = System.currentTimeMillis(),
     val id: String = UUID.randomUUID().toString(),
+    val imageBase64: String? = null,
+    val hasImage: Boolean = imageBase64 != null,
 )
 
 fun extractText(content: JsonArray?): String {
@@ -53,7 +55,55 @@ private fun extractMessageText(obj: JsonObject): String {
     return ""
 }
 
+private fun extractImageBase64(content: JsonArray?): String? {
+    if (content == null) return null
+    for (el in content) {
+        val obj = el as? JsonObject ?: continue
+        val type = obj["type"]?.jsonPrimitive?.contentOrNull ?: continue
+        if (type != "image") continue
+        val raw = obj["content"]?.jsonPrimitive?.contentOrNull
+            ?: obj["base64"]?.jsonPrimitive?.contentOrNull
+            ?: continue
+        return raw.substringAfter("base64,", raw).takeIf { it.isNotBlank() }
+    }
+    return null
+}
+
+private val IMAGE_REF = Regex("""(?i)(^|\s)@?/\S+\.(jpg|jpeg|png|webp)\b""")
 private val SILENT_REPLY = Regex("^\\s*NO_REPLY\\s*$")
+
+private fun cleanImageRefs(text: String): Pair<String, Boolean> {
+    var found = false
+    val cleaned = IMAGE_REF.replace(text) {
+        found = true
+        "\nattached image"
+    }
+        .replace(Regex("(attached image\\s*){2,}", RegexOption.IGNORE_CASE), "attached image")
+        .replace(Regex("\\n{3,}"), "\n\n")
+        .trim()
+    return cleaned to found
+}
+
+/**
+ * Detect internal/system messages that the openclaw agent injects into the
+ * chat history but should never be shown to the end user. These include:
+ *   - HEARTBEAT_OK responses and heartbeat check prompts
+ *   - System-prompt-style instruction blocks ("Read HEARTBEAT.md …")
+ *   - Slash-command echoes (/status, /ping, etc.)
+ */
+internal fun isInternalMessage(text: String): Boolean {
+    val t = text.trim()
+    // HEARTBEAT_OK or similar short ack tokens
+    if (t.length < 80 && t.uppercase().let {
+            "HEARTBEAT" in it || "NO_REPLY" in it
+        }) return true
+    // System prompt leaks — instruction blocks directed at the AI
+    if (t.startsWith("Read HEARTBEAT", ignoreCase = true)) return true
+    if (t.startsWith("You are ", ignoreCase = true) && t.length > 200) return true
+    // Slash commands echoed into history
+    if (t.startsWith("/") && t.length < 40 && ' ' !in t.substring(1).trimEnd()) return true
+    return false
+}
 
 fun parseHistoryMessage(obj: JsonObject): ChatMessage? {
     val role = obj["role"]?.jsonPrimitive?.contentOrNull ?: return null
@@ -61,11 +111,18 @@ fun parseHistoryMessage(obj: JsonObject): ChatMessage? {
     if (role != "user" && role != "assistant") return null
     // Server already strips envelopes via stripEnvelopeFromMessages,
     // so we just need to extract raw text from whichever format it uses.
-    val text = extractMessageText(obj)
-    // Drop empty bubbles and silent NO_REPLY placeholders
-    if (text.isBlank() || SILENT_REPLY.matches(text)) return null
+    val imageBase64 = extractImageBase64(obj["content"] as? JsonArray)
+    val (text, hasImageRef) = cleanImageRefs(extractMessageText(obj))
+    // Drop empty bubbles, silent NO_REPLY placeholders, and internal messages
+    if (text.isBlank() && imageBase64 == null && !hasImageRef) return null
+    if (SILENT_REPLY.matches(text) || isInternalMessage(text)) return null
     val ts = obj["timestamp"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
         ?: System.currentTimeMillis()
-    return ChatMessage(role = role, text = text, timestamp = ts)
+    return ChatMessage(
+        role = role,
+        text = text.ifBlank { "attached image" },
+        timestamp = ts,
+        imageBase64 = imageBase64,
+        hasImage = imageBase64 != null || hasImageRef,
+    )
 }
-

@@ -1,5 +1,7 @@
 package com.r1.launcher.ui
 
+import android.graphics.BitmapFactory
+import android.util.Base64
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -11,6 +13,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -31,10 +34,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -45,7 +44,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -73,6 +74,8 @@ fun OpenClawChatPanel(
     onOpenSettings: () -> Unit = {},
     onSwitchSession: (String) -> Unit = {},
     onOpenSessions: () -> Unit = {},
+    onOpenCamera: () -> Unit = {},
+    onOpenTalk: () -> Unit = {},
 ) {
     AnimatedVisibility(
         visible = state.panel == Panel.OPENCLAW_CHAT,
@@ -83,174 +86,184 @@ fun OpenClawChatPanel(
     ) {
         val colors = LocalR1Colors.current
         val type = LocalR1Type.current
-        Column(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+        var menuOpen by remember { mutableStateOf(false) }
 
-            // header
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 4.dp),
-            ) {
-                BackPill(label = "home", onClick = onBack)
-                Spacer(Modifier.weight(1f))
-                StatusDot(state.chatStatus)
-                when {
-                    state.chatRecording -> {
-                        Spacer(Modifier.width(6.dp))
-                        Text("rec", style = type.appCard, color = Color(0xFFFF4500))
-                    }
-                    state.chatTranscribing -> {
-                        Spacer(Modifier.width(6.dp))
-                        Text("stt", style = type.appCard, color = Color(0xFFFFC107))
-                    }
-                    state.chatBusy -> {
-                        Spacer(Modifier.width(6.dp))
-                        Text("...", style = type.appCard, color = Color.White)
-                    }
-                }
-                Spacer(Modifier.width(8.dp))
-                ChatThreadsPill(onClick = onOpenSessions)
-                SettingsPill(
-                    keySet = state.chatHasOpenaiKey,
-                    onClick = onOpenSettings,
-                )
-            }
+        Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+            Column(modifier = Modifier.fillMaxSize()) {
 
-            val listState = rememberLazyListState()
-            var lastTick by remember { mutableStateOf(state.chatScrollIndex) }
-
-            // chatScrollIndex is now a relative scroll tick. 0 means "reset to bottom".
-            LaunchedEffect(state.chatScrollIndex, state.chatMessages.size) {
-                if (state.chatScrollIndex == 0 && lastTick != 0) {
-                    runCatching { listState.animateScrollToItem(0) }
-                    lastTick = 0
-                } else if (state.chatScrollIndex != lastTick) {
-                    val diff = state.chatScrollIndex - lastTick
-                    lastTick = state.chatScrollIndex
-                    runCatching {
-                        listState.animateScrollBy(diff.toFloat() * 300f)
-                    }
-                }
-            }
-
-            LazyColumn(
-                state = listState,
-                reverseLayout = true,
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-            ) {
-                // Typing indicator — shows while waiting for assistant to start
-                // streaming. Sits at item 0 (bottom with reverseLayout=true).
-                if (state.chatBusy && state.chatStreamingText.isBlank()) {
-                    item("typing") {
-                        Bubble(
-                            ChatMessage(
-                                role = "assistant",
-                                text = "writing",
-                                streaming = true,
-                            ),
-                            fontSize = state.chatFontSize,
-                        )
-                    }
-                }
-                // Live assistant streaming preview — sits at item 0 so with
-                // reverseLayout=true it renders at the bottom of the chat,
-                // beneath the most recent persisted bubble. Cleared when the
-                // run reaches a terminal state and chat.history refreshes.
-                if (state.chatStreamingText.isNotBlank()) {
-                    item("streaming") {
-                        Bubble(
-                            ChatMessage(
-                                role = "assistant",
-                                text = state.chatStreamingText,
-                                streaming = true,
-                            ),
-                            fontSize = state.chatFontSize,
-                        )
-                    }
-                }
-                if (state.chatMessages.isEmpty() && state.chatStreamingText.isBlank()) {
-                    item {
-                        EmptyHint(state.chatStatus)
-                    }
-                } else {
-                    val reversed = state.chatMessages.asReversed()
-                    itemsIndexed(reversed) { _, msg ->
-                        Bubble(msg, fontSize = state.chatFontSize)
-                    }
-                }
-            }
-
-            // live transcript (only while recording)
-            if (state.chatRecording && state.chatPartialText.isNotBlank()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = state.chatPartialText,
-                        style = type.appCard,
-                        color = Color(0xFFFF4500),
-                        textAlign = TextAlign.Center,
-                        maxLines = 2,
-                    )
-                }
-            }
-
-            var inputText by remember { mutableStateOf("") }
-            var showKeyboard by remember { mutableStateOf(false) }
-
-            if (!state.openClawHideChat) {
+                // header
                 Row(
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .border(2.dp, Color(0xFFFF4500), RoundedCornerShape(12.dp))
-                        .background(Color.Black)
-                        .clickable { showKeyboard = !showKeyboard }
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 4.dp),
                 ) {
-                    Text(
-                        text = if (inputText.isEmpty()) "type here..." else inputText + if (showKeyboard) "_" else "",
-                        style = type.appCard,
-                        color = if (inputText.isEmpty()) Color.Gray else Color.White,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = "send",
-                        style = type.appCard,
-                        color = Color(0xFFFF4500),
-                        modifier = Modifier.clickable {
-                            if (inputText.isNotBlank()) {
-                                onSend(inputText)
-                                inputText = ""
-                                showKeyboard = false
-                            }
+                    BackPill(label = "home", onClick = onBack)
+                    Spacer(Modifier.weight(1f))
+                    StatusDot(state.chatStatus)
+                    when {
+                        state.chatRecording -> {
+                            Spacer(Modifier.width(6.dp))
+                            Text("rec", style = type.appCard, color = Color(0xFFFF4500))
                         }
-                    )
+                        state.chatTranscribing -> {
+                            Spacer(Modifier.width(6.dp))
+                            Text("stt", style = type.appCard, color = Color(0xFFFFC107))
+                        }
+                        state.chatBusy -> {
+                            Spacer(Modifier.width(6.dp))
+                            Text("...", style = type.appCard, color = Color.White)
+                        }
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    MenuDot(onClick = { menuOpen = !menuOpen })
                 }
-                
-                AnimatedVisibility(
-                    visible = showKeyboard,
-                    enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                    exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
+
+                val listState = rememberLazyListState()
+                var lastTick by remember { mutableStateOf(state.chatScrollIndex) }
+
+                // chatScrollIndex is now a relative scroll tick. 0 means "reset to bottom".
+                LaunchedEffect(state.chatScrollIndex, state.chatMessages.size) {
+                    if (state.chatScrollIndex == 0 && lastTick != 0) {
+                        runCatching { listState.animateScrollToItem(0) }
+                        lastTick = 0
+                    } else if (state.chatScrollIndex != lastTick) {
+                        val diff = state.chatScrollIndex - lastTick
+                        lastTick = state.chatScrollIndex
+                        runCatching {
+                            listState.animateScrollBy(diff.toFloat() * 300f)
+                        }
+                    }
+                }
+
+                LazyColumn(
+                    state = listState,
+                    reverseLayout = true,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
                 ) {
-                    RetroKeyboard(
-                        onKeyPress = { char -> inputText += char },
-                        onBackspace = { if (inputText.isNotEmpty()) inputText = inputText.dropLast(1) },
-                        onDismiss = { showKeyboard = false }
-                    )
+                    // Typing indicator — shows while waiting for assistant to start
+                    // streaming. Sits at item 0 (bottom with reverseLayout=true).
+                    if (state.chatBusy && state.chatStreamingText.isBlank()) {
+                        item("typing") {
+                            Bubble(
+                                ChatMessage(
+                                    role = "assistant",
+                                    text = "writing",
+                                    streaming = true,
+                                ),
+                                fontSize = state.chatFontSize,
+                            )
+                        }
+                    }
+                    // Live assistant streaming preview — sits at item 0 so with
+                    // reverseLayout=true it renders at the bottom of the chat,
+                    // beneath the most recent persisted bubble. Cleared when the
+                    // run reaches a terminal state and chat.history refreshes.
+                    if (state.chatStreamingText.isNotBlank()) {
+                        item("streaming") {
+                            Bubble(
+                                ChatMessage(
+                                    role = "assistant",
+                                    text = state.chatStreamingText,
+                                    streaming = true,
+                                ),
+                                fontSize = state.chatFontSize,
+                            )
+                        }
+                    }
+                    if (state.chatMessages.isEmpty() && state.chatStreamingText.isBlank()) {
+                        item {
+                            EmptyHint(state.chatStatus)
+                        }
+                    } else {
+                        val reversed = state.chatMessages.asReversed()
+                        itemsIndexed(reversed) { _, msg ->
+                            Bubble(msg, fontSize = state.chatFontSize)
+                        }
+                    }
+                }
+
+                // live transcript (only while recording)
+                if (state.chatRecording && state.chatPartialText.isNotBlank()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = state.chatPartialText,
+                            style = type.appCard,
+                            color = Color(0xFFFF4500),
+                            textAlign = TextAlign.Center,
+                            maxLines = 2,
+                        )
+                    }
+                }
+
+                var inputText by remember { mutableStateOf("") }
+                var showKeyboard by remember { mutableStateOf(false) }
+
+                if (!state.openClawHideChat) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .border(2.dp, Color(0xFFFF4500), RoundedCornerShape(12.dp))
+                            .background(Color.Black)
+                            .clickable { showKeyboard = !showKeyboard }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (inputText.isEmpty()) "type here..." else inputText + if (showKeyboard) "_" else "",
+                            style = type.appCard,
+                            color = if (inputText.isEmpty()) Color.Gray else Color.White,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "send",
+                            style = type.appCard,
+                            color = Color(0xFFFF4500),
+                            modifier = Modifier.clickable {
+                                if (inputText.isNotBlank()) {
+                                    onSend(inputText)
+                                    inputText = ""
+                                    showKeyboard = false
+                                }
+                            }
+                        )
+                    }
+                    
+                    AnimatedVisibility(
+                        visible = showKeyboard,
+                        enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                        exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
+                    ) {
+                        RetroKeyboard(
+                            onKeyPress = { char -> inputText += char },
+                            onBackspace = { if (inputText.isNotEmpty()) inputText = inputText.dropLast(1) },
+                            onDismiss = { showKeyboard = false }
+                        )
+                    }
                 }
             }
+
+            // Dropdown menu overlay — rendered on top of the Column z-stack
+            ChatDropdownMenu(
+                expanded = menuOpen,
+                onDismiss = { menuOpen = false },
+                onTalk = { menuOpen = false; onOpenTalk() },
+                onCamera = { menuOpen = false; onOpenCamera() },
+                onSessions = { menuOpen = false; onOpenSessions() },
+                onSettings = { menuOpen = false; onOpenSettings() },
+            )
         }
     }
 }
@@ -292,37 +305,90 @@ private fun EmptyHint(status: String) {
 }
 
 @Composable
-private fun ChatThreadsPill(onClick: () -> Unit) {
+private fun MenuDot(onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .clip(CircleShape)
             .clickable(onClick = onClick)
-            .padding(8.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            imageVector = Icons.AutoMirrored.Filled.List,
-            contentDescription = "threads",
-            tint = Color(0xFFFF4500),
-            modifier = Modifier.size(24.dp),
-        )
+        // Vertical three-dot icon (⋮) built from 3 small circles
+        Column(
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            repeat(3) {
+                Box(
+                    modifier = Modifier
+                        .size(4.dp)
+                        .background(Color(0xFFFF4500), CircleShape),
+                )
+            }
+        }
     }
 }
 
 @Composable
-private fun SettingsPill(keySet: Boolean, onClick: () -> Unit) {
+private fun ChatDropdownMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    onTalk: () -> Unit,
+    onCamera: () -> Unit,
+    onSessions: () -> Unit,
+    onSettings: () -> Unit,
+) {
+    val type = LocalR1Type.current
+    if (expanded) {
+        // Invisible scrim behind menu — catches taps to dismiss
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable(onClick = onDismiss),
+        )
+    }
+    AnimatedVisibility(
+        visible = expanded,
+        enter = fadeIn(tween(120)) + slideInVertically(tween(150)) { -it / 2 },
+        exit = fadeOut(tween(100)) + slideOutVertically(tween(100)) { -it / 2 },
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = 38.dp, end = 12.dp),
+            contentAlignment = Alignment.TopEnd,
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(160.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xFF1A1A1A))
+                    .border(1.dp, Color(0xFFFF4500).copy(alpha = 0.4f), RoundedCornerShape(10.dp))
+                    .padding(vertical = 4.dp),
+            ) {
+                MenuRow(label = "talk", onClick = onTalk)
+                MenuRow(label = "cam", onClick = onCamera)
+                MenuRow(label = "sessions", onClick = onSessions)
+                MenuRow(label = "settings", onClick = onSettings)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MenuRow(label: String, onClick: () -> Unit) {
+    val type = LocalR1Type.current
     Box(
         modifier = Modifier
-            .clip(CircleShape)
+            .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(8.dp),
-        contentAlignment = Alignment.Center,
+            .padding(horizontal = 20.dp, vertical = 8.dp),
     ) {
-        Icon(
-            imageVector = Icons.Default.Settings,
-            contentDescription = "settings",
-            tint = Color(0xFFFF4500),
-            modifier = Modifier.size(24.dp)
+        Text(
+            text = label,
+            style = type.appCard.copy(fontSize = 18.sp),
+            color = Color(0xFFFF4500),
         )
     }
 }
@@ -347,7 +413,12 @@ private fun Bubble(msg: ChatMessage, fontSize: Int = 14) {
                 .background(bg)
                 .padding(horizontal = 10.dp, vertical = 7.dp),
         ) {
-            Row(verticalAlignment = Alignment.Bottom) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                when {
+                    msg.imageBase64 != null -> ImageAttachmentPreview(msg.imageBase64)
+                    msg.hasImage -> AttachedImageLabel(isUser = isUser)
+                }
+                Row(verticalAlignment = Alignment.Bottom) {
                 if (isUser) {
                     Text(
                         text = msg.text.ifEmpty { if (msg.streaming) "…" else "" },
@@ -402,10 +473,10 @@ private fun Bubble(msg: ChatMessage, fontSize: Int = 14) {
                             if (node.type.name == "STRONG" || node.type.name == "EMPH") {
                                 val raw = content.substring(node.startOffset, node.endOffset)
                                 val stripped = when {
-                                    raw.startsWith("**") && raw.endsWith("**") -> raw.substring(2, raw.length - 2)
-                                    raw.startsWith("__") && raw.endsWith("__") -> raw.substring(2, raw.length - 2)
-                                    raw.startsWith("*") && raw.endsWith("*") -> raw.substring(1, raw.length - 1)
-                                    raw.startsWith("_") && raw.endsWith("_") -> raw.substring(1, raw.length - 1)
+                                    raw.length >= 4 && raw.startsWith("**") && raw.endsWith("**") -> raw.substring(2, raw.length - 2)
+                                    raw.length >= 4 && raw.startsWith("__") && raw.endsWith("__") -> raw.substring(2, raw.length - 2)
+                                    raw.length >= 2 && raw.startsWith("*") && raw.endsWith("*") -> raw.substring(1, raw.length - 1)
+                                    raw.length >= 2 && raw.startsWith("_") && raw.endsWith("_") -> raw.substring(1, raw.length - 1)
                                     else -> raw
                                 }
                                 pushStyle(SpanStyle(color = Color(0xFFFF4500)))
@@ -416,12 +487,54 @@ private fun Bubble(msg: ChatMessage, fontSize: Int = 14) {
                         },
                     )
                 }
-                if (msg.streaming) {
-                    Spacer(Modifier.width(2.dp))
-                    StreamingCaret()
+                    if (msg.streaming) {
+                        Spacer(Modifier.width(2.dp))
+                        StreamingCaret()
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ImageAttachmentPreview(imageBase64: String) {
+    val bitmap = remember(imageBase64) {
+        runCatching {
+            val bytes = Base64.decode(imageBase64, Base64.DEFAULT)
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+        }.getOrNull()
+    }
+    if (bitmap == null) {
+        AttachedImageLabel(isUser = true)
+        return
+    }
+    Image(
+        bitmap = bitmap,
+        contentDescription = null,
+        contentScale = ContentScale.Crop,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(128.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .border(2.dp, Color.Black, RoundedCornerShape(8.dp)),
+    )
+}
+
+@Composable
+private fun AttachedImageLabel(isUser: Boolean) {
+    val type = LocalR1Type.current
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (isUser) Color.Black.copy(alpha = 0.16f) else Color(0xFFFF4500).copy(alpha = 0.18f))
+            .padding(horizontal = 8.dp, vertical = 5.dp),
+    ) {
+        Text(
+            text = "attached image",
+            style = type.appCard.copy(fontSize = 16.sp),
+            color = if (isUser) Color.Black else Color(0xFFFF4500),
+        )
     }
 }
 
@@ -445,4 +558,3 @@ private fun StreamingCaret() {
             .background(colors.accent, RoundedCornerShape(1.dp)),
     )
 }
-
