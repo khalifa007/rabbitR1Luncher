@@ -9,7 +9,7 @@ import androidx.compose.runtime.setValue
 import com.r1.launcher.openclaw.ChatMessage
 import com.r1.launcher.openclaw.SessionEntry
 
-enum class Panel { HOME, SHEET, APPS, STORE, DETAIL, SETTINGS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, BRIGHTNESS, VOLUME, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_TALK, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS }
+enum class Panel { HOME, SHEET, APPS, STORE, DETAIL, SETTINGS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, BRIGHTNESS, VOLUME, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_TALK, OPENCLAW_CANVAS, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS }
 
 /**
  * Single container for all UI state. Activity mutates; Compose reads.
@@ -94,6 +94,7 @@ class LauncherState {
     var chatRecording by mutableStateOf(false)
     var chatBusy by mutableStateOf(false)
     var chatScrollIndex by mutableIntStateOf(0)
+    var canvasScrollIndex by mutableIntStateOf(0)
     /** Live mic peak 0..100, used by the talk-mode input ring. */
     var chatInputLevel by mutableIntStateOf(0)
     /** Running speech-to-text transcript while recording. Cleared on stop. */
@@ -203,6 +204,11 @@ class LauncherState {
         panel = Panel.OPENCLAW_TALK
     }
 
+    fun openOpenClawCanvas() {
+        canvasScrollIndex = 0
+        panel = Panel.OPENCLAW_CANVAS
+    }
+
     fun openOpenClawCamera() {
         openClawCameraPrompt = "what do you see?"
         openClawCameraJpegBase64 = null
@@ -239,6 +245,7 @@ class LauncherState {
             Panel.STORE, Panel.APPS, Panel.SHEET -> Panel.HOME
             Panel.OPENCLAW_QR, Panel.OPENCLAW_CHAT -> Panel.APPS
             Panel.OPENCLAW_TALK -> Panel.OPENCLAW_CHAT
+            Panel.OPENCLAW_CANVAS -> Panel.OPENCLAW_CHAT
             Panel.OPENCLAW_CAMERA -> Panel.OPENCLAW_CHAT
             Panel.OPENCLAW_SETTINGS, Panel.OPENCLAW_SESSIONS -> Panel.OPENCLAW_CHAT
             Panel.HOME -> Panel.HOME

@@ -13,7 +13,8 @@ data class ChatMessage(
     val timestamp: Long = System.currentTimeMillis(),
     val id: String = UUID.randomUUID().toString(),
     val imageBase64: String? = null,
-    val hasImage: Boolean = imageBase64 != null,
+    val imageSource: String? = null,
+    val hasImage: Boolean = imageBase64 != null || imageSource != null,
 )
 
 fun extractText(content: JsonArray?): String {
@@ -69,19 +70,41 @@ private fun extractImageBase64(content: JsonArray?): String? {
     return null
 }
 
-private val IMAGE_REF = Regex("""(?i)(^|\s)@?/\S+\.(jpg|jpeg|png|webp)\b""")
+private val IMAGE_REF = Regex("""(?i)(^|\s)(?:MEDIA:)?(@?/\S+\.(jpg|jpeg|png|webp))\b""")
 private val SILENT_REPLY = Regex("^\\s*NO_REPLY\\s*$")
 
-private fun cleanImageRefs(text: String): Pair<String, Boolean> {
-    var found = false
+private fun cleanImageRefs(text: String): Triple<String, Boolean, String?> {
+    var imageSource: String? = null
     val cleaned = IMAGE_REF.replace(text) {
-        found = true
+        val raw = it.groupValues.getOrNull(2)?.trim()
+        if (imageSource == null && !raw.isNullOrBlank()) {
+            imageSource = raw.removePrefix("@")
+        }
         "\nattached image"
     }
         .replace(Regex("(attached image\\s*){2,}", RegexOption.IGNORE_CASE), "attached image")
         .replace(Regex("\\n{3,}"), "\n\n")
         .trim()
-    return cleaned to found
+    return Triple(cleaned, imageSource != null, imageSource)
+}
+
+private fun imageSourceFromTranscriptFields(obj: JsonObject): String? {
+    val direct = obj["MediaPath"]?.jsonPrimitive?.contentOrNull
+        ?: obj["mediaPath"]?.jsonPrimitive?.contentOrNull
+        ?: obj["mediaUrl"]?.jsonPrimitive?.contentOrNull
+    if (!direct.isNullOrBlank() && IMAGE_REF.containsMatchIn(" $direct")) {
+        return direct.removePrefix("MEDIA:").removePrefix("@")
+    }
+    val paths = obj["MediaPaths"] as? JsonArray ?: obj["mediaUrls"] as? JsonArray
+    if (paths != null) {
+        for (el in paths) {
+            val value = el.jsonPrimitive.contentOrNull?.trim().orEmpty()
+            if (value.isNotBlank() && IMAGE_REF.containsMatchIn(" $value")) {
+                return value.removePrefix("MEDIA:").removePrefix("@")
+            }
+        }
+    }
+    return null
 }
 
 /**
@@ -112,7 +135,9 @@ fun parseHistoryMessage(obj: JsonObject): ChatMessage? {
     // Server already strips envelopes via stripEnvelopeFromMessages,
     // so we just need to extract raw text from whichever format it uses.
     val imageBase64 = extractImageBase64(obj["content"] as? JsonArray)
-    val (text, hasImageRef) = cleanImageRefs(extractMessageText(obj))
+    val fieldImageSource = imageSourceFromTranscriptFields(obj)
+    val (text, hasImageRef, textImageSource) = cleanImageRefs(extractMessageText(obj))
+    val imageSource = textImageSource ?: fieldImageSource
     // Drop empty bubbles, silent NO_REPLY placeholders, and internal messages
     if (text.isBlank() && imageBase64 == null && !hasImageRef) return null
     if (SILENT_REPLY.matches(text) || isInternalMessage(text)) return null
@@ -123,6 +148,7 @@ fun parseHistoryMessage(obj: JsonObject): ChatMessage? {
         text = text.ifBlank { "attached image" },
         timestamp = ts,
         imageBase64 = imageBase64,
-        hasImage = imageBase64 != null || hasImageRef,
+        imageSource = imageSource,
+        hasImage = imageBase64 != null || hasImageRef || imageSource != null,
     )
 }
