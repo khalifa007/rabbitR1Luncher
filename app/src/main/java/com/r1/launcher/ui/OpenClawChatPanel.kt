@@ -76,6 +76,7 @@ fun OpenClawChatPanel(
     onOpenSessions: () -> Unit = {},
     onOpenCamera: () -> Unit = {},
     onOpenTalk: () -> Unit = {},
+    onOpenCanvas: () -> Unit = {},
 ) {
     AnimatedVisibility(
         visible = state.panel == Panel.OPENCLAW_CHAT,
@@ -260,6 +261,7 @@ fun OpenClawChatPanel(
                 expanded = menuOpen,
                 onDismiss = { menuOpen = false },
                 onTalk = { menuOpen = false; onOpenTalk() },
+                onCanvas = { menuOpen = false; onOpenCanvas() },
                 onCamera = { menuOpen = false; onOpenCamera() },
                 onSessions = { menuOpen = false; onOpenSessions() },
                 onSettings = { menuOpen = false; onOpenSettings() },
@@ -334,6 +336,7 @@ private fun ChatDropdownMenu(
     expanded: Boolean,
     onDismiss: () -> Unit,
     onTalk: () -> Unit,
+    onCanvas: () -> Unit,
     onCamera: () -> Unit,
     onSessions: () -> Unit,
     onSettings: () -> Unit,
@@ -368,6 +371,7 @@ private fun ChatDropdownMenu(
                     .padding(vertical = 4.dp),
             ) {
                 MenuRow(label = "talk", onClick = onTalk)
+                MenuRow(label = "canvas", onClick = onCanvas)
                 MenuRow(label = "cam", onClick = onCamera)
                 MenuRow(label = "sessions", onClick = onSessions)
                 MenuRow(label = "settings", onClick = onSettings)

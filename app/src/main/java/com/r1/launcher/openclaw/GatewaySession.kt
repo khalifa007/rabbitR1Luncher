@@ -26,6 +26,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import java.net.URLEncoder
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -208,6 +209,7 @@ class GatewaySession(
                 }, timeoutMs = 15_000L)
                 val msgs = ((hist["payload"] as? JsonObject)?.get("messages") as? JsonArray)
                     ?.mapNotNull { (it as? JsonObject)?.let(::parseHistoryMessage) }
+                    ?.map { hydrateAssistantMedia(it) }
                     .orEmpty()
                 if (token == switchToken.get()) onHistory(msgs)
             } catch (t: Throwable) {
@@ -247,6 +249,7 @@ class GatewaySession(
                 }, timeoutMs = 15_000L)
                 val msgs = ((hist["payload"] as? JsonObject)?.get("messages") as? JsonArray)
                     ?.mapNotNull { (it as? JsonObject)?.let(::parseHistoryMessage) }
+                    ?.map { hydrateAssistantMedia(it) }
                     .orEmpty()
                 if (token == switchToken.get()) {
                     onHistory(msgs)
@@ -477,6 +480,7 @@ class GatewaySession(
                 android.util.Log.i("OpenClaw", "chat.history ok=${hist["ok"]}")
                 val msgs = ((hist["payload"] as? JsonObject)?.get("messages") as? JsonArray)
                     ?.mapNotNull { (it as? JsonObject)?.let(::parseHistoryMessage) }
+                    ?.map { hydrateAssistantMedia(it) }
                     .orEmpty()
                 if (initialToken == switchToken.get()) onHistory(msgs)
             } catch (t: Throwable) {
@@ -559,6 +563,49 @@ class GatewaySession(
         }
     }
 
+    private fun hydrateAssistantMedia(msg: ChatMessage): ChatMessage {
+        if (msg.imageBase64 != null || msg.imageSource.isNullOrBlank()) return msg
+        val base64 = fetchAssistantImageBase64(msg.imageSource) ?: return msg
+        return msg.copy(imageBase64 = base64, hasImage = true)
+    }
+
+    private fun fetchAssistantImageBase64(source: String): String? {
+        val httpBase = toHttpUrl(prefs.gatewayUrl ?: return null) ?: return null
+        val token = prefs.deviceToken ?: prefs.sharedToken ?: prefs.bootstrapToken
+        val url = if (source.startsWith("/api/chat/media/outgoing/")) {
+            httpBase.trimEnd('/') + source
+        } else {
+            val params = buildString {
+                append("source=")
+                append(URLEncoder.encode(source, "UTF-8"))
+                if (!token.isNullOrBlank()) {
+                    append("&token=")
+                    append(URLEncoder.encode(token, "UTF-8"))
+                }
+            }
+            httpBase.trimEnd('/') + "/__openclaw__/assistant-media?$params"
+        }
+        return runCatching {
+            val req = Request.Builder()
+                .url(url)
+                .apply {
+                    if (!token.isNullOrBlank()) header("Authorization", "Bearer $token")
+                }
+                .build()
+            client.newCall(req).execute().use { res ->
+                if (!res.isSuccessful) {
+                    android.util.Log.w("OpenClaw", "assistant media fetch failed ${res.code} for $source")
+                    return null
+                }
+                val bytes = res.body?.bytes() ?: return null
+                if (bytes.isEmpty()) return null
+                android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+            }
+        }.onFailure {
+            android.util.Log.w("OpenClaw", "assistant media fetch threw for $source", it)
+        }.getOrNull()
+    }
+
     private fun toWsUrl(raw: String): String? {
         val trimmed = raw.trim()
         return when {
@@ -566,6 +613,16 @@ class GatewaySession(
             trimmed.startsWith("https://") -> "wss://" + trimmed.removePrefix("https://")
             trimmed.startsWith("http://") -> "ws://" + trimmed.removePrefix("http://")
             else -> "ws://$trimmed"
+        }
+    }
+
+    private fun toHttpUrl(raw: String): String? {
+        val trimmed = raw.trim()
+        return when {
+            trimmed.startsWith("https://") || trimmed.startsWith("http://") -> trimmed
+            trimmed.startsWith("wss://") -> "https://" + trimmed.removePrefix("wss://")
+            trimmed.startsWith("ws://") -> "http://" + trimmed.removePrefix("ws://")
+            else -> "http://$trimmed"
         }
     }
 }

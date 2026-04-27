@@ -170,6 +170,10 @@ fun LauncherRoot(
                 host.openClawOpenTalk()
                 host.selectTone()
             },
+            onOpenCanvas = {
+                state.openOpenClawCanvas()
+                host.selectTone()
+            },
         )
 
         OpenClawTalkPanel(
@@ -177,6 +181,11 @@ fun LauncherRoot(
             onBack = { state.back(); host.backTone() },
             onToggleRecord = { host.openClawToggleRecord() },
             onSpeakerChange = { enabled -> host.openClawSetSpeaker(enabled) },
+        )
+
+        OpenClawCanvasPanel(
+            state = state,
+            onBack = { state.back(); host.backTone() },
         )
 
         OpenClawCameraPanel(
