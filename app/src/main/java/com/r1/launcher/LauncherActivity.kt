@@ -506,11 +506,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
         session.onHistory = { msgs ->
             ui.post {
-                state.chatMessages.clear()
-                val capped = if (msgs.size > state.chatMessagesMax) {
-                    msgs.takeLast(state.chatMessagesMax)
-                } else msgs
-                state.chatMessages.addAll(capped)
+                applyOpenClawHistory(msgs)
                 state.chatScrollIndex = 0
                 speakLatestAssistantIfNeeded()
             }
@@ -557,6 +553,32 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         while (state.chatMessages.size > state.chatMessagesMax) {
             state.chatMessages.removeAt(0)
         }
+    }
+
+    /**
+     * The gateway is authoritative when it returns a complete history, but some
+     * OpenClaw builds can briefly return a shorter tail or empty list during
+     * long/tool-heavy runs. Preserve the local prefix in that case so messages
+     * already visible on the R1 do not vanish after a refresh.
+     */
+    private fun applyOpenClawHistory(msgs: List<com.r1.launcher.openclaw.ChatMessage>) {
+        val incoming = if (msgs.size > state.chatMessagesMax) {
+            msgs.takeLast(state.chatMessagesMax)
+        } else msgs
+        val current = state.chatMessages.filterNot { it.streaming }
+        val lastLocal = current.lastOrNull()?.text?.trim().orEmpty()
+        val likelyCommandReset = lastLocal.startsWith("/") && lastLocal.length < 40
+        val next = if (current.isNotEmpty() && incoming.size < current.size && !likelyCommandReset) {
+            android.util.Log.w(
+                "OpenClaw",
+                "chat.history returned fewer messages (${incoming.size}) than local UI (${current.size}); preserving local prefix",
+            )
+            current.take(current.size - incoming.size) + incoming
+        } else {
+            incoming
+        }
+        state.chatMessages.clear()
+        state.chatMessages.addAll(next.takeLast(state.chatMessagesMax))
     }
 
     private fun speakLatestAssistantIfNeeded() {
