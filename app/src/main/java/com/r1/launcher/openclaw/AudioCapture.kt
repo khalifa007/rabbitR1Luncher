@@ -15,6 +15,7 @@ import android.os.Looper
 class AudioCapture {
 
     interface Callback {
+        fun onLevel(levelPct: Int) {}
         fun onDone(wavBytes: ByteArray, durationMs: Int, peakPct: Int)
         fun onError(msg: String)
     }
@@ -76,6 +77,7 @@ class AudioCapture {
             rec.startRecording()
             val buf = ByteArray(bufBytes)
             val started = System.currentTimeMillis()
+            var lastLevelAt = 0L
             while (!stopRequested && sink.size() < maxBytes) {
                 val n = rec.read(buf, 0, buf.size)
                 if (n <= 0) continue
@@ -83,6 +85,12 @@ class AudioCapture {
                 sink.write(buf, 0, cap)
                 val p = chunkPeak(buf, cap)
                 if (p > peak) peak = p
+                val now = System.currentTimeMillis()
+                if (now - lastLevelAt >= 80L) {
+                    lastLevelAt = now
+                    val levelPct = (p * 100 / 32767).coerceIn(0, 100)
+                    main.post { cb.onLevel(levelPct) }
+                }
             }
             val durMs = (System.currentTimeMillis() - started).toInt()
             val pcm = sink.toByteArray()

@@ -162,6 +162,29 @@ fun LauncherRoot(
                 host.openClawRefreshSessions() // best-effort fresh fetch on entry
                 host.selectTone()
             },
+            onOpenCamera = {
+                host.openClawOpenCameraAsk()
+                host.selectTone()
+            },
+            onOpenTalk = {
+                host.openClawOpenTalk()
+                host.selectTone()
+            },
+        )
+
+        OpenClawTalkPanel(
+            state = state,
+            onBack = { state.back(); host.backTone() },
+            onToggleRecord = { host.openClawToggleRecord() },
+            onSpeakerChange = { enabled -> host.openClawSetSpeaker(enabled) },
+        )
+
+        OpenClawCameraPanel(
+            state = state,
+            onBack = { state.back(); host.backTone() },
+            onCaptured = { bytes -> host.openClawCameraCaptured(bytes) },
+            onRetake = { host.openClawCameraRetake() },
+            onSend = { prompt -> host.openClawCameraSend(prompt) },
         )
 
         OpenClawSessionsPanel(

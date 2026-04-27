@@ -9,7 +9,7 @@ import androidx.compose.runtime.setValue
 import com.r1.launcher.openclaw.ChatMessage
 import com.r1.launcher.openclaw.SessionEntry
 
-enum class Panel { HOME, SHEET, APPS, STORE, DETAIL, SETTINGS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, BRIGHTNESS, VOLUME, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS }
+enum class Panel { HOME, SHEET, APPS, STORE, DETAIL, SETTINGS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, BRIGHTNESS, VOLUME, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_TALK, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS }
 
 /**
  * Single container for all UI state. Activity mutates; Compose reads.
@@ -94,6 +94,8 @@ class LauncherState {
     var chatRecording by mutableStateOf(false)
     var chatBusy by mutableStateOf(false)
     var chatScrollIndex by mutableIntStateOf(0)
+    /** Live mic peak 0..100, used by the talk-mode input ring. */
+    var chatInputLevel by mutableIntStateOf(0)
     /** Running speech-to-text transcript while recording. Cleared on stop. */
     var chatPartialText by mutableStateOf("")
     /** Last QR-decode error to surface in the QR panel. Null = no error shown. */
@@ -124,6 +126,11 @@ class LauncherState {
     var sessionsLoading by mutableStateOf(false)
     /** Focus index for the OPENCLAW_SESSIONS panel rows. */
     var openClawSessionsFocus by mutableIntStateOf(0)
+    /** Snap-and-ask camera prompt + captured JPEG payload for OpenClaw chat. */
+    var openClawCameraPrompt by mutableStateOf("what do you see?")
+    var openClawCameraJpegBase64 by mutableStateOf<String?>(null)
+    var openClawCameraBusy by mutableStateOf(false)
+    var openClawCameraError by mutableStateOf<String?>(null)
 
     // --- state transitions ---
 
@@ -191,6 +198,19 @@ class LauncherState {
         panel = Panel.OPENCLAW_CHAT
     }
 
+    fun openOpenClawTalk() {
+        chatScrollIndex = 0
+        panel = Panel.OPENCLAW_TALK
+    }
+
+    fun openOpenClawCamera() {
+        openClawCameraPrompt = "what do you see?"
+        openClawCameraJpegBase64 = null
+        openClawCameraBusy = false
+        openClawCameraError = null
+        panel = Panel.OPENCLAW_CAMERA
+    }
+
     fun openOpenClawSessions() {
         openClawSessionsFocus = 0
         panel = Panel.OPENCLAW_SESSIONS
@@ -218,6 +238,8 @@ class LauncherState {
             Panel.SETTINGS -> Panel.APPS
             Panel.STORE, Panel.APPS, Panel.SHEET -> Panel.HOME
             Panel.OPENCLAW_QR, Panel.OPENCLAW_CHAT -> Panel.APPS
+            Panel.OPENCLAW_TALK -> Panel.OPENCLAW_CHAT
+            Panel.OPENCLAW_CAMERA -> Panel.OPENCLAW_CHAT
             Panel.OPENCLAW_SETTINGS, Panel.OPENCLAW_SESSIONS -> Panel.OPENCLAW_CHAT
             Panel.HOME -> Panel.HOME
         }

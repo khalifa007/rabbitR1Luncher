@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.media.AudioAttributes
 import android.media.AudioManager
+import android.media.MediaPlayer
 import android.media.SoundPool
 import android.media.ToneGenerator
 import android.net.ConnectivityManager
@@ -39,6 +40,7 @@ import com.r1.launcher.ui.LauncherRoot
 import com.r1.launcher.ui.R1Theme
 import com.r1.launcher.updater.OTAUpdater
 import java.io.OutputStream
+import java.io.File
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.text.SimpleDateFormat
@@ -78,6 +80,9 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private val openClawPrefs by lazy { OpenClawPrefs.get(this) }
     private var openClawSession: GatewaySession? = null
     private var openClawCapture: com.r1.launcher.openclaw.AudioCapture? = null
+    private var openClawSpeechPlayer: MediaPlayer? = null
+    private var openClawSpeakNextAssistant = false
+    private var openClawLastSpokenKey = ""
 
     private val ui = Handler(Looper.getMainLooper())
     private val hm = SimpleDateFormat("h:mm a", Locale.getDefault())
@@ -86,6 +91,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private var lastSidePressMs: Long = 0L
     private var lastPauseMs: Long = 0L
     private var lastResumeMs: Long = 0L
+    private var openClawPttKeyCode: Int = KeyEvent.KEYCODE_UNKNOWN
 
     private var telephony: TelephonyManager? = null
     private val phoneListener = object : PhoneStateListener() {
@@ -194,6 +200,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
         state.openClawHideChat = openClawPrefs.hideChat
         state.chatFontSize = openClawPrefs.chatFontSize
+        state.chatTtsEnabled = openClawPrefs.ttsEnabled
         loadApps()
 
         setContent {
@@ -232,6 +239,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         val wasForeground = lastPauseMs > 0L && (now - lastPauseMs) < 250L
         if (!wasForeground) {
             if (state.panel != Panel.HOME) state.goHome()
+            return
+        }
+        if (state.panel == Panel.OPENCLAW_CHAT || state.panel == Panel.OPENCLAW_TALK) {
+            // Push-to-talk uses raw key DOWN/UP timing in dispatchKeyEvent.
+            // If the side key also produces a HOME redirect, do not let this
+            // legacy activation path immediately toggle recording back off.
             return
         }
         if (state.panel == Panel.HOME) {
@@ -303,6 +316,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         tone = null
         runCatching { soundPool?.release() }
         soundPool = null
+        runCatching { openClawSpeechPlayer?.release() }
+        openClawSpeechPlayer = null
         runCatching { appStore.shutdown() }
     }
 
@@ -497,6 +512,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 } else msgs
                 state.chatMessages.addAll(capped)
                 state.chatScrollIndex = 0
+                speakLatestAssistantIfNeeded()
             }
         }
         session.onChatDelta = { runId, text ->
@@ -543,17 +559,127 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
     }
 
+    private fun speakLatestAssistantIfNeeded() {
+        if (!state.chatTtsEnabled || state.panel != Panel.OPENCLAW_TALK || !openClawSpeakNextAssistant) return
+        val msg = state.chatMessages.lastOrNull { it.role == "assistant" && it.text.isNotBlank() } ?: return
+        val key = "${msg.timestamp}:${msg.text.hashCode()}"
+        if (key == openClawLastSpokenKey) return
+        val apiKey = openClawPrefs.openaiKey
+        if (apiKey.isNullOrBlank()) {
+            toast("voice needs openai key")
+            openClawSpeakNextAssistant = false
+            return
+        }
+        openClawLastSpokenKey = key
+        openClawSpeakNextAssistant = false
+        com.r1.launcher.openclaw.OpenAiSpeechClient.synthesize(
+            text = msg.text,
+            apiKey = apiKey,
+        ) { wavBytes, err ->
+            if (err != null || wavBytes == null) {
+                toast("voice: ${err ?: "no audio"}")
+                return@synthesize
+            }
+            playOpenClawSpeech(wavBytes)
+        }
+    }
+
+    private fun playOpenClawSpeech(wavBytes: ByteArray) {
+        runCatching {
+            val am = audioManager ?: getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            if (am != null) {
+                val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+                am.setStreamVolume(AudioManager.STREAM_MUSIC, max, 0)
+            }
+            val dir = File(cacheDir, "openclaw-voice").apply { mkdirs() }
+            val out = File(dir, "assistant.wav")
+            out.writeBytes(normalizeWavHeader(wavBytes))
+            runCatching { openClawSpeechPlayer?.stop() }
+            runCatching { openClawSpeechPlayer?.release() }
+            openClawSpeechPlayer = MediaPlayer().apply {
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                setDataSource(out.absolutePath)
+                setOnCompletionListener {
+                    runCatching { it.release() }
+                    if (openClawSpeechPlayer === it) openClawSpeechPlayer = null
+                }
+                setOnErrorListener { mp, _, _ ->
+                    runCatching { mp.release() }
+                    if (openClawSpeechPlayer === mp) openClawSpeechPlayer = null
+                    toast("voice playback failed")
+                    true
+                }
+                prepare()
+                start()
+            }
+        }.onFailure {
+            toast("voice playback: ${it.message ?: it.javaClass.simpleName}")
+        }
+    }
+
+    private fun normalizeWavHeader(bytes: ByteArray): ByteArray {
+        if (bytes.size < 44) return bytes
+        val isWav = bytes[0] == 'R'.code.toByte() &&
+            bytes[1] == 'I'.code.toByte() &&
+            bytes[2] == 'F'.code.toByte() &&
+            bytes[3] == 'F'.code.toByte() &&
+            bytes[8] == 'W'.code.toByte() &&
+            bytes[9] == 'A'.code.toByte() &&
+            bytes[10] == 'V'.code.toByte() &&
+            bytes[11] == 'E'.code.toByte()
+        if (!isWav) return bytes
+        val out = bytes.copyOf()
+        writeIntLe(out, 4, out.size - 8)
+        var i = 12
+        while (i + 8 <= out.size) {
+            val id = String(out, i, 4, Charsets.US_ASCII)
+            val size = readIntLe(out, i + 4)
+            if (id == "data") {
+                val dataBytes = (out.size - (i + 8)).coerceAtLeast(0)
+                writeIntLe(out, i + 4, dataBytes)
+                break
+            }
+            if (size <= 0 || size == -1) break
+            i += 8 + size + (size and 1)
+        }
+        return out
+    }
+
+    private fun readIntLe(bytes: ByteArray, offset: Int): Int {
+        return (bytes[offset].toInt() and 0xFF) or
+            ((bytes[offset + 1].toInt() and 0xFF) shl 8) or
+            ((bytes[offset + 2].toInt() and 0xFF) shl 16) or
+            ((bytes[offset + 3].toInt() and 0xFF) shl 24)
+    }
+
+    private fun writeIntLe(bytes: ByteArray, offset: Int, value: Int) {
+        bytes[offset] = (value and 0xFF).toByte()
+        bytes[offset + 1] = ((value shr 8) and 0xFF).toByte()
+        bytes[offset + 2] = ((value shr 16) and 0xFF).toByte()
+        bytes[offset + 3] = ((value shr 24) and 0xFF).toByte()
+    }
+
     private fun openClawCloseSessionInternal() {
         runCatching { openClawCapture?.close() }
         openClawCapture = null
+        runCatching { openClawSpeechPlayer?.stop() }
+        runCatching { openClawSpeechPlayer?.release() }
+        openClawSpeechPlayer = null
         runCatching { openClawSession?.stop() }
         openClawSession = null
 
         state.chatRecording = false
         state.chatBusy = false
+        state.chatInputLevel = 0
         state.chatPartialText = ""
         state.chatStreamingText = ""
         state.chatPendingRunIds.clear()
+        openClawSpeakNextAssistant = false
     }
 
     private fun seedSettingsLevels() {
@@ -860,62 +986,72 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.chatPartialText = ""
         state.chatRecording = true
         cap.start(object : com.r1.launcher.openclaw.AudioCapture.Callback {
-                override fun onDone(wavBytes: ByteArray, durationMs: Int, peakPct: Int) {
-                    ui.post {
-                        state.chatRecording = false
-                        state.chatPartialText = ""
-                        if (durationMs < 300 || peakPct < 2) {
-                            toast(if (peakPct < 2) "no audio captured" else "too short")
-                            return@post
+            override fun onLevel(levelPct: Int) {
+                state.chatInputLevel = levelPct
+            }
+
+            override fun onDone(wavBytes: ByteArray, durationMs: Int, peakPct: Int) {
+                ui.post {
+                    state.chatRecording = false
+                    state.chatInputLevel = 0
+                    state.chatPartialText = ""
+                    if (durationMs < 300 || peakPct < 2) {
+                        toast(if (peakPct < 2) "no audio captured" else "too short")
+                        return@post
+                    }
+                    val key = openClawPrefs.openaiKey
+                    if (key.isNullOrBlank()) {
+                        toast("set openai key first (tap key pill)")
+                        return@post
+                    }
+                    // Hand the WAV to Whisper. While it's in flight, show
+                    // a transcribing indicator in the header.
+                    state.chatTranscribing = true
+                    com.r1.launcher.openclaw.WhisperClient.transcribe(
+                        wavBytes = wavBytes,
+                        apiKey = key,
+                    ) { transcript, err ->
+                        state.chatTranscribing = false
+                        if (err != null) {
+                            toast("whisper: $err")
+                            return@transcribe
                         }
-                        val key = openClawPrefs.openaiKey
-                        if (key.isNullOrBlank()) {
-                            toast("set openai key first (tap key pill)")
-                            return@post
+                        val text = transcript?.trim().orEmpty()
+                        if (text.isEmpty()) {
+                            toast("whisper: empty transcript")
+                            return@transcribe
                         }
-                        // Hand the WAV to Whisper. While it's in flight, show
-                        // a transcribing indicator in the header.
-                        state.chatTranscribing = true
-                        com.r1.launcher.openclaw.WhisperClient.transcribe(
-                            wavBytes = wavBytes,
-                            apiKey = key,
-                        ) { transcript, err ->
-                            state.chatTranscribing = false
-                            if (err != null) {
-                                toast("whisper: $err")
-                                return@transcribe
-                            }
-                            val text = transcript?.trim().orEmpty()
-                            if (text.isEmpty()) {
-                                toast("whisper: empty transcript")
-                                return@transcribe
-                            }
-                            val optimistic = com.r1.launcher.openclaw.ChatMessage(
-                                role = "user", text = text,
-                            )
-                            state.chatMessages.add(optimistic)
-                            trimChatMessages()
-                            state.chatScrollIndex = 0
-                            state.chatBusy = true
-                            session.send(text = text, audioBase64 = null) { ok, runId, err ->
-                                ui.post {
-                                    if (!ok) {
-                                        val idx = state.chatMessages
-                                            .indexOfFirst { it.id == optimistic.id }
-                                        if (idx >= 0) state.chatMessages.removeAt(idx)
-                                        state.chatBusy = false
-                                        if (!err.isNullOrBlank()) toast("send failed: $err")
-                                    } else if (runId != null) {
-                                        state.chatPendingRunIds.add(runId)
-                                    }
+                        val optimistic = com.r1.launcher.openclaw.ChatMessage(
+                            role = "user", text = text,
+                        )
+                        state.chatMessages.add(optimistic)
+                        trimChatMessages()
+                        state.chatScrollIndex = 0
+                        state.chatBusy = true
+                        if (state.chatTtsEnabled && state.panel == Panel.OPENCLAW_TALK) {
+                            openClawSpeakNextAssistant = true
+                        }
+                        session.send(text = text, audioBase64 = null) { ok, runId, err ->
+                            ui.post {
+                                if (!ok) {
+                                    val idx = state.chatMessages
+                                        .indexOfFirst { it.id == optimistic.id }
+                                    if (idx >= 0) state.chatMessages.removeAt(idx)
+                                    state.chatBusy = false
+                                    if (!err.isNullOrBlank()) toast("send failed: $err")
+                                } else if (runId != null) {
+                                    state.chatPendingRunIds.add(runId)
                                 }
                             }
                         }
                     }
                 }
+            }
+
             override fun onError(msg: String) {
                 ui.post {
                     state.chatRecording = false
+                    state.chatInputLevel = 0
                     state.chatPartialText = ""
                     toast("mic: $msg")
                 }
@@ -928,6 +1064,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         if (!cap.isRecording) return
         cap.stop()
         state.chatRecording = false
+        state.chatInputLevel = 0
         if (popSoundId != 0) soundPool?.play(popSoundId, 1f, 1f, 0, 0, 1f)
     }
 
@@ -943,6 +1080,9 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.chatScrollIndex = 0
         if (!trimmed.startsWith("/")) {
             state.chatBusy = true
+            if (state.chatTtsEnabled && state.panel == Panel.OPENCLAW_TALK) {
+                openClawSpeakNextAssistant = true
+            }
         }
         session.send(text = trimmed, audioBase64 = null) { ok, runId, err ->
             ui.post {
@@ -958,6 +1098,26 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     state.chatPendingRunIds.add(runId)
                 }
             }
+        }
+    }
+
+    override fun openClawOpenTalk() {
+        openClawStartSession()
+        if (!state.chatTtsEnabled) {
+            state.chatTtsEnabled = true
+            openClawPrefs.ttsEnabled = true
+        }
+        state.openOpenClawTalk()
+    }
+
+    override fun openClawSetSpeaker(enabled: Boolean) {
+        state.chatTtsEnabled = enabled
+        openClawPrefs.ttsEnabled = enabled
+        if (enabled) {
+            popTone()
+        } else {
+            runCatching { openClawSpeechPlayer?.stop() }
+            navTone()
         }
     }
 
@@ -1092,7 +1252,68 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         popTone()
     }
 
+    override fun openClawOpenCameraAsk() {
+        ensureCameraPerm()
+        state.openOpenClawCamera()
+    }
 
+    override fun openClawCameraCaptured(jpegBytes: ByteArray) {
+        state.openClawCameraJpegBase64 = android.util.Base64.encodeToString(
+            jpegBytes,
+            android.util.Base64.NO_WRAP,
+        )
+        state.openClawCameraError = null
+        popTone()
+    }
+
+    override fun openClawCameraRetake() {
+        state.openClawCameraJpegBase64 = null
+        state.openClawCameraError = null
+        state.openClawCameraBusy = false
+        navTone()
+    }
+
+    override fun openClawCameraSend(prompt: String) {
+        val session = openClawSession ?: return
+        if (state.chatStatus.startsWith("error") || state.chatStatus == "idle") return
+        val image = state.openClawCameraJpegBase64 ?: run {
+            state.openClawCameraError = "snap first"
+            return
+        }
+        val trimmed = prompt.trim().ifEmpty { "what do you see?" }
+        if (state.openClawCameraBusy) return
+
+        state.openClawCameraBusy = true
+        state.openClawCameraError = null
+        val optimistic = com.r1.launcher.openclaw.ChatMessage(
+            role = "user",
+            text = trimmed,
+            imageBase64 = image,
+            hasImage = true,
+        )
+        state.chatMessages.add(optimistic)
+        trimChatMessages()
+        state.chatScrollIndex = 0
+        state.chatBusy = true
+
+        session.send(text = trimmed, imageBase64 = image) { ok, runId, err ->
+            ui.post {
+                state.openClawCameraBusy = false
+                if (!ok) {
+                    val idx = state.chatMessages.indexOfFirst { it.id == optimistic.id }
+                    if (idx >= 0) state.chatMessages.removeAt(idx)
+                    state.chatBusy = false
+                    state.openClawCameraError = err ?: "send failed"
+                    if (!err.isNullOrBlank()) toast("send failed: $err")
+                } else {
+                    if (runId != null) state.chatPendingRunIds.add(runId)
+                    state.openClawCameraJpegBase64 = null
+                    state.openClawCameraPrompt = "what do you see?"
+                    state.back()
+                }
+            }
+        }
+    }
 
     private fun refreshOpenaiKeyState() {
         val k = openClawPrefs.openaiKey
@@ -1195,35 +1416,15 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val code = event.keyCode
 
+        if ((state.panel == Panel.OPENCLAW_CHAT || state.panel == Panel.OPENCLAW_TALK) && isOpenClawPttKey(code)) {
+            return handleOpenClawPttKey(event)
+        }
+
         // Side button is remapped from HOME → BUTTON_1 in the keylayout
         // (/data/system/devices/keylayout/mtk-kpd.kl). HOME-mapped keys collapse
         // into one onNewIntent fire and lose the down/up timing we need for PTT.
         // BUTTON_1 has no framework handling, so we get raw DOWN/UP here.
         if (code == KeyEvent.KEYCODE_BUTTON_1) {
-            if (state.panel == Panel.OPENCLAW_CHAT) {
-                // PTT diagnostic logging — capture every DOWN/UP with flags so
-                // we can see what's cutting the recording short on long holds.
-                val canceled = (event.flags and KeyEvent.FLAG_CANCELED) != 0
-                android.util.Log.d(
-                    "LauncherActivity",
-                    "BUTTON_1 action=${event.action} rpt=${event.repeatCount} " +
-                        "canceled=$canceled flags=0x${Integer.toHexString(event.flags)} " +
-                        "down=${event.downTime} event=${event.eventTime}"
-                )
-                when (event.action) {
-                    KeyEvent.ACTION_DOWN -> {
-                        if (event.repeatCount == 0) openClawRecordStart()
-                        return true
-                    }
-                    KeyEvent.ACTION_UP -> {
-                        // Ignore framework-canceled UPs (long-press intercept,
-                        // focus loss, etc.) — only stop on a real release.
-                        if (!canceled) openClawRecordStop()
-                        return true
-                    }
-                }
-                return true
-            }
             // Non-chat: replicate the pre-remap side-button HOME behavior.
             // Fire on UP so a deliberate hold doesn't repeat-trigger.
             if (event.action == KeyEvent.ACTION_UP) {
@@ -1261,6 +1462,48 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
             else -> super.dispatchKeyEvent(event)
         }
+    }
+
+    private fun handleOpenClawPttKey(event: KeyEvent): Boolean {
+        val canceled = (event.flags and KeyEvent.FLAG_CANCELED) != 0
+        android.util.Log.d(
+            "LauncherActivity",
+            "OPENCLAW_PTT code=${event.keyCode} action=${event.action} rpt=${event.repeatCount} " +
+                "canceled=$canceled flags=0x${Integer.toHexString(event.flags)} " +
+                "down=${event.downTime} event=${event.eventTime}"
+        )
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0) {
+                    openClawPttKeyCode = event.keyCode
+                    openClawRecordStart()
+                }
+                return true
+            }
+            KeyEvent.ACTION_UP -> {
+                if (openClawPttKeyCode == event.keyCode) {
+                    openClawPttKeyCode = KeyEvent.KEYCODE_UNKNOWN
+                    if (!canceled) openClawRecordStop()
+                }
+                return true
+            }
+        }
+        return true
+    }
+
+    private fun isOpenClawPttKey(code: Int): Boolean = when (code) {
+        KeyEvent.KEYCODE_BUTTON_1,
+        KeyEvent.KEYCODE_DPAD_CENTER,
+        KeyEvent.KEYCODE_ENTER,
+        KeyEvent.KEYCODE_NUMPAD_ENTER,
+        KeyEvent.KEYCODE_SPACE,
+        KeyEvent.KEYCODE_HEADSETHOOK,
+        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+        KeyEvent.KEYCODE_CALL,
+        KeyEvent.KEYCODE_ASSIST,
+        KeyEvent.KEYCODE_VOICE_ASSIST,
+        KeyEvent.KEYCODE_POWER -> true
+        else -> false
     }
 
     private fun isHandled(code: Int): Boolean = when (code) {

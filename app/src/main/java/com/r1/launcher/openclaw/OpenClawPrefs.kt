@@ -67,6 +67,10 @@ class OpenClawPrefs private constructor(ctx: Context) {
         get() = plain.getInt(KEY_CHAT_FONT_SIZE, 14)
         set(value) = plain.edit { putInt(KEY_CHAT_FONT_SIZE, value) }
 
+    var ttsEnabled: Boolean
+        get() = plain.getBoolean(KEY_TTS_ENABLED, false)
+        set(value) = plain.edit { putBoolean(KEY_TTS_ENABLED, value) }
+
 
 
     var selectedSessionKey: String?
@@ -102,6 +106,7 @@ class OpenClawPrefs private constructor(ctx: Context) {
         private const val KEY_OPENAI_KEY = "openai.key"
         private const val KEY_HIDE_CHAT = "chat.hide"
         private const val KEY_CHAT_FONT_SIZE = "chat.fontSize"
+        private const val KEY_TTS_ENABLED = "chat.ttsEnabled"
 
         private const val KEY_SELECTED_SESSION = "chat.selectedSessionKey"
         private const val KEY_LAST_MAIN_SESSION = "chat.lastMainSessionKey"
