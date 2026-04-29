@@ -94,6 +94,7 @@ fun LauncherRoot(
                     2 -> { state.openBrightness(); host.selectTone() }
                     3 -> { state.openVolume(); host.selectTone() }
                     4 -> { host.checkForUpdate(); host.selectTone() }
+                    5 -> { state.openFactoryConfirm(); host.selectTone() }
                 }
             },
         )
@@ -105,7 +106,18 @@ fun LauncherRoot(
                     0 -> { state.back(); host.backTone() }
                     1 -> { host.toggleWifi(!state.wifiEnabled); host.popTone() }
                     2 -> { host.toggleCellular(!state.cellularOn); host.popTone() }
-                    3 -> { host.startWifiScan(); state.openWifiScan(); host.selectTone() }
+                    3 -> { host.toggleBluetooth(!state.btOn); host.popTone() }
+                    4 -> { host.startWifiScan(); state.openWifiScan(); host.selectTone() }
+                }
+            },
+        )
+
+        FactoryConfirmPanel(
+            state = state,
+            onRowClick = { idx ->
+                when (idx) {
+                    0 -> { state.back(); host.backTone() }
+                    1 -> { host.factoryReset(); host.selectTone() }
                 }
             },
         )

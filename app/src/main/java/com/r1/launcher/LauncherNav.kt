@@ -20,6 +20,8 @@ interface LauncherHost {
     fun setVolume(level: Int)
     fun toggleWifi(enable: Boolean)
     fun toggleCellular(enable: Boolean)
+    fun toggleBluetooth(enable: Boolean)
+    fun factoryReset()
     fun startWifiScan()
     fun connectToWifi(ssid: String, pass: String)
     fun openAirplaneSettings()
@@ -93,6 +95,13 @@ fun LauncherState.wheelUp(host: LauncherHost) {
                 back(); host.backTone()
             } else {
                 networkFocus--; host.navTone()
+            }
+        }
+        Panel.FACTORY_CONFIRM -> {
+            if (factoryConfirmFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                factoryConfirmFocus--; host.navTone()
             }
         }
         Panel.WIFI_SCAN -> {
@@ -172,13 +181,18 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.SETTINGS -> {
             val prev = settingsFocus
-            settingsFocus = (settingsFocus + 1).coerceAtMost(5)
+            settingsFocus = (settingsFocus + 1).coerceAtMost(6) // back, network, brightness, volume, updates, factory reset, about
             if (prev != settingsFocus) host.navTone()
         }
         Panel.NETWORK -> {
             val prev = networkFocus
-            networkFocus = (networkFocus + 1).coerceAtMost(3) // 4 rows: back, wifi, cellular, connect
+            networkFocus = (networkFocus + 1).coerceAtMost(4) // back, wifi, cellular, bluetooth, scan
             if (prev != networkFocus) host.navTone()
+        }
+        Panel.FACTORY_CONFIRM -> {
+            val prev = factoryConfirmFocus
+            factoryConfirmFocus = (factoryConfirmFocus + 1).coerceAtMost(1)
+            if (prev != factoryConfirmFocus) host.navTone()
         }
         Panel.WIFI_SCAN -> {
             val max = (wifiScanResults.size).coerceAtLeast(0) // back + N items
@@ -260,13 +274,19 @@ fun LauncherState.activate(host: LauncherHost) {
             2 -> { openBrightness(); host.selectTone() }
             3 -> { openVolume(); host.selectTone() }
             4 -> { host.checkForUpdate(); host.selectTone() }
-            5 -> { /* Info row */ }
+            5 -> { openFactoryConfirm(); host.selectTone() }
+            6 -> { /* Info row */ }
         }
         Panel.NETWORK -> when (networkFocus) {
             0 -> { back(); host.backTone() }
             1 -> { host.toggleWifi(!wifiEnabled); host.popTone() }
             2 -> { host.toggleCellular(!cellularOn); host.popTone() }
-            3 -> { host.startWifiScan(); openWifiScan(); host.selectTone() }
+            3 -> { host.toggleBluetooth(!btOn); host.popTone() }
+            4 -> { host.startWifiScan(); openWifiScan(); host.selectTone() }
+        }
+        Panel.FACTORY_CONFIRM -> when (factoryConfirmFocus) {
+            0 -> { back(); host.backTone() }
+            1 -> { host.factoryReset(); host.selectTone() }
         }
         Panel.WIFI_SCAN -> {
             if (wifiScanFocus == 0) {

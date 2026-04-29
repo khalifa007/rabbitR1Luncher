@@ -60,15 +60,30 @@ fun Topbar(state: LauncherState, modifier: Modifier = Modifier) {
             .wrapContentHeight()
             .padding(top = 6.dp, start = 12.dp, end = 12.dp),
     ) {
-        // Left: carrier name
-        Text(
-            text = if (state.simPresent) state.simOperator.lowercase() else "",
-            style = type.appCard.copy(fontSize = 16.sp),
-            color = Color(0xFFFF6B00),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+        // Left: carrier name + network type pill (4G / LTE / 5G ...)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.weight(1f),
-        )
+        ) {
+            Text(
+                text = if (state.simPresent) state.simOperator.lowercase() else "",
+                style = type.appCard.copy(fontSize = 16.sp),
+                color = Color(0xFFFF6B00),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (state.simPresent && state.cellularOn && state.networkType.isNotEmpty()) {
+                androidx.compose.foundation.layout.Spacer(Modifier.width(4.dp))
+                Text(
+                    text = state.networkType,
+                    style = type.appCard.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
+                    color = Color.Black,
+                    modifier = Modifier
+                        .background(Color(0xFFFF6B00), RoundedCornerShape(3.dp))
+                        .padding(horizontal = 4.dp, vertical = 1.dp),
+                )
+            }
+        }
 
         // Right: status icons
         Row(
@@ -77,14 +92,6 @@ fun Topbar(state: LauncherState, modifier: Modifier = Modifier) {
             modifier = Modifier.weight(1f),
         ) {
             if (state.simPresent && state.cellularOn) {
-                if (state.networkType.isNotEmpty()) {
-                    Text(
-                        text = state.networkType,
-                        style = type.appCard.copy(fontSize = 12.sp, fontWeight = FontWeight.Bold),
-                        color = Color(0xFFFF6B00),
-                        modifier = Modifier.padding(end = 4.dp)
-                    )
-                }
                 Image(
                     painter = painterResource(R.drawable.ic_signal_bars),
                     contentDescription = null,

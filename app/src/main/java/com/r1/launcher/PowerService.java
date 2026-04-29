@@ -3,8 +3,7 @@ package com.r1.launcher;
 import android.accessibilityservice.AccessibilityService;
 import android.content.Intent;
 import android.os.Build;
-import android.os.Handler;
-import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityEvent;
@@ -16,17 +15,12 @@ public class PowerService extends AccessibilityService {
     private static final String TAG = "R1Power";
     public static PowerService instance;
 
-    // Long-press any activate-class key (PTT candidates) to return to launcher.
-    // We don't consume the keydown — short presses still reach the foreground app.
-    private static final long LONG_PRESS_MS = 700L;
-    private final Handler holdHandler = new Handler(Looper.getMainLooper());
-    private int holdCode = -1;
-    private final Runnable holdHomeRunnable = new Runnable() {
-        @Override public void run() {
-            holdCode = -1;
-            performGlobalAction(GLOBAL_ACTION_HOME);
-        }
-    };
+    // Double-press any activate-class key (PTT candidates) to return to launcher.
+    // We don't consume the keydown — the first press still reaches the foreground app.
+    // 350ms is a comfortable double-tap window on the R1's small side button.
+    private static final long DOUBLE_PRESS_MAX_MS = 350L;
+    private long lastDownTime = 0L;
+    private int lastDownCode = -1;
 
     // Words we'll click while Updater.autoClickInstallUntil is in the future.
     // Ordered: install/update first, then post-install dismiss buttons.
@@ -103,19 +97,21 @@ public class PowerService extends AccessibilityService {
 
         if (!isPttCandidate(code)) return false;
 
-        if (event.getAction() == KeyEvent.ACTION_DOWN) {
-            if (event.getRepeatCount() == 0) {
-                holdCode = code;
-                holdHandler.removeCallbacks(holdHomeRunnable);
-                holdHandler.postDelayed(holdHomeRunnable, LONG_PRESS_MS);
-            }
-        } else if (event.getAction() == KeyEvent.ACTION_UP) {
-            if (code == holdCode) {
-                holdCode = -1;
-                holdHandler.removeCallbacks(holdHomeRunnable);
+        if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+            long now = SystemClock.uptimeMillis();
+            if (code == lastDownCode && (now - lastDownTime) <= DOUBLE_PRESS_MAX_MS) {
+                // Second press within the double-tap window → return home.
+                // Reset state so a third press doesn't immediately re-fire.
+                lastDownCode = -1;
+                lastDownTime = 0L;
+                performGlobalAction(GLOBAL_ACTION_HOME);
+            } else {
+                // First press (or out-of-window) — record and let it pass through.
+                lastDownCode = code;
+                lastDownTime = now;
             }
         }
-        // don't consume — foreground app still gets the short-press
+        // don't consume — foreground app still gets the press
         return false;
     }
 

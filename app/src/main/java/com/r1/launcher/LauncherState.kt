@@ -9,7 +9,7 @@ import androidx.compose.runtime.setValue
 import com.r1.launcher.openclaw.ChatMessage
 import com.r1.launcher.openclaw.SessionEntry
 
-enum class Panel { HOME, SHEET, APPS, STORE, DETAIL, SETTINGS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, BRIGHTNESS, VOLUME, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_TALK, OPENCLAW_CANVAS, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS }
+enum class Panel { HOME, SHEET, APPS, STORE, DETAIL, SETTINGS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, BRIGHTNESS, VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_TALK, OPENCLAW_CANVAS, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS }
 
 /**
  * Single container for all UI state. Activity mutates; Compose reads.
@@ -37,6 +37,8 @@ class LauncherState {
     /** Settings panel rows: 0=Brightness, 1=Volume, 2=Wi-Fi, 3=Airplane/Data. */
     var settingsFocus by mutableIntStateOf(0)
     var networkFocus by mutableIntStateOf(0)
+    /** Factory-reset confirmation: 0=back/cancel, 1=confirm wipe. Defaults to 0 so accidental activate is a cancel. */
+    var factoryConfirmFocus by mutableIntStateOf(0)
     var wifiScanFocus by mutableIntStateOf(0)
     var wifiConnectedSsid by mutableStateOf("")
     var wifiSelectedSsid by mutableStateOf("")
@@ -185,6 +187,11 @@ class LauncherState {
         panel = Panel.VOLUME
     }
 
+    fun openFactoryConfirm() {
+        factoryConfirmFocus = 0
+        panel = Panel.FACTORY_CONFIRM
+    }
+
     fun openOpenClawQr() {
         // Don't clear qrError here — auto-recovery from a failed handshake
         // sets the error message and then opens this panel; clearing would
@@ -238,7 +245,7 @@ class LauncherState {
     fun back() {
         panel = when (panel) {
             Panel.DETAIL -> Panel.STORE
-            Panel.NETWORK, Panel.BRIGHTNESS, Panel.VOLUME -> Panel.SETTINGS
+            Panel.NETWORK, Panel.BRIGHTNESS, Panel.VOLUME, Panel.FACTORY_CONFIRM -> Panel.SETTINGS
             Panel.WIFI_SCAN -> Panel.NETWORK
             Panel.WIFI_PASSWORD -> Panel.WIFI_SCAN
             Panel.SETTINGS -> Panel.APPS

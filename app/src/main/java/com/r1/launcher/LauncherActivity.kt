@@ -67,6 +67,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         private const val SIDE_PRESS_DEBOUNCE_MS = 250L
         private const val REQ_CAMERA_PERM = 4801
         private const val REQ_AUDIO_PERM = 4802
+        private const val REQ_PHONE_PERM = 4803
     }
 
     private val state = LauncherState()
@@ -105,6 +106,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         override fun onReceive(c: Context, i: Intent?) {
             refreshNetwork()
             refreshBluetooth()
+            refreshSim()
         }
     }
 
@@ -164,6 +166,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
         telephony = getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
         audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        ensurePhonePerm()
 
         tone = runCatching {
             ToneGenerator(AudioManager.STREAM_MUSIC, 45)
@@ -378,42 +381,49 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         val tm = telephony ?: run {
             state.simPresent = false; return
         }
-        val present = runCatching {
-            tm.simState == TelephonyManager.SIM_STATE_READY
-        }.getOrDefault(false)
+        val simState = runCatching { tm.simState }.getOrDefault(TelephonyManager.SIM_STATE_UNKNOWN)
+        val operator = (tm.networkOperatorName?.takeIf { it.isNotBlank() }
+            ?: tm.simOperatorName?.takeIf { it.isNotBlank() }
+            ?: "")
+        // Be lenient: if we have an operator name we have a SIM in service, even if
+        // simState briefly reports something other than READY (locked, loaded, etc.).
+        val present = simState == TelephonyManager.SIM_STATE_READY || operator.isNotEmpty()
         state.simPresent = present
-        if (present) {
-            state.simOperator = tm.networkOperatorName
-                ?: tm.simOperatorName
-                ?: "SIM"
-            runCatching {
-                state.cellularOn = tm.isDataEnabled
-            }
-
-            // Fetch data network type via carroot
-            if (state.cellularOn) {
-                Thread {
-                    if (sendToCarroot("dumpsys telephony.registry > /data/local/tmp/telephony.txt && chmod 666 /data/local/tmp/telephony.txt")) {
-                        Thread.sleep(300)
-                        try {
-                            val txt = java.io.File("/data/local/tmp/telephony.txt").readText()
-                            val match = Regex("network type: ([A-Za-z0-9_]+)").find(txt)
-                            val type = match?.groupValues?.get(1) ?: ""
-                            val displayType = when (type) {
-                                "LTE", "LTE_CA" -> "4G"
-                                "NR" -> "5G"
-                                "HSPAP", "HSPA", "UMTS", "WCDMA" -> "3G"
-                                "EDGE", "GPRS" -> "2G"
-                                else -> type
-                            }
-                            ui.post { state.networkType = displayType }
-                        } catch (e: Exception) {}
-                    }
-                }.start()
-            } else {
-                state.networkType = ""
-            }
+        if (!present) {
+            state.simOperator = ""
+            state.cellularOn = false
+            state.networkType = ""
+            return
         }
+        state.simOperator = operator.ifEmpty { "SIM" }
+
+        // Mobile data on/off. Requires READ_PHONE_STATE (READ_BASIC_PHONE_STATE on API 31+).
+        state.cellularOn = runCatching { tm.isDataEnabled }.getOrDefault(false)
+
+        // Direct radio type lookup — no shell-out. Works because the launcher is
+        // system-signed in our OS image so READ_PHONE_STATE is granted.
+        val radio = runCatching {
+            if (Build.VERSION.SDK_INT >= 24) tm.dataNetworkType else tm.networkType
+        }.getOrDefault(TelephonyManager.NETWORK_TYPE_UNKNOWN)
+        state.networkType = when (radio) {
+            TelephonyManager.NETWORK_TYPE_NR -> "5G"
+            TelephonyManager.NETWORK_TYPE_LTE -> "LTE"
+            TelephonyManager.NETWORK_TYPE_HSPAP,
+            TelephonyManager.NETWORK_TYPE_HSPA,
+            TelephonyManager.NETWORK_TYPE_HSDPA,
+            TelephonyManager.NETWORK_TYPE_HSUPA,
+            TelephonyManager.NETWORK_TYPE_UMTS,
+            TelephonyManager.NETWORK_TYPE_EVDO_0,
+            TelephonyManager.NETWORK_TYPE_EVDO_A,
+            TelephonyManager.NETWORK_TYPE_EVDO_B -> "3G"
+            TelephonyManager.NETWORK_TYPE_EDGE,
+            TelephonyManager.NETWORK_TYPE_GPRS,
+            TelephonyManager.NETWORK_TYPE_CDMA,
+            TelephonyManager.NETWORK_TYPE_1xRTT -> "2G"
+            else -> ""
+        }
+        android.util.Log.d("LauncherActivity",
+            "refreshSim: simState=$simState op='$operator' dataOn=${state.cellularOn} radio=$radio -> '${state.networkType}'")
     }
 
     // --- LauncherHost: side effects ---
@@ -825,36 +835,61 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.back()
     }
 
+    @Suppress("DEPRECATION")
     override fun toggleWifi(enable: Boolean) {
         state.wifiEnabled = enable
-        val cmd = if (enable) "svc wifi enable" else "svc wifi disable"
+        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
         Thread {
-            if (sendToCarroot(cmd)) {
-                // Wait briefly and refresh UI state
-                Thread.sleep(1500)
-                ui.post { refreshNetwork() }
-            } else {
-                ui.post { 
-                    state.wifiEnabled = !enable
-                    toast("Root shell unavailable for Wi-Fi toggle") 
+            // Try framework API first; ignore the boolean (it lies on API 29+).
+            runCatching { wm?.setWifiEnabled(enable) }
+            Thread.sleep(400)
+            val applied = runCatching { wm?.isWifiEnabled == enable }.getOrDefault(false)
+            android.util.Log.d("LauncherActivity", "toggleWifi($enable) direct applied=$applied")
+            val ok = applied || sendToCarroot(
+                if (enable) "cmd wifi set-wifi-enabled enabled" else "cmd wifi set-wifi-enabled disabled"
+            )
+            android.util.Log.d("LauncherActivity", "toggleWifi($enable) ok=$ok (applied=$applied)")
+            if (!ok) {
+                ui.post {
+                    toast("Wi-Fi toggle failed")
+                    refreshNetwork()
                 }
+                return@Thread
             }
+            Thread.sleep(1500)
+            ui.post { refreshNetwork() }
+            Thread.sleep(2500)
+            ui.post { refreshNetwork() }
         }.start()
     }
 
+    @Suppress("DEPRECATION")
     override fun toggleCellular(enable: Boolean) {
         state.cellularOn = enable
-        val cmd = if (enable) "svc data enable" else "svc data disable"
+        if (!enable) state.networkType = ""
         Thread {
-            if (sendToCarroot(cmd)) {
-                Thread.sleep(1500)
-                ui.post { refreshSim() }
-            } else {
-                ui.post { 
-                    state.cellularOn = !enable
-                    toast("Root shell unavailable for data toggle") 
+            // Try framework API first — silently no-ops without MODIFY_PHONE_STATE,
+            // so we must verify the read-back before trusting it.
+            runCatching { telephony?.setDataEnabled(enable) }
+            Thread.sleep(400)
+            val applied = runCatching { telephony?.isDataEnabled == enable }.getOrDefault(false)
+            android.util.Log.d("LauncherActivity", "toggleCellular($enable) direct applied=$applied")
+            // `svc data enable/disable` is a no-op on this build — modem state doesn't follow.
+            // Toggling Settings.Global.mobile_data flips the framework setting which the
+            // TelephonyController watches, and the modem deregisters/reattaches accordingly.
+            val ok = applied || sendToCarroot(if (enable) "settings put global mobile_data 1" else "settings put global mobile_data 0")
+            android.util.Log.d("LauncherActivity", "toggleCellular($enable) ok=$ok (applied=$applied)")
+            if (!ok) {
+                ui.post {
+                    toast("Cellular toggle failed")
+                    refreshSim()
                 }
+                return@Thread
             }
+            Thread.sleep(1500)
+            ui.post { refreshSim() }
+            Thread.sleep(2500)
+            ui.post { refreshSim() }
         }.start()
     }
 
@@ -911,6 +946,51 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             sendToCarroot(cmd)
             Thread.sleep(2000)
             ui.post { refreshNetwork() }
+        }.start()
+    }
+
+    @Suppress("DEPRECATION")
+    override fun toggleBluetooth(enable: Boolean) {
+        state.btOn = enable
+        Thread {
+            // Try framework API first. BluetoothAdapter.enable()/disable() are deprecated since
+            // API 33 but still work for system-signed apps; otherwise they silently no-op.
+            val adapter = runCatching { BluetoothAdapter.getDefaultAdapter() }.getOrNull()
+            runCatching { if (enable) adapter?.enable() else adapter?.disable() }
+            Thread.sleep(800)
+            val applied = runCatching { (adapter?.isEnabled == true) == enable }.getOrDefault(false)
+            android.util.Log.d("LauncherActivity", "toggleBluetooth($enable) direct applied=$applied")
+            val ok = applied || sendToCarroot(if (enable) "cmd bluetooth_manager enable" else "cmd bluetooth_manager disable")
+            android.util.Log.d("LauncherActivity", "toggleBluetooth($enable) ok=$ok (applied=$applied)")
+            if (!ok) {
+                ui.post {
+                    toast("Bluetooth toggle failed")
+                    refreshBluetooth()
+                }
+                return@Thread
+            }
+            Thread.sleep(1500)
+            ui.post { refreshBluetooth() }
+            Thread.sleep(2500)
+            ui.post { refreshBluetooth() }
+        }.start()
+    }
+
+    override fun factoryReset() {
+        // Last-line UX: a toast as the wipe broadcast goes out. The system tears the
+        // process down within seconds so anything below this rarely runs.
+        toast("Wiping device...")
+        Thread {
+            // Android 14+ uses FACTORY_RESET; older builds expect MASTER_CLEAR. Both are
+            // protected broadcasts — must be sent from a privileged shell, hence carroot.
+            val a14 = "am broadcast -a android.intent.action.FACTORY_RESET --receiver-foreground -p android"
+            val legacy = "am broadcast -a android.intent.action.MASTER_CLEAR -p android"
+            if (!sendToCarroot(a14)) {
+                Thread.sleep(300)
+                if (!sendToCarroot(legacy)) {
+                    ui.post { toast("Factory reset failed: no root shell") }
+                }
+            }
         }.start()
     }
 
@@ -1364,6 +1444,27 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), REQ_AUDIO_PERM)
         }
         return granted
+    }
+
+    private fun ensurePhonePerm(): Boolean {
+        val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_PHONE_STATE), REQ_PHONE_PERM)
+        }
+        return granted
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_PHONE_PERM &&
+            grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+            refreshSim()
+        }
     }
 
     // --- tones ---

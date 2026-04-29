@@ -38,6 +38,7 @@ fun NetworkPanel(
             SettingsItem.Standard("< back"),
             SettingsItem.Toggle("wifi", state.wifiEnabled, subtitle = if (state.wifiEnabled) state.wifiConnectedSsid else ""),
             SettingsItem.Toggle("cellular data", state.cellularOn),
+            SettingsItem.Toggle("bluetooth", state.btOn),
             SettingsItem.Standard("scan wifi networks"),
         )
 

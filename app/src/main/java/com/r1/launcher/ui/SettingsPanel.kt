@@ -83,6 +83,7 @@ fun SettingsPanel(
             SettingsItem.Standard("brightness"),
             SettingsItem.Standard("volume"),
             SettingsItem.Standard("check for updates"),
+            SettingsItem.Standard("factory reset"),
             SettingsItem.Info("about", "R1 Launcher v$versionName"),
         )
 
