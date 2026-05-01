@@ -6,10 +6,17 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.r1.launcher.messages.SmsConversation
+import com.r1.launcher.messages.SmsItem
 import com.r1.launcher.openclaw.ChatMessage
 import com.r1.launcher.openclaw.SessionEntry
 
-enum class Panel { HOME, SHEET, APPS, STORE, DETAIL, SETTINGS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, BRIGHTNESS, VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_TALK, OPENCLAW_CANVAS, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS }
+enum class Panel { HOME, APPS, SETTINGS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, BRIGHTNESS, VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_TALK, OPENCLAW_CANVAS, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD }
+
+enum class WifiShareEditTarget { SSID, PASSWORD }
+
+/** What the OPENCLAW_QR scanner is currently looking for. */
+enum class QrScanMode { GATEWAY_PAIRING, OPENAI_KEY }
 
 /**
  * Single container for all UI state. Activity mutates; Compose reads.
@@ -27,13 +34,7 @@ class LauncherState {
         private set
 
     // --- per-panel focus indices ---
-    /** Home dock: 0=system, 1=store, 2=apps. */
-    var homeFocus by mutableIntStateOf(0)
-    var sheetFocus by mutableIntStateOf(0)
     var appsFocus by mutableIntStateOf(0)
-    var storeFocus by mutableIntStateOf(0)
-    /** Detail overlay: 0=back, 1=open, 2=uninstall. */
-    var detailFocus by mutableIntStateOf(0)
     /** Settings panel rows: 0=Brightness, 1=Volume, 2=Wi-Fi, 3=Airplane/Data. */
     var settingsFocus by mutableIntStateOf(0)
     var networkFocus by mutableIntStateOf(0)
@@ -44,6 +45,22 @@ class LauncherState {
     var wifiSelectedSsid by mutableStateOf("")
     var wifiPasswordInput by mutableStateOf("")
     val wifiScanResults = mutableStateListOf<String>()
+    // --- wifi share (hotspot) ---
+    var wifiShareFocus by mutableIntStateOf(0)
+    var wifiShareEnabled by mutableStateOf(false)
+    var wifiShareSsid by mutableStateOf("")
+    var wifiSharePassword by mutableStateOf("")
+    val wifiShareConnectedClients = mutableStateListOf<String>()
+    /** 0 = off, otherwise minutes until auto-shutoff. Persisted via WifiSharePrefs. */
+    var wifiShareTimerMinutes by mutableIntStateOf(0)
+    /** Live countdown shown on the enable row while hotspot is on with a timer. */
+    var wifiShareTimerRemainingSec by mutableIntStateOf(0)
+    /** Which field the WIFI_SHARE_EDIT keyboard is editing. */
+    var wifiShareEditTarget by mutableStateOf(WifiShareEditTarget.SSID)
+    /** Buffer used by WIFI_SHARE_EDIT; copied into the targeted field on save. */
+    var wifiShareEditInput by mutableStateOf("")
+    /** Whether the connected-clients row in WIFI_SHARE is expanded to show MACs. */
+    var wifiShareClientsExpanded by mutableStateOf(false)
     /** Live brightness 1..255 — pre-seeded from Settings.System on openSettings(). */
     var brightnessLevel by mutableIntStateOf(128)
     /** Live STREAM_MUSIC volume 0..volumeMax. */
@@ -59,9 +76,11 @@ class LauncherState {
     var wifiEnabled by mutableStateOf(false)
     var cellularOn by mutableStateOf(false)
     var btOn by mutableStateOf(false)
-    /** 0=hidden, 1=half (checking), 2=full + rotate (downloading/installing). */
+    /** Topbar update spinner: 0=hidden, 1=half (checking), 2=full + rotate (downloading/installing). */
     var updateIconState by mutableIntStateOf(0)
     var batteryPct by mutableFloatStateOf(1f)
+    /** True while a charger (USB/AC/wireless) is connected. Topbar uses this to tint the battery pill green. */
+    var batteryCharging by mutableStateOf(false)
     var simPresent by mutableStateOf(false)
     var simOperator by mutableStateOf("")
     var networkType by mutableStateOf("")
@@ -71,16 +90,6 @@ class LauncherState {
     // --- apps list ---
     val apps = mutableStateListOf<AppEntry>()
     var appsLoaded = false
-
-    // --- store ---
-    val storeEntries = mutableStateListOf<AppStore.Entry>()
-    var storeFetchedOnce = false
-    var storeFetchedAt: Long = 0L
-    var storeLoadError by mutableStateOf<String?>(null)
-    var storeLoading by mutableStateOf(false)
-    var downloadingSlug by mutableStateOf<String?>(null)
-    var downloadingPct by mutableIntStateOf(0)
-    var detailEntry by mutableStateOf<AppStore.Entry?>(null)
 
     // --- openclaw chat panel ---
     val chatMessages = mutableStateListOf<ChatMessage>()
@@ -103,6 +112,8 @@ class LauncherState {
     var chatPartialText by mutableStateOf("")
     /** Last QR-decode error to surface in the QR panel. Null = no error shown. */
     var qrError by mutableStateOf<String?>(null)
+    /** Drives the QR scanner's behaviour on a successful decode. */
+    var qrScanMode by mutableStateOf(QrScanMode.GATEWAY_PAIRING)
     /** OpenAI Whisper key state — true if a key is saved. Header pill reads this. */
     var chatHasOpenaiKey by mutableStateOf(false)
     /** Last 4 chars of saved Whisper key for visual confirmation. Empty if unset. */
@@ -134,28 +145,39 @@ class LauncherState {
     var openClawCameraJpegBase64 by mutableStateOf<String?>(null)
     var openClawCameraBusy by mutableStateOf(false)
     var openClawCameraError by mutableStateOf<String?>(null)
+    /**
+     * Current target angle for the camera stepper motor while the OpenClaw
+     * camera panel is open. Range [0, 180]: 0 = FACE (lens at user), 90 = idle,
+     * 180 = BACK (lens at scene). Defaults to BACK on panel entry; wheel
+     * up/down nudges it in 15° steps so the user can re-aim the lens (e.g.
+     * tilt down for a desk shot or up for selfie framing).
+     */
+    var openClawCameraMotor by mutableIntStateOf(180)
+
+    // --- web companion panel ---
+    var webServerEnabled by mutableStateOf(false)
+    var webServerPort by mutableIntStateOf(8080)
+    /** Best-effort local IP of the interface the panel is reachable on. */
+    var webServerIp by mutableStateOf("")
+
+    // --- messages (SMS) ---
+    val smsConversations = mutableStateListOf<SmsConversation>()
+    /** True while loadConversations() is running on a background thread. */
+    var smsLoading by mutableStateOf(false)
+    /** Set when READ_SMS is denied or content provider returned no rows. */
+    var smsError by mutableStateOf<String?>(null)
+    var messagesFocus by mutableIntStateOf(0)
+    /** Open thread address; drives MESSAGES_THREAD title + body list. */
+    var smsThreadAddress by mutableStateOf("")
+    var smsThreadName by mutableStateOf("")
+    val smsThreadMessages = mutableStateListOf<SmsItem>()
+    var smsThreadFocus by mutableIntStateOf(0)
 
     // --- state transitions ---
-
-    fun openSheet() {
-        sheetFocus = 0
-        panel = Panel.SHEET
-    }
 
     fun openApps() {
         appsFocus = 0
         panel = Panel.APPS
-    }
-
-    fun openStore() {
-        storeFocus = 0
-        panel = Panel.STORE
-    }
-
-    fun openDetail(entry: AppStore.Entry) {
-        detailEntry = entry
-        detailFocus = 0
-        panel = Panel.DETAIL
     }
 
     fun openSettings() {
@@ -179,6 +201,21 @@ class LauncherState {
         panel = Panel.WIFI_PASSWORD
     }
 
+    fun openWifiShare() {
+        wifiShareFocus = 0
+        wifiShareClientsExpanded = false
+        panel = Panel.WIFI_SHARE
+    }
+
+    fun openWifiShareEdit(target: WifiShareEditTarget) {
+        wifiShareEditTarget = target
+        wifiShareEditInput = when (target) {
+            WifiShareEditTarget.SSID -> wifiShareSsid
+            WifiShareEditTarget.PASSWORD -> wifiSharePassword
+        }
+        panel = Panel.WIFI_SHARE_EDIT
+    }
+
     fun openBrightness() {
         panel = Panel.BRIGHTNESS
     }
@@ -197,6 +234,14 @@ class LauncherState {
         // sets the error message and then opens this panel; clearing would
         // erase it before the user sees it. User-initiated entry from the
         // apps grid resets qrError explicitly.
+        qrScanMode = QrScanMode.GATEWAY_PAIRING
+        panel = Panel.OPENCLAW_QR
+    }
+
+    /** Open the same camera panel but treat the next decode as an OpenAI key. */
+    fun openOpenAiKeyQr() {
+        qrError = null
+        qrScanMode = QrScanMode.OPENAI_KEY
         panel = Panel.OPENCLAW_QR
     }
 
@@ -221,12 +266,26 @@ class LauncherState {
         openClawCameraJpegBase64 = null
         openClawCameraBusy = false
         openClawCameraError = null
+        openClawCameraMotor = 180
         panel = Panel.OPENCLAW_CAMERA
     }
 
     fun openOpenClawSessions() {
         openClawSessionsFocus = 0
         panel = Panel.OPENCLAW_SESSIONS
+    }
+
+    fun openMessages() {
+        messagesFocus = 0
+        panel = Panel.MESSAGES
+    }
+
+    fun openMessagesThread(address: String, displayName: String) {
+        smsThreadAddress = address
+        smsThreadName = displayName
+        smsThreadFocus = 0
+        smsThreadMessages.clear()
+        panel = Panel.MESSAGES_THREAD
     }
 
     fun openOpenClawSettings() {
@@ -239,24 +298,26 @@ class LauncherState {
 
     fun goHome() {
         panel = Panel.HOME
-        detailEntry = null
     }
 
     fun back() {
         panel = when (panel) {
-            Panel.DETAIL -> Panel.STORE
             Panel.NETWORK, Panel.BRIGHTNESS, Panel.VOLUME, Panel.FACTORY_CONFIRM -> Panel.SETTINGS
             Panel.WIFI_SCAN -> Panel.NETWORK
             Panel.WIFI_PASSWORD -> Panel.WIFI_SCAN
+            Panel.WIFI_SHARE -> Panel.NETWORK
+            Panel.WIFI_SHARE_EDIT -> Panel.WIFI_SHARE
             Panel.SETTINGS -> Panel.APPS
-            Panel.STORE, Panel.APPS, Panel.SHEET -> Panel.HOME
-            Panel.OPENCLAW_QR, Panel.OPENCLAW_CHAT -> Panel.APPS
+            Panel.APPS -> Panel.HOME
+            Panel.OPENCLAW_QR -> if (qrScanMode == QrScanMode.OPENAI_KEY) Panel.OPENCLAW_SETTINGS else Panel.APPS
+            Panel.OPENCLAW_CHAT -> Panel.APPS
             Panel.OPENCLAW_TALK -> Panel.OPENCLAW_CHAT
             Panel.OPENCLAW_CANVAS -> Panel.OPENCLAW_CHAT
             Panel.OPENCLAW_CAMERA -> Panel.OPENCLAW_CHAT
             Panel.OPENCLAW_SETTINGS, Panel.OPENCLAW_SESSIONS -> Panel.OPENCLAW_CHAT
+            Panel.MESSAGES -> Panel.APPS
+            Panel.MESSAGES_THREAD -> Panel.MESSAGES
             Panel.HOME -> Panel.HOME
         }
-        if (panel != Panel.DETAIL) detailEntry = null
     }
 }

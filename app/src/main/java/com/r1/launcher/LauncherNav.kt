@@ -10,12 +10,7 @@ package com.r1.launcher
  */
 interface LauncherHost {
     fun launchApp(idx: Int)
-    fun openWifiSettings()
-    fun requestReboot(powerOff: Boolean)
     fun checkForUpdate()
-    fun storeActivate(entry: AppStore.Entry)
-    fun detailOpen()
-    fun detailUninstall()
     fun setBrightness(level: Int)
     fun setVolume(level: Int)
     fun toggleWifi(enable: Boolean)
@@ -24,6 +19,9 @@ interface LauncherHost {
     fun factoryReset()
     fun startWifiScan()
     fun connectToWifi(ssid: String, pass: String)
+    fun toggleWifiShare(enable: Boolean)
+    fun wifiShareSaveEdit()
+    fun wifiShareCycleTimer()
     fun openAirplaneSettings()
     fun openDateSettings()
     fun lockScreen()
@@ -55,33 +53,20 @@ interface LauncherHost {
     fun openClawCameraCaptured(jpegBytes: ByteArray)
     fun openClawCameraRetake()
     fun openClawCameraSend(prompt: String)
+    fun openClawCameraMotorNudge(delta: Int)
+    fun loadSmsConversations()
+    fun openSmsThread(address: String, displayName: String)
+    fun toggleWebServer(enable: Boolean)
 }
 
 fun LauncherState.wheelUp(host: LauncherHost) {
     when (panel) {
-        Panel.DETAIL -> {
-            val prev = detailFocus
-            detailFocus = (detailFocus - 1).coerceAtLeast(0)
-            if (prev != detailFocus) host.navTone()
-        }
-        Panel.STORE -> {
-            if (storeFocus <= 0) {
-                back(); host.backTone()
-            } else {
-                storeFocus--; host.navTone()
-            }
-        }
         Panel.APPS -> {
             if (appsFocus <= 0) {
                 back(); host.backTone()
             } else {
                 appsFocus--; host.navTone()
             }
-        }
-        Panel.SHEET -> {
-            val prev = sheetFocus
-            sheetFocus = (sheetFocus - 1).coerceAtLeast(0)
-            if (prev != sheetFocus) host.navTone()
         }
         Panel.SETTINGS -> {
             if (settingsFocus <= 0) {
@@ -112,6 +97,14 @@ fun LauncherState.wheelUp(host: LauncherHost) {
             }
         }
         Panel.WIFI_PASSWORD -> { /* camera/keyboard handles input */ }
+        Panel.WIFI_SHARE -> {
+            if (wifiShareFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                wifiShareFocus--; host.navTone()
+            }
+        }
+        Panel.WIFI_SHARE_EDIT -> { /* keyboard handles input */ }
         Panel.BRIGHTNESS -> {
             val prev = brightnessLevel
             brightnessLevel = (brightnessLevel - 16).coerceAtLeast(1)
@@ -132,7 +125,7 @@ fun LauncherState.wheelUp(host: LauncherHost) {
         Panel.OPENCLAW_CHAT -> { host.openClawScrollUp(); host.navTone() }
         Panel.OPENCLAW_TALK -> { host.openClawSetSpeaker(!chatTtsEnabled); host.navTone() }
         Panel.OPENCLAW_CANVAS -> { canvasScrollIndex++; host.navTone() }
-        Panel.OPENCLAW_CAMERA -> { /* camera panel owns touch/keyboard controls */ }
+        Panel.OPENCLAW_CAMERA -> { host.openClawCameraMotorNudge(-15) }
         Panel.OPENCLAW_SETTINGS -> {
             if (openClawSettingsFocus <= 0) {
                 back(); host.backTone()
@@ -147,37 +140,31 @@ fun LauncherState.wheelUp(host: LauncherHost) {
                 openClawSessionsFocus--; host.navTone()
             }
         }
-        Panel.HOME -> {
-            val prev = homeFocus
-            homeFocus = (homeFocus - 1).coerceAtLeast(0)
-            if (prev != homeFocus) host.navTone()
+        Panel.MESSAGES -> {
+            if (messagesFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                messagesFocus--; host.navTone()
+            }
         }
+        Panel.MESSAGES_THREAD -> {
+            if (smsThreadFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                smsThreadFocus--; host.navTone()
+            }
+        }
+        Panel.HOME -> { /* clock screen — no list to scroll */ }
     }
 }
 
 fun LauncherState.wheelDown(host: LauncherHost) {
     when (panel) {
-        Panel.DETAIL -> {
-            val prev = detailFocus
-            detailFocus = (detailFocus + 1).coerceAtMost(2)
-            if (prev != detailFocus) host.navTone()
-        }
-        Panel.STORE -> {
-            val max = (storeEntries.size - 1).coerceAtLeast(0)
-            val prev = storeFocus
-            storeFocus = (storeFocus + 1).coerceAtMost(max)
-            if (prev != storeFocus) host.navTone()
-        }
         Panel.APPS -> {
             val max = (apps.size - 1).coerceAtLeast(0)
             val prev = appsFocus
             appsFocus = (appsFocus + 1).coerceAtMost(max)
             if (prev != appsFocus) host.navTone()
-        }
-        Panel.SHEET -> {
-            val prev = sheetFocus
-            sheetFocus = (sheetFocus + 1).coerceAtMost(3)
-            if (prev != sheetFocus) host.navTone()
         }
         Panel.SETTINGS -> {
             val prev = settingsFocus
@@ -186,7 +173,7 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.NETWORK -> {
             val prev = networkFocus
-            networkFocus = (networkFocus + 1).coerceAtMost(4) // back, wifi, cellular, bluetooth, scan
+            networkFocus = (networkFocus + 1).coerceAtMost(6) // back, wifi, cellular, bluetooth, share, remote, scan
             if (prev != networkFocus) host.navTone()
         }
         Panel.FACTORY_CONFIRM -> {
@@ -201,6 +188,12 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             if (prev != wifiScanFocus) host.navTone()
         }
         Panel.WIFI_PASSWORD -> { /* camera/keyboard handles input */ }
+        Panel.WIFI_SHARE -> {
+            val prev = wifiShareFocus
+            wifiShareFocus = (wifiShareFocus + 1).coerceAtMost(5) // back, enable, name, password, connected, auto-off
+            if (prev != wifiShareFocus) host.navTone()
+        }
+        Panel.WIFI_SHARE_EDIT -> { /* keyboard handles input */ }
         Panel.BRIGHTNESS -> {
             val prev = brightnessLevel
             brightnessLevel = (brightnessLevel + 16).coerceAtMost(255)
@@ -221,10 +214,10 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         Panel.OPENCLAW_CHAT -> { host.openClawScrollDown(); host.navTone() }
         Panel.OPENCLAW_TALK -> { host.openClawSetSpeaker(!chatTtsEnabled); host.navTone() }
         Panel.OPENCLAW_CANVAS -> { canvasScrollIndex--; host.navTone() }
-        Panel.OPENCLAW_CAMERA -> { /* camera panel owns touch/keyboard controls */ }
+        Panel.OPENCLAW_CAMERA -> { host.openClawCameraMotorNudge(+15) }
         Panel.OPENCLAW_SETTINGS -> {
             val prev = openClawSettingsFocus
-            openClawSettingsFocus = (openClawSettingsFocus + 1).coerceAtMost(5)
+            openClawSettingsFocus = (openClawSettingsFocus + 1).coerceAtMost(6)
             if (prev != openClawSettingsFocus) host.navTone()
         }
         Panel.OPENCLAW_SESSIONS -> {
@@ -243,6 +236,20 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             openClawSessionsFocus = (openClawSessionsFocus + 1).coerceAtMost(max)
             if (prev != openClawSessionsFocus) host.navTone()
         }
+        Panel.MESSAGES -> {
+            // Row 0 = back, then one row per conversation. Empty list still has
+            // a single "no messages" row, but it isn't selectable — keep focus on back.
+            val maxRow = smsConversations.size // back + N convs; last index = N
+            val prev = messagesFocus
+            messagesFocus = (messagesFocus + 1).coerceAtMost(maxRow)
+            if (prev != messagesFocus) host.navTone()
+        }
+        Panel.MESSAGES_THREAD -> {
+            val maxRow = smsThreadMessages.size // back + N items; last index = N
+            val prev = smsThreadFocus
+            smsThreadFocus = (smsThreadFocus + 1).coerceAtMost(maxRow)
+            if (prev != smsThreadFocus) host.navTone()
+        }
         Panel.HOME -> {
             openApps()
             host.selectTone()
@@ -252,22 +259,7 @@ fun LauncherState.wheelDown(host: LauncherHost) {
 
 fun LauncherState.activate(host: LauncherHost) {
     when (panel) {
-        Panel.DETAIL -> when (detailFocus) {
-            0 -> { back(); host.backTone() }
-            1 -> host.detailOpen()
-            2 -> host.detailUninstall()
-        }
-        Panel.STORE -> {
-            val entry = storeEntries.getOrNull(storeFocus) ?: return
-            host.storeActivate(entry)
-        }
         Panel.APPS -> host.launchApp(appsFocus)
-        Panel.SHEET -> when (sheetFocus) {
-            0 -> host.openWifiSettings()
-            1 -> host.requestReboot(powerOff = false)
-            2 -> host.requestReboot(powerOff = true)
-            3 -> host.checkForUpdate()
-        }
         Panel.SETTINGS -> when (settingsFocus) {
             0 -> { back(); host.backTone() }
             1 -> { openNetwork(); host.selectTone() }
@@ -282,8 +274,24 @@ fun LauncherState.activate(host: LauncherHost) {
             1 -> { host.toggleWifi(!wifiEnabled); host.popTone() }
             2 -> { host.toggleCellular(!cellularOn); host.popTone() }
             3 -> { host.toggleBluetooth(!btOn); host.popTone() }
-            4 -> { host.startWifiScan(); openWifiScan(); host.selectTone() }
+            4 -> { openWifiShare(); host.selectTone() }
+            5 -> { host.toggleWebServer(!webServerEnabled); host.popTone() }
+            6 -> { host.startWifiScan(); openWifiScan(); host.selectTone() }
         }
+        Panel.WIFI_SHARE -> when (wifiShareFocus) {
+            0 -> { back(); host.backTone() }
+            1 -> { host.toggleWifiShare(!wifiShareEnabled); host.popTone() }
+            2 -> { openWifiShareEdit(WifiShareEditTarget.SSID); host.selectTone() }
+            3 -> { openWifiShareEdit(WifiShareEditTarget.PASSWORD); host.selectTone() }
+            4 -> {
+                if (wifiShareConnectedClients.isNotEmpty()) {
+                    wifiShareClientsExpanded = !wifiShareClientsExpanded
+                    host.popTone()
+                }
+            }
+            5 -> { host.wifiShareCycleTimer(); host.popTone() }
+        }
+        Panel.WIFI_SHARE_EDIT -> { /* RetroKeyboard handles input */ }
         Panel.FACTORY_CONFIRM -> when (factoryConfirmFocus) {
             0 -> { back(); host.backTone() }
             1 -> { host.factoryReset(); host.selectTone() }
@@ -314,11 +322,23 @@ fun LauncherState.activate(host: LauncherHost) {
             host.openClawSessionsRowActivate(openClawSessionsFocus)
             host.selectTone()
         }
-        Panel.HOME -> when (homeFocus) {
-            0 -> { openSheet(); host.selectTone() }
-            1 -> { openStore(); host.selectTone() }
-            2 -> { openApps(); host.selectTone() }
+        Panel.MESSAGES -> {
+            if (messagesFocus == 0) {
+                back(); host.backTone()
+            } else {
+                val conv = smsConversations.getOrNull(messagesFocus - 1)
+                if (conv != null) {
+                    host.openSmsThread(conv.address, conv.displayName)
+                    host.selectTone()
+                }
+            }
         }
+        Panel.MESSAGES_THREAD -> {
+            // Only the back row at idx 0 is actionable; bubbles are read-only.
+            if (smsThreadFocus == 0) { back(); host.backTone() }
+        }
+        // Wheel press on the clock screen jumps straight to the apps grid.
+        Panel.HOME -> { openApps(); host.selectTone() }
     }
 }
 

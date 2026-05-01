@@ -15,22 +15,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import com.r1.launcher.AppStore
 import com.r1.launcher.LauncherHost
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
 
 /**
  * Root composable — FrameLayout-style z-stack:
- *   wallpaper + panel-under-focus → system sheet → store detail → topbar → debug key
+ *   wallpaper + panel-under-focus → topbar → debug key
  *
- * Topbar hides while apps/store are open (old launcher did the same), since those
- * panels draw their own header.
+ * Topbar hides while apps panel is open (it draws its own header).
  */
 @Composable
 fun LauncherRoot(
     state: LauncherState,
-    appStore: AppStore,
     host: LauncherHost,
 ) {
     val colors = LocalR1Colors.current
@@ -40,49 +37,12 @@ fun LauncherRoot(
             .background(colors.bg),
     ) {
         // Base: home screen. Visible whenever nothing else is stacked over it.
-        HomeScreen(
-            state = state,
-            onDockClick = { idx ->
-                state.homeFocus = idx
-                when (idx) {
-                    0 -> { state.openSheet(); host.selectTone() }
-                    1 -> { state.openStore(); host.selectTone() }
-                    2 -> { state.openApps(); host.selectTone() }
-                }
-            },
-        )
+        HomeScreen(state = state)
 
         AppsPanel(
             state = state,
             onBack = { state.back(); host.backTone() },
             onAppClick = { idx -> host.launchApp(idx) },
-        )
-
-        StorePanel(
-            state = state,
-            appStore = appStore,
-            onBack = { state.back(); host.backTone() },
-            onRowClick = { entry -> host.storeActivate(entry) },
-        )
-
-        SystemSheet(
-            state = state,
-            onRowClick = { idx ->
-                when (idx) {
-                    0 -> host.openWifiSettings()
-                    1 -> host.requestReboot(false)
-                    2 -> host.requestReboot(true)
-                    3 -> host.checkForUpdate()
-                }
-            },
-            onScrimClick = { state.back(); host.backTone() },
-        )
-
-        StoreDetail(
-            state = state,
-            onBack = { state.back(); host.backTone() },
-            onOpen = { host.detailOpen() },
-            onUninstall = { host.detailUninstall() },
         )
 
         SettingsPanel(
@@ -107,7 +67,9 @@ fun LauncherRoot(
                     1 -> { host.toggleWifi(!state.wifiEnabled); host.popTone() }
                     2 -> { host.toggleCellular(!state.cellularOn); host.popTone() }
                     3 -> { host.toggleBluetooth(!state.btOn); host.popTone() }
-                    4 -> { host.startWifiScan(); state.openWifiScan(); host.selectTone() }
+                    4 -> { state.openWifiShare(); host.selectTone() }
+                    5 -> { host.toggleWebServer(!state.webServerEnabled); host.popTone() }
+                    6 -> { host.startWifiScan(); state.openWifiScan(); host.selectTone() }
                 }
             },
         )
@@ -143,6 +105,31 @@ fun LauncherRoot(
             onSubmit = {
                 host.connectToWifi(state.wifiSelectedSsid, state.wifiPasswordInput)
             }
+        )
+
+        WifiSharePanel(
+            state = state,
+            onRowClick = { idx ->
+                when (idx) {
+                    0 -> { state.back(); host.backTone() }
+                    1 -> { host.toggleWifiShare(!state.wifiShareEnabled); host.popTone() }
+                    2 -> { state.openWifiShareEdit(com.r1.launcher.WifiShareEditTarget.SSID); host.selectTone() }
+                    3 -> { state.openWifiShareEdit(com.r1.launcher.WifiShareEditTarget.PASSWORD); host.selectTone() }
+                    4 -> {
+                        if (state.wifiShareConnectedClients.isNotEmpty()) {
+                            state.wifiShareClientsExpanded = !state.wifiShareClientsExpanded
+                            host.popTone()
+                        }
+                    }
+                    5 -> { host.wifiShareCycleTimer(); host.popTone() }
+                }
+            },
+        )
+
+        WifiShareEditPanel(
+            state = state,
+            onBack = { state.back(); host.backTone() },
+            onSubmit = { host.wifiShareSaveEdit() },
         )
 
         BrightnessPanel(
@@ -223,11 +210,29 @@ fun LauncherRoot(
             onFontSizeChange = { size -> host.openClawSetFontSize(size) },
         )
 
-        // Topbar overlay — hidden while apps or store panel (which have their own
-        // header) are fully visible. Stays up for the sheet and detail overlays.
-        val topbarVisible = state.panel == Panel.HOME ||
-            state.panel == Panel.SHEET ||
-            state.panel == Panel.DETAIL
+        MessagesPanel(
+            state = state,
+            onRowClick = { idx ->
+                if (idx == 0) {
+                    state.back(); host.backTone()
+                } else {
+                    val conv = state.smsConversations.getOrNull(idx - 1)
+                    if (conv != null) {
+                        host.openSmsThread(conv.address, conv.displayName)
+                        host.selectTone()
+                    }
+                }
+            },
+        )
+
+        MessagesThreadPanel(
+            state = state,
+            onBack = { state.back(); host.backTone() },
+        )
+
+        // Topbar overlay — only on the clock screen; every other panel
+        // either draws its own header or is a full-screen takeover.
+        val topbarVisible = state.panel == Panel.HOME
         AnimatedVisibility(
             visible = topbarVisible,
             enter = fadeIn(tween(120)),

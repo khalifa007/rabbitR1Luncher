@@ -153,11 +153,14 @@ private fun AppCard(
         is AppEntry.Real -> entry.info.activityInfo.packageName
         AppEntry.Settings -> "_r1_settings"
         AppEntry.OpenClaw -> "_r1_openclaw"
+        AppEntry.Messages -> "_r1_messages"
     }
     val isSettings = entry is AppEntry.Settings
     val isOpenClaw = entry is AppEntry.OpenClaw
+    val isMessages = entry is AppEntry.Messages
     val settingsPainter = if (isSettings) painterResource(R.drawable.ic_settings) else null
     val openClawPainter = if (isOpenClaw) painterResource(R.drawable.ic_wifi_arc) else null
+    val messagesPainter = if (isMessages) painterResource(R.drawable.ic_messages) else null
 
     var iconPainter by remember(pkg) {
         val cached = iconCache.get(pkg)
@@ -169,6 +172,7 @@ private fun AppCard(
                 is AppEntry.Real -> labelCache[pkg] ?: pkg.substringAfterLast('.').lowercase()
                 AppEntry.Settings -> "settings"
                 AppEntry.OpenClaw -> "openclaw"
+                AppEntry.Messages -> "messages"
             },
         )
     }
@@ -243,7 +247,7 @@ private fun AppCard(
                 .fillMaxWidth()
                 .padding(start = 16.dp, end = 16.dp, top = 16.dp),
         ) {
-            val effectivePainter = settingsPainter ?: openClawPainter ?: iconPainter
+            val effectivePainter = settingsPainter ?: openClawPainter ?: messagesPainter ?: iconPainter
             if (effectivePainter != null) {
                 Image(
                     painter = effectivePainter,
@@ -269,12 +273,14 @@ private fun appKey(entry: AppEntry): String = when (entry) {
     is AppEntry.Real -> entry.info.activityInfo.packageName + "/" + entry.info.activityInfo.name
     AppEntry.Settings -> "settings/settings"
     AppEntry.OpenClaw -> "openclaw/openclaw"
+    AppEntry.Messages -> "messages/messages"
 }
 
 private fun appContentType(entry: AppEntry): String = when (entry) {
     is AppEntry.Real -> "real"
     AppEntry.Settings -> "settings"
     AppEntry.OpenClaw -> "openclaw"
+    AppEntry.Messages -> "messages"
 }
 
 class FolderShape : androidx.compose.ui.graphics.Shape {

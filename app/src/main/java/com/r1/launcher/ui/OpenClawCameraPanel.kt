@@ -83,6 +83,22 @@ fun OpenClawCameraPanel(
         var showKeyboard by remember { mutableStateOf(false) }
         var localError by remember { mutableStateOf<String?>(null) }
 
+        // Hold the lens at the user-selected angle for the entire panel
+        // session — independent of the camera-view's start/stop cycle.
+        // Earlier code drove the motor from R1StillCameraView.start()/stop(),
+        // which fired BACK on entry, HOME on capture (when the AndroidView
+        // was swapped for the captured Image), and BACK again on retake. The
+        // motor visibly cycled through idle ("stuck in idle" / "tries to face
+        // front" reports). Decoupling motor lifetime from camera lifetime
+        // keeps the lens at the chosen angle throughout review/retake.
+        // Wheel up/down nudges state.openClawCameraMotor; we fire those
+        // writes directly from the host (LauncherActivity.openClawCameraMotorNudge),
+        // so this effect only handles initial pose + return-to-idle on exit.
+        DisposableEffect(Unit) {
+            setMotorOrientation(state.openClawCameraMotor)
+            onDispose { setMotorOrientation(MOTOR_HOME) }
+        }
+
         DisposableEffect(cameraView, state.openClawCameraJpegBase64) {
             if (state.openClawCameraJpegBase64 == null) {
                 cameraView?.start()
@@ -143,6 +159,18 @@ fun OpenClawCameraPanel(
                     color = accent,
                 )
                 Spacer(Modifier.weight(1f))
+                if (capturedBitmap == null) {
+                    Text(
+                        text = motorAngleLabel(state.openClawCameraMotor),
+                        style = type.appCard.copy(fontSize = 14.sp),
+                        color = Color.White.copy(alpha = 0.85f),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color.Black.copy(alpha = 0.55f))
+                            .padding(horizontal = 8.dp, vertical = 3.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
                 CameraStatusDot(
                     color = when {
                         state.openClawCameraBusy -> Color(0xFFFFC107)
@@ -269,6 +297,14 @@ private fun CameraAction(
     }
 }
 
+private fun motorAngleLabel(angle: Int): String = when {
+    angle <= 15 -> "face $angle°"
+    angle in 75..105 -> "idle $angle°"
+    angle >= 165 -> "back $angle°"
+    angle < 90 -> "→face $angle°"
+    else -> "→back $angle°"
+}
+
 private class R1StillCameraView(
     context: Context,
     private val onCapture: (ByteArray?, String?) -> Unit,
@@ -303,6 +339,9 @@ private class R1StillCameraView(
         }
         surfaceTextureListener = textureListener
         if (isAvailable) openCamera()
+        // Motor pivoting is handled at the panel level — see
+        // OpenClawCameraPanel's DisposableEffect(Unit). Doing it here would
+        // cycle the lens through HOME on every capture/retake.
     }
 
     fun stop() {

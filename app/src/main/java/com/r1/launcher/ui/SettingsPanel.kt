@@ -130,6 +130,7 @@ internal fun SettingsRow(
     focused: Boolean,
     toggleChecked: Boolean? = null,
     subtitle: String = "",
+    subtitleColor: Color = Color(0xFFFF4500),
     onClick: () -> Unit,
 ) {
     val bgColor = if (focused) HIGHLIGHT_BG else Color.Transparent
@@ -159,7 +160,7 @@ internal fun SettingsRow(
                 if (subtitle.isNotEmpty()) {
                     Text(
                         text = subtitle,
-                        color = Color(0xFFFF4500),
+                        color = subtitleColor,
                         fontSize = 14.sp,
                         fontFamily = type.appCard.fontFamily,
                         fontWeight = FontWeight.Normal,

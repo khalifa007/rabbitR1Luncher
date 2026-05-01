@@ -48,7 +48,11 @@ fun OpenClawSettingsPanel(
     state: LauncherState,
     onBack: () -> Unit,
     onSave: (String) -> Unit,
-    onPasteFromClipboard: () -> Unit,
+    // Paste-from-clipboard is no longer surfaced as a UI button — paste flows
+    // come from the chat panel's `+key` pill, the SET_OPENAI_KEY broadcast,
+    // and the web companion. Kept as a parameter so the call site doesn't
+    // need to change; defaults to no-op.
+    @Suppress("UNUSED_PARAMETER") onPasteFromClipboard: () -> Unit = {},
     onClear: () -> Unit,
     onRowClick: (Int) -> Unit = {},
     onFontSizeChange: (Int) -> Unit = {},
@@ -77,6 +81,7 @@ fun OpenClawSettingsPanel(
         val items = listOf(
             SettingsItem.Standard("< back"),
             SettingsItem.Standard("whisper key"),
+            SettingsItem.Standard("scan key from qr"),
             SettingsItem.Toggle("hide text input", state.openClawHideChat),
             SettingsItem.Info("font size", "${state.chatFontSize} sp"),
             SettingsItem.Standard("clear history"),
@@ -136,78 +141,91 @@ fun OpenClawSettingsPanel(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(Color.Black)
-                        .padding(bottom = 12.dp) // extra padding to clear screen edge
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    val statusLine = if (state.chatHasOpenaiKey)
-                        "status: configured (sk-...${state.chatOpenaiKeyTail})"
-                    else
-                        "status: not set"
-                        
-                    Text(
-                        text = statusLine,
-                        style = type.appCard,
-                        color = if (state.chatHasOpenaiKey) Color(0xFF35D26F) else Color.DarkGray,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-                    )
+                    val accent = Color(0xFFFF4500)
+                    val ok = Color(0xFF35D26F)
+                    val warn = Color(0xFFE53935)
+                    val saveEnabled = input.trim().isNotBlank()
+                    val clearEnabled = state.chatHasOpenaiKey || input.isNotEmpty()
 
-                    // Input field
+                    // Header row: title on the left, status pill on the right.
                     Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "whisper key",
+                            style = type.appCard.copy(fontSize = 16.sp),
+                            color = accent,
+                        )
+                        Spacer(Modifier.weight(1f))
+                        StatusPill(
+                            text = if (state.chatHasOpenaiKey)
+                                "set · …${state.chatOpenaiKeyTail}"
+                            else "not set",
+                            color = if (state.chatHasOpenaiKey) ok else Color.DarkGray,
+                        )
+                    }
+
+                    // Bordered input box. Tap anywhere on the box to ensure
+                    // the keyboard stays open even if the user dismissed it.
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                            .clip(RoundedCornerShape(8.dp))
+                            .border(1.dp, accent.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                            .background(Color(0xFF101010))
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
                     ) {
                         val displayText = when {
                             input.isNotEmpty() -> maskKey(input) + "_"
-                            else -> "tap to type sk-... or paste"
+                            else -> "type sk-…"
                         }
                         Text(
-                            text = "> $displayText",
-                            style = type.appCard,
-                            color = if (input.isEmpty()) Color.DarkGray else Color.White,
-                            modifier = Modifier.weight(1f),
+                            text = displayText,
+                            style = type.appCard.copy(fontSize = 14.sp),
+                            color = if (input.isEmpty()) Color(0xFF707070) else Color.White,
                         )
                     }
 
-                    // Action row
+                    // Action row: equal-weight pill buttons, no overflow.
+                    // Removed [paste] — paste flows are clipboard-pill (chat),
+                    // SET_OPENAI_KEY broadcast, and web companion only.
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(24.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        Text(
-                            text = "[save]",
-                            style = type.appCard,
-                            color = if (input.isNotBlank()) Color(0xFF35D26F) else Color.DarkGray,
-                            modifier = Modifier.clickable(enabled = input.isNotBlank()) {
-                                onSave(input)
-                                showKeyboard = false
-                            }
-                        )
-                        Text(
-                            text = "[paste]",
-                            style = type.appCard,
-                            color = Color(0xFFFFC107),
-                            modifier = Modifier.clickable { onPasteFromClipboard() }
-                        )
-                        Text(
-                            text = "[clear]",
-                            style = type.appCard,
-                            color = Color(0xFFE53935),
-                            modifier = Modifier.clickable {
-                                onClear()
-                                input = ""
-                            }
-                        )
-                        Text(
-                            text = "[close]",
-                            style = type.appCard,
+                        ActionPill(
+                            label = "save",
+                            color = if (saveEnabled) ok else Color.DarkGray,
+                            enabled = saveEnabled,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            onSave(input.trim())
+                            input = ""
+                            showKeyboard = false
+                        }
+                        ActionPill(
+                            label = "clear",
+                            color = if (clearEnabled) warn else Color.DarkGray,
+                            enabled = clearEnabled,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            onClear()
+                            input = ""
+                        }
+                        ActionPill(
+                            label = "close",
                             color = Color.White,
-                            modifier = Modifier.clickable { showKeyboard = false }
-                        )
+                            enabled = true,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            showKeyboard = false
+                        }
                     }
 
-                    Spacer(Modifier.height(8.dp))
-                    
                     RetroKeyboard(
                         onKeyPress = { ch -> input += ch },
                         onBackspace = { if (input.isNotEmpty()) input = input.dropLast(1) },
@@ -222,6 +240,58 @@ fun OpenClawSettingsPanel(
 private fun maskKey(s: String): String {
     if (s.length <= 8) return s
     return s.take(3) + "…" + s.takeLast(4)
+}
+
+@Composable
+private fun StatusPill(text: String, color: Color) {
+    val type = LocalR1Type.current
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .border(1.dp, color.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+            .background(color.copy(alpha = 0.12f))
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .background(color, RoundedCornerShape(50))
+                .padding(4.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = text,
+            style = type.appCard.copy(fontSize = 12.sp),
+            color = color,
+        )
+    }
+}
+
+@Composable
+private fun ActionPill(
+    label: String,
+    color: Color,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val type = LocalR1Type.current
+    val borderColor = if (enabled) color else Color(0xFF333333)
+    Box(
+        modifier = modifier
+            .height(36.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .border(1.dp, borderColor, RoundedCornerShape(8.dp))
+            .background(if (enabled) color.copy(alpha = 0.10f) else Color.Transparent)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            style = type.appCard.copy(fontSize = 14.sp),
+            color = borderColor,
+        )
+    }
 }
 
 @Composable

@@ -37,7 +37,9 @@ import com.r1.launcher.openclaw.GatewaySession
 import com.r1.launcher.openclaw.OpenClawPrefs
 import com.r1.launcher.openclaw.decodeGatewaySetupCode
 import com.r1.launcher.ui.LauncherRoot
+import com.r1.launcher.ui.MOTOR_BACK
 import com.r1.launcher.ui.R1Theme
+import com.r1.launcher.ui.setMotorOrientation
 import com.r1.launcher.updater.OTAUpdater
 import java.io.OutputStream
 import java.io.File
@@ -49,7 +51,7 @@ import java.util.Locale
 
 /**
  * Activity shell:
- *   - setContent { R1Theme { LauncherRoot(state, appStore, host) } }
+ *   - setContent { R1Theme { LauncherRoot(state, host) } }
  *   - dispatchKeyEvent routes wheel/PTT candidates into state/host
  *   - onResume/onPause register BroadcastReceivers (net, battery, package) and
  *     the telephony signal listener, just like the old Java launcher
@@ -68,10 +70,10 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         private const val REQ_CAMERA_PERM = 4801
         private const val REQ_AUDIO_PERM = 4802
         private const val REQ_PHONE_PERM = 4803
+        private const val REQ_SMS_PERM = 4804
     }
 
     private val state = LauncherState()
-    private lateinit var appStore: AppStore
     private var tone: ToneGenerator? = null
     private var soundPool: SoundPool? = null
     private var popSoundId: Int = 0
@@ -79,6 +81,24 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private var audioManager: AudioManager? = null
 
     private val openClawPrefs by lazy { OpenClawPrefs.get(this) }
+    private val wifiSharePrefs by lazy { com.r1.launcher.wifishare.WifiSharePrefs.get(this) }
+    private var wifiShareTimerEndMs: Long = 0L
+    private val wifiShareTimerRunnable = Runnable { toggleWifiShare(false) }
+    private val wifiShareCountdownRunnable = object : Runnable {
+        override fun run() {
+            val remaining = ((wifiShareTimerEndMs - System.currentTimeMillis()) / 1000L)
+                .toInt().coerceAtLeast(0)
+            state.wifiShareTimerRemainingSec = remaining
+            if (remaining > 0 && state.wifiShareEnabled) ui.postDelayed(this, 1000L)
+        }
+    }
+    private val wifiShareClientPollRunnable = object : Runnable {
+        override fun run() {
+            if (!state.wifiShareEnabled) return
+            pollWifiShareClients()
+            ui.postDelayed(this, 3000L)
+        }
+    }
     private var openClawSession: GatewaySession? = null
     private var openClawCapture: com.r1.launcher.openclaw.AudioCapture? = null
     private var openClawSpeechPlayer: MediaPlayer? = null
@@ -93,6 +113,18 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private var lastPauseMs: Long = 0L
     private var lastResumeMs: Long = 0L
     private var openClawPttKeyCode: Int = KeyEvent.KEYCODE_UNKNOWN
+
+    // Side button (BUTTON_1) press detection: distinguishes short-tap, double-tap,
+    // and long-press. Tuned values:
+    //   short ≤ 500 ms (DOWN→UP duration)
+    //   long  ≥ 500 ms (DOWN held without UP fires before UP arrives, see ACTION_DOWN repeat)
+    //   double tap window: two short taps within 350 ms of each other
+    private var sideDownAtMs: Long = 0L
+    private var sideLastShortUpMs: Long = 0L
+    private var sideLongFired: Boolean = false
+    private var pendingSideSingle: Runnable? = null
+    private val SIDE_DOUBLE_PRESS_MS = 350L
+    private val SIDE_LONG_PRESS_MS = 500L
 
     private var telephony: TelephonyManager? = null
     private val phoneListener = object : PhoneStateListener() {
@@ -112,8 +144,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
     private val packageRx = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent?) {
-            state.downloadingSlug = null
-            state.downloadingPct = 0
             loadApps()
         }
     }
@@ -125,6 +155,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             val scale = i.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
             if (level < 0 || scale <= 0) return
             state.batteryPct = (level.toFloat() / scale).coerceIn(0.08f, 1f)
+            state.batteryCharging = i.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
         }
     }
 
@@ -144,6 +175,28 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     toast("key saved via adb")
                 }
             }
+        }
+    }
+
+    // SmsReceiver writes incoming SMS to SmsCache and fires this local broadcast
+    // so the messages panel can refresh without polling.
+    private val smsLocalRx = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent?) {
+            if (state.panel == Panel.MESSAGES) loadSmsConversations()
+            else if (state.panel == Panel.MESSAGES_THREAD) {
+                // re-pull the active thread to surface the new bubble
+                openSmsThread(state.smsThreadAddress, state.smsThreadName)
+            }
+        }
+    }
+
+    // adb-callable web-server toggle:
+    //   adb shell "am broadcast -a com.r1.launcher.TOGGLE_WEB_SERVER --ez on true"
+    private val webToggleRx = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent?) {
+            val on = i?.getBooleanExtra("on", !state.webServerEnabled) ?: !state.webServerEnabled
+            android.util.Log.i("LauncherActivity", "webToggleRx fired on=$on")
+            toggleWebServer(on)
         }
     }
 
@@ -191,11 +244,9 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             afd.close()
         }
 
-        appStore = AppStore(this).apply {
-            setStatusListener { phase, slug, pct, msg -> onStoreStatus(phase, slug, pct, msg) }
-        }
-        
-        // Initialize OTA Updater
+        // OTA: silent boot check (no toast on "up to date"), wired through carroot
+        // for the post-install reboot. The Settings → "check for updates" row
+        // calls back in with forcePrompt = true.
         OTAUpdater.executeRootCommand = { cmd -> sendToCarroot(cmd) }
         OTAUpdater.checkForUpdates(this, state, forcePrompt = false) { msg ->
             toast(msg)
@@ -204,11 +255,18 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.openClawHideChat = openClawPrefs.hideChat
         state.chatFontSize = openClawPrefs.chatFontSize
         state.chatTtsEnabled = openClawPrefs.ttsEnabled
+        state.wifiShareSsid = wifiSharePrefs.ssid
+        state.wifiSharePassword = wifiSharePrefs.password
+        state.wifiShareTimerMinutes = wifiSharePrefs.timerMinutes
         loadApps()
+
+        // Auto-start the companion web server on boot. Cheap when nobody connects;
+        // having it always-on means the user just types the URL when they need it.
+        toggleWebServer(true)
 
         setContent {
             R1Theme {
-                LauncherRoot(state = state, appStore = appStore, host = this)
+                LauncherRoot(state = state, host = this)
             }
         }
     }
@@ -220,6 +278,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             .sortedBy { it.loadLabel(packageManager).toString().lowercase(Locale.getDefault()) }
         state.apps.clear()
         found.forEach { state.apps.add(AppEntry.Real(it)) }
+        state.apps.add(AppEntry.Messages)
         state.apps.add(AppEntry.OpenClaw)
         state.apps.add(AppEntry.Settings)
         state.appsLoaded = true
@@ -228,33 +287,11 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        // Side button is mapped to HOME via /data/system/devices/keylayout/mtk-kpd.kl,
-        // so each press fires onNewIntent on this singleTask activity. We act on the
-        // press immediately (no double-press deferral — that delay was perceptible).
-        //   foreground press → context action (HOME=lock, else=state.activate)
-        //   background press → just land on home (the HOME redirect already did it)
-        // Foreground vs background: a foreground HOME redirect runs onPause → onNewIntent
-        // → onResume back-to-back, so a tiny sincePause means we were already at front.
-        val now = System.currentTimeMillis()
-        if (now - lastSidePressMs < SIDE_PRESS_DEBOUNCE_MS) return
-        lastSidePressMs = now
-
-        val wasForeground = lastPauseMs > 0L && (now - lastPauseMs) < 250L
-        if (!wasForeground) {
-            if (state.panel != Panel.HOME) state.goHome()
-            return
-        }
-        if (state.panel == Panel.OPENCLAW_CHAT || state.panel == Panel.OPENCLAW_TALK) {
-            // Push-to-talk uses raw key DOWN/UP timing in dispatchKeyEvent.
-            // If the side key also produces a HOME redirect, do not let this
-            // legacy activation path immediately toggle recording back off.
-            return
-        }
-        if (state.panel == Panel.HOME) {
-            lockScreen()
-        } else {
-            state.activate(this)
-        }
+        // The side button is mapped to BUTTON_1 (not HOME), so its handling lives in
+        // dispatchKeyEvent. onNewIntent fires only for genuine HOME-category redirects
+        // — typically when a third-party app finishes / the user invokes home. Land
+        // on the clock screen unless we're already on it.
+        if (state.panel != Panel.HOME) state.goHome()
     }
 
     override fun onResume() {
@@ -286,6 +323,20 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             registerReceiver(openaiKeyRx, keyFilter)
         }
 
+        val smsLocalFilter = IntentFilter(com.r1.launcher.messages.SmsReceiver.ACTION_NEW_SMS_LOCAL)
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(smsLocalRx, smsLocalFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(smsLocalRx, smsLocalFilter)
+        }
+
+        val webToggleFilter = IntentFilter("com.r1.launcher.TOGGLE_WEB_SERVER")
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(webToggleRx, webToggleFilter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(webToggleRx, webToggleFilter)
+        }
+
         runCatching {
             telephony?.listen(phoneListener, PhoneStateListener.LISTEN_SIGNAL_STRENGTHS)
         }
@@ -295,8 +346,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         refreshSim()
 
         loadApps()
-        state.downloadingSlug = null
-        state.downloadingPct = 0
     }
 
     override fun onPause() {
@@ -307,12 +356,16 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         runCatching { unregisterReceiver(batteryRx) }
         runCatching { unregisterReceiver(packageRx) }
         runCatching { unregisterReceiver(openaiKeyRx) }
+        runCatching { unregisterReceiver(smsLocalRx) }
+        runCatching { unregisterReceiver(webToggleRx) }
         runCatching { telephony?.listen(phoneListener, PhoneStateListener.LISTEN_NONE) }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         runCatching { openClawCloseSessionInternal() }
+        runCatching { webServer?.stopServer() }
+        webServer = null
         // Clean up UI handlers
         runCatching { ui.removeCallbacksAndMessages(null) }
         runCatching { tone?.release() }
@@ -321,7 +374,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         soundPool = null
         runCatching { openClawSpeechPlayer?.release() }
         openClawSpeechPlayer = null
-        runCatching { appStore.shutdown() }
     }
 
     override fun onBackPressed() {
@@ -461,6 +513,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     ensureCameraPerm()
                     state.openOpenClawQr()
                 }
+            }
+            AppEntry.Messages -> {
+                selectTone()
+                state.openMessages()
+                if (ensureSmsPerm()) loadSmsConversations()
+                else state.smsError = "permission required"
             }
             null -> Unit
         }
@@ -813,27 +871,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.back()
     }
 
-    override fun openWifiSettings() {
-        val actions = listOf(
-            Settings.ACTION_WIFI_SETTINGS,
-            "android.settings.panel.action.INTERNET_CONNECTIVITY",
-            "android.settings.panel.action.WIFI",
-            Settings.ACTION_WIRELESS_SETTINGS,
-            Settings.ACTION_SETTINGS,
-        )
-        for (a in actions) {
-            runCatching {
-                val i = Intent(a).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                if (i.resolveActivity(packageManager) != null) {
-                    startActivity(i)
-                    state.back()
-                    return
-                }
-            }
-        }
-        toast("Wi-Fi UI unavailable on this device")
-        state.back()
-    }
 
     @Suppress("DEPRECATION")
     override fun toggleWifi(enable: Boolean) {
@@ -949,6 +986,228 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }.start()
     }
 
+    override fun toggleWifiShare(enable: Boolean) {
+        state.wifiShareEnabled = enable
+        if (!enable) {
+            ui.removeCallbacks(wifiShareTimerRunnable)
+            ui.removeCallbacks(wifiShareCountdownRunnable)
+            ui.removeCallbacks(wifiShareClientPollRunnable)
+            state.wifiShareTimerRemainingSec = 0
+            state.wifiShareConnectedClients.clear()
+        }
+        Thread {
+            val ssid = state.wifiShareSsid.replace("\"", "\\\"")
+            val pass = state.wifiSharePassword.replace("\"", "\\\"")
+            // Single one-shot form on this build: `cmd wifi start-softap <ssid> wpa2 <pass>`.
+            // Capture stdout/stderr so we can surface real failure reasons.
+            val cmdOut = "/data/local/tmp/softap_cmd.txt"
+            val cmd = if (enable) {
+                "cmd wifi start-softap \"$ssid\" wpa2 \"$pass\" > $cmdOut 2>&1; chmod 666 $cmdOut"
+            } else {
+                "cmd wifi stop-softap > $cmdOut 2>&1; chmod 666 $cmdOut"
+            }
+            sendToCarroot(cmd)
+            // The cmd-line tool tails state events for ~3s on success. Verify the
+            // ap0 interface — that's the authoritative "is the radio actually up?"
+            // signal. Retry up to ~6s because softap brings down STA first on MTK.
+            var applied = false
+            for (attempt in 0..5) {
+                Thread.sleep(1000)
+                applied = isWifiShareEnabled() == enable
+                android.util.Log.d("LauncherActivity", "toggleWifiShare($enable) attempt=$attempt applied=$applied")
+                if (applied) break
+            }
+            if (!applied) {
+                val out = runCatching { java.io.File(cmdOut).readText() }.getOrDefault("")
+                android.util.Log.w("LauncherActivity", "toggleWifiShare($enable) FAILED. cmd output:\n$out")
+                val reason = out.lineSequence()
+                    .map { it.trim() }
+                    .firstOrNull { it.contains("fail", true) || it.contains("error", true) || it.contains("denied", true) }
+                    ?: out.lineSequence().firstOrNull { it.isNotBlank() }
+                    ?: "no response"
+                ui.post {
+                    state.wifiShareEnabled = !enable
+                    toast((if (enable) "Hotspot failed: " else "Stop failed: ") + reason.take(80))
+                }
+                return@Thread
+            }
+            ui.post {
+                state.wifiShareEnabled = enable
+                if (enable) {
+                    armWifiShareTimer()
+                    ui.removeCallbacks(wifiShareClientPollRunnable)
+                    ui.post(wifiShareClientPollRunnable)
+                }
+            }
+        }.start()
+    }
+
+    private var webServer: com.r1.launcher.web.R1WebServer? = null
+
+    override fun toggleWebServer(enable: Boolean) {
+        android.util.Log.i("LauncherActivity", "toggleWebServer($enable) entry, current=${webServer != null}")
+        if (enable && webServer != null) return
+        if (!enable && webServer == null) {
+            state.webServerEnabled = false
+            return
+        }
+        if (enable) {
+            val srv = com.r1.launcher.web.R1WebServer(this, this, state)
+            webServer = srv
+            Thread {
+                runCatching { srv.startServer() }
+                    .onFailure { android.util.Log.e("LauncherActivity", "startServer failed", it) }
+                ui.post {
+                    state.webServerIp = discoverLocalIp()
+                    state.webServerEnabled = true
+                    android.util.Log.i("LauncherActivity", "web server up at ${state.webServerIp}:${state.webServerPort}")
+                    toast("remote panel: http://${state.webServerIp}:${state.webServerPort}")
+                }
+            }.start()
+        } else {
+            val srv = webServer
+            webServer = null
+            state.webServerEnabled = false
+            state.webServerIp = ""
+            Thread { runCatching { srv?.stopServer() } }.start()
+        }
+    }
+
+    /**
+     * Pick the IP that's actually reachable from a phone/PC on the same LAN.
+     * Priority: hotspot (ap0) then Wi-Fi (wlan) then Ethernet (eth) then anything else.
+     * Skips cellular modem interfaces (ccmni, rmnet, ppp) — they sit on the
+     * carrier's CGN and are not routable from your home network.
+     */
+    private fun discoverLocalIp(): String {
+        val ifaces = runCatching {
+            java.net.NetworkInterface.getNetworkInterfaces().toList()
+        }.getOrDefault(emptyList())
+
+        fun priority(name: String): Int = when {
+            name.startsWith("ap0") -> 0
+            name.startsWith("wlan") -> 1
+            name.startsWith("eth") -> 2
+            name.startsWith("ccmni") || name.startsWith("rmnet") || name.startsWith("ppp") -> 99
+            else -> 50
+        }
+
+        val ordered = ifaces
+            .filter { it.isUp && !it.isLoopback }
+            .sortedBy { priority(it.name) }
+
+        for (iface in ordered) {
+            if (priority(iface.name) >= 99) continue // never use cellular
+            for (addr in iface.inetAddresses) {
+                if (addr.isLoopbackAddress || addr is java.net.Inet6Address) continue
+                val host = addr.hostAddress ?: continue
+                if (host.startsWith("127.")) continue
+                return host
+            }
+        }
+        return "0.0.0.0"
+    }
+
+    override fun wifiShareSaveEdit() {
+        val target = state.wifiShareEditTarget
+        val input = state.wifiShareEditInput.trim()
+        if (target == WifiShareEditTarget.SSID && input.isEmpty()) {
+            toast("name can't be empty")
+            return
+        }
+        if (target == WifiShareEditTarget.PASSWORD && input.length < 8) {
+            toast("password needs 8+ chars")
+            return
+        }
+        when (target) {
+            WifiShareEditTarget.SSID -> {
+                state.wifiShareSsid = input
+                wifiSharePrefs.ssid = input
+            }
+            WifiShareEditTarget.PASSWORD -> {
+                state.wifiSharePassword = input
+                wifiSharePrefs.password = input
+            }
+        }
+        state.back()
+        // If the hotspot is currently up, cycle it so the new config takes effect.
+        if (state.wifiShareEnabled) {
+            Thread {
+                ui.post { toggleWifiShare(false) }
+                Thread.sleep(1200)
+                ui.post { toggleWifiShare(true) }
+            }.start()
+        }
+    }
+
+    override fun wifiShareCycleTimer() {
+        val choices = intArrayOf(0, 15, 30, 60, 120)
+        val cur = choices.indexOf(state.wifiShareTimerMinutes).let { if (it < 0) 0 else it }
+        val next = choices[(cur + 1) % choices.size]
+        state.wifiShareTimerMinutes = next
+        wifiSharePrefs.timerMinutes = next
+        if (state.wifiShareEnabled) armWifiShareTimer()
+    }
+
+    private fun armWifiShareTimer() {
+        ui.removeCallbacks(wifiShareTimerRunnable)
+        ui.removeCallbacks(wifiShareCountdownRunnable)
+        val mins = state.wifiShareTimerMinutes
+        if (mins <= 0) {
+            state.wifiShareTimerRemainingSec = 0
+            return
+        }
+        val durationMs = mins * 60_000L
+        wifiShareTimerEndMs = System.currentTimeMillis() + durationMs
+        state.wifiShareTimerRemainingSec = (durationMs / 1000L).toInt()
+        ui.postDelayed(wifiShareTimerRunnable, durationMs)
+        ui.post(wifiShareCountdownRunnable)
+    }
+
+    private fun isWifiShareEnabled(): Boolean {
+        // Authoritative signal: kernel interface state. ap0 is the SoftAp iface on
+        // this build. When softap is up, `ip link show ap0` reports `state UP` and
+        // the UP,LOWER_UP flags; when down (or before first start), DOWN or absent.
+        // dumpsys wifi here doesn't include the SoftApState lines we used to grep.
+        val out = "/data/local/tmp/softap_iface.txt"
+        if (!sendToCarroot("ip link show ap0 > $out 2>&1; chmod 666 $out")) return false
+        return runCatching {
+            val txt = java.io.File(out).readText()
+            txt.contains("state UP") && txt.contains("LOWER_UP")
+        }.getOrDefault(false)
+    }
+
+    private fun pollWifiShareClients() {
+        Thread {
+            val out = "/data/local/tmp/softap_clients.txt"
+            // ap0 is the SoftAp interface on this build (confirmed via dumpsys).
+            // Pull both ip-neigh and ARP and union — early in a connection a
+            // client may show in one but not the other.
+            sendToCarroot("ip neigh show dev ap0 > $out 2>/dev/null; cat /proc/net/arp >> $out; chmod 666 $out")
+            Thread.sleep(250)
+            val macs = runCatching {
+                val text = java.io.File(out).readText()
+                val seen = linkedSetOf<String>()
+                Regex("lladdr ([0-9a-fA-F:]{17})").findAll(text).forEach { seen.add(it.groupValues[1].uppercase()) }
+                text.lineSequence().drop(1).forEach { line ->
+                    val parts = line.trim().split(Regex("\\s+"))
+                    if (parts.size >= 6 && (parts[5] == "ap0" || parts[5].startsWith("wlan"))) {
+                        val mac = parts[3]
+                        if (mac.matches(Regex("[0-9a-fA-F:]{17}")) && mac != "00:00:00:00:00:00") {
+                            seen.add(mac.uppercase())
+                        }
+                    }
+                }
+                seen.toList()
+            }.getOrDefault(emptyList())
+            ui.post {
+                state.wifiShareConnectedClients.clear()
+                state.wifiShareConnectedClients.addAll(macs)
+                if (macs.isEmpty()) state.wifiShareClientsExpanded = false
+            }
+        }.start()
+    }
+
     @Suppress("DEPRECATION")
     override fun toggleBluetooth(enable: Boolean) {
         state.btOn = enable
@@ -994,20 +1253,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }.start()
     }
 
-    override fun requestReboot(powerOff: Boolean) {
-        state.back()
-        val cmd = if (powerOff) "reboot -p" else "reboot"
-        toast(if (powerOff) "Powering off..." else "Rebooting...")
-        Thread {
-            if (sendToCarroot(cmd)) return@Thread
-            ui.post {
-                if (!PowerService.openPowerDialog()) {
-                    toast("No root shell; enable Accessibility → R1 Launcher first")
-                }
-            }
-        }.start()
-    }
-
     private fun sendToCarroot(cmd: String): Boolean = try {
         Socket().use { s ->
             s.connect(InetSocketAddress("127.0.0.1", 1337), 1500)
@@ -1021,43 +1266,25 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         false
     }
 
-    override fun storeActivate(entry: AppStore.Entry) {
-        val local = appStore.installedVersionCode(entry.pkg)
-        if (state.downloadingSlug != null) { toast("Busy…"); return }
-        if (local == 0 || local < entry.versionCode) {
-            toast((if (local == 0) "Installing " else "Updating ") + entry.name)
-            state.downloadingSlug = entry.slug
-            state.downloadingPct = 0
-            appStore.install(entry)
-            launchTone()
-        } else {
-            state.openDetail(entry)
-            selectTone()
-        }
-    }
-
-    override fun detailOpen() {
-        val entry = state.detailEntry ?: return
-        val i = packageManager.getLaunchIntentForPackage(entry.pkg)
-        if (i != null) {
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            launchTone()
-            startActivity(i)
-            state.goHome()
-        } else {
-            toast("No launch intent")
-        }
-    }
-
-    override fun detailUninstall() {
-        val entry = state.detailEntry ?: return
-        appStore.uninstall(entry.pkg)
-        state.back()
-    }
-
     // --- LauncherHost: openclaw ---
 
     override fun openClawScanned(raw: String) {
+        if (state.qrScanMode == QrScanMode.OPENAI_KEY) {
+            val k = raw.trim()
+            if (!k.startsWith("sk-") || k.length < 20) {
+                state.qrError = "Not an openai key"
+                return
+            }
+            openClawPrefs.openaiKey = k
+            refreshOpenaiKeyState()
+            state.qrError = null
+            selectTone()
+            toast("openai key saved via QR")
+            // Bounce back to the settings panel where the user came from.
+            state.qrScanMode = QrScanMode.GATEWAY_PAIRING
+            state.openOpenClawSettings()
+            return
+        }
         val code = decodeGatewaySetupCode(raw) ?: run {
             state.qrError = "QR not recognised"
             return
@@ -1274,14 +1501,19 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             0 -> { state.back(); backTone() }
             // 1 (whisper key) is handled entirely by UI (toggles keyboard)
             2 -> {
+                ensureCameraPerm()
+                state.openOpenAiKeyQr()
+                selectTone()
+            }
+            3 -> {
                 val newHide = !state.openClawHideChat
                 state.openClawHideChat = newHide
                 openClawPrefs.hideChat = newHide
                 popTone()
             }
-            // 3 (font size) is handled by +/- buttons in the UI
-            4 -> { openClawClearHistory(); popTone() }
-            5 -> { openClawDisconnect(); popTone() }
+            // 4 (font size) is handled by +/- buttons in the UI
+            5 -> { openClawClearHistory(); popTone() }
+            6 -> { openClawDisconnect(); popTone() }
         }
     }
 
@@ -1356,6 +1588,13 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
     override fun openClawOpenCameraAsk() {
         ensureCameraPerm()
+        // Pre-fire BACK before the panel composes. The stepper takes a
+        // visible moment to physically rotate from its previous parked
+        // angle; firing here gives it a head start while the AnimatedVisibility
+        // enter animation runs and Camera2 spins up. The camera panel's
+        // DisposableEffect re-fires BACK on compose — serialized through the
+        // motor executor, the duplicate is harmless.
+        setMotorOrientation(MOTOR_BACK)
         state.openOpenClawCamera()
     }
 
@@ -1372,6 +1611,15 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.openClawCameraJpegBase64 = null
         state.openClawCameraError = null
         state.openClawCameraBusy = false
+        navTone()
+    }
+
+    override fun openClawCameraMotorNudge(delta: Int) {
+        val prev = state.openClawCameraMotor
+        val next = (prev + delta).coerceIn(0, 180)
+        if (next == prev) return
+        state.openClawCameraMotor = next
+        setMotorOrientation(next)
         navTone()
     }
 
@@ -1417,6 +1665,41 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
     }
 
+    override fun loadSmsConversations() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS) !=
+            PackageManager.PERMISSION_GRANTED) {
+            state.smsError = "permission required"
+            return
+        }
+        if (state.smsLoading) return
+        state.smsLoading = true
+        state.smsError = null
+        Thread {
+            val list = runCatching {
+                com.r1.launcher.messages.SmsLoader.loadConversations(this)
+            }.getOrElse { emptyList() }
+            ui.post {
+                state.smsConversations.clear()
+                state.smsConversations.addAll(list)
+                state.smsLoading = false
+                if (list.isEmpty() && state.smsError == null) state.smsError = "no messages"
+            }
+        }.start()
+    }
+
+    override fun openSmsThread(address: String, displayName: String) {
+        state.openMessagesThread(address, displayName)
+        Thread {
+            val items = runCatching {
+                com.r1.launcher.messages.SmsLoader.loadMessagesFor(this, address)
+            }.getOrElse { emptyList() }
+            ui.post {
+                state.smsThreadMessages.clear()
+                state.smsThreadMessages.addAll(items)
+            }
+        }.start()
+    }
+
     private fun refreshOpenaiKeyState() {
         val k = openClawPrefs.openaiKey
         if (k.isNullOrBlank()) {
@@ -1455,6 +1738,21 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         return granted
     }
 
+    private fun ensureSmsPerm(): Boolean {
+        val read = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS) ==
+            PackageManager.PERMISSION_GRANTED
+        val recv = ContextCompat.checkSelfPermission(this, Manifest.permission.RECEIVE_SMS) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!read || !recv) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS),
+                REQ_SMS_PERM,
+            )
+        }
+        return read && recv
+    }
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<String>,
@@ -1464,6 +1762,14 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         if (requestCode == REQ_PHONE_PERM &&
             grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
             refreshSim()
+        }
+        if (requestCode == REQ_SMS_PERM &&
+            grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+            // User just granted READ_SMS while the panel is up; populate now.
+            if (state.panel == Panel.MESSAGES) {
+                state.smsError = null
+                loadSmsConversations()
+            }
         }
     }
 
@@ -1492,47 +1798,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
     }
 
-    // --- updater/store status bridge ---
-
-    private fun onUpdaterStatus(phase: String, msg: String?) {
-        when (phase) {
-            Updater.PHASE_CHECKING -> state.updateIconState = 1
-            Updater.PHASE_DOWNLOADING -> {
-                state.updateIconState = 2
-                toast("Updating " + (msg ?: ""))
-            }
-            Updater.PHASE_INSTALLING -> {
-                state.updateIconState = 2
-                toast("Installing " + (msg ?: ""))
-            }
-            Updater.PHASE_UP_TO_DATE -> {
-                state.updateIconState = 0
-                toast("Up to date" + if (!msg.isNullOrEmpty()) " ($msg)" else "")
-            }
-            Updater.PHASE_IDLE -> state.updateIconState = 0
-            Updater.PHASE_ERROR -> {
-                state.updateIconState = 0
-                toast("Update failed" + if (!msg.isNullOrEmpty()) ": $msg" else "")
-            }
-        }
-    }
-
-    private fun onStoreStatus(phase: String, slug: String?, pct: Int, msg: String?) {
-        when (phase) {
-            AppStore.PHASE_DOWNLOADING -> {
-                state.downloadingSlug = slug
-                state.downloadingPct = pct
-            }
-            AppStore.PHASE_INSTALLING -> {
-                state.downloadingSlug = slug
-                state.downloadingPct = 100
-            }
-            AppStore.PHASE_ERROR -> {
-                state.downloadingSlug = null
-                toast("Store error" + if (msg != null) ": $msg" else "")
-            }
-        }
-    }
 
     // --- key dispatch ---
 
@@ -1543,15 +1808,60 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             return handleOpenClawPttKey(event)
         }
 
-        // Side button is remapped from HOME → BUTTON_1 in the keylayout
-        // (/data/system/devices/keylayout/mtk-kpd.kl). HOME-mapped keys collapse
-        // into one onNewIntent fire and lose the down/up timing we need for PTT.
-        // BUTTON_1 has no framework handling, so we get raw DOWN/UP here.
+        // Side button is remapped from KEY_POWER (116) → BUTTON_1 in the keylayout
+        // (system/usr/keylayout/mtk-kpd.kl, also overridable via /data/system/devices/keylayout/).
+        // HOME-mapped keys collapse to one onNewIntent and POWER is intercepted by
+        // PhoneWindowManager — BUTTON_1 reaches us with full DOWN/UP/REPEAT timing
+        // so we can implement single/double/long press here.
+        //
+        //   single tap  → HOME panel: lock screen ; other panels: activate selection
+        //   double tap  → from any non-home panel: return to home/clock screen
+        //   long press  → HOME panel: power dialog ; OpenClaw chat/talk: PTT (handled
+        //                 above by isOpenClawPttKey branch)
         if (code == KeyEvent.KEYCODE_BUTTON_1) {
-            // Non-chat: replicate the pre-remap side-button HOME behavior.
-            // Fire on UP so a deliberate hold doesn't repeat-trigger.
-            if (event.action == KeyEvent.ACTION_UP) {
-                if (state.panel == Panel.HOME) lockScreen() else state.activate(this)
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> {
+                    if (event.repeatCount == 0) {
+                        sideDownAtMs = event.eventTime
+                        sideLongFired = false
+                    } else if (!sideLongFired && event.eventTime - sideDownAtMs >= SIDE_LONG_PRESS_MS) {
+                        // Long press: fires on the first key-repeat past the threshold,
+                        // so the user gets feedback before they release.
+                        sideLongFired = true
+                        pendingSideSingle?.let { ui.removeCallbacks(it) }
+                        pendingSideSingle = null
+                        sideLastShortUpMs = 0L
+                        if (state.panel == Panel.HOME) {
+                            PowerService.openPowerDialog()
+                        }
+                    }
+                }
+                KeyEvent.ACTION_UP -> {
+                    if (sideLongFired) {
+                        // Long-press already handled at DOWN-repeat; swallow the UP.
+                        sideLongFired = false
+                        return true
+                    }
+                    val now = System.currentTimeMillis()
+                    val sincePrev = now - sideLastShortUpMs
+                    if (sincePrev < SIDE_DOUBLE_PRESS_MS && pendingSideSingle != null) {
+                        // Double-tap: cancel the pending single, go to home/clock.
+                        ui.removeCallbacks(pendingSideSingle!!)
+                        pendingSideSingle = null
+                        sideLastShortUpMs = 0L
+                        if (state.panel != Panel.HOME) state.goHome()
+                    } else {
+                        // Defer single-tap so a follow-up press can convert it to a double.
+                        sideLastShortUpMs = now
+                        val action = Runnable {
+                            pendingSideSingle = null
+                            if (state.panel == Panel.HOME) lockScreen()
+                            else state.activate(this)
+                        }
+                        pendingSideSingle = action
+                        ui.postDelayed(action, SIDE_DOUBLE_PRESS_MS)
+                    }
+                }
             }
             return true
         }

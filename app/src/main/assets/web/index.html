@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#000000">
+    <title>R1 panel</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header id="topbar">
+    <span class="logo">R1</span>
+    <span class="info" id="info-clock">--:--</span>
+    <span class="info" id="info-battery">battery —</span>
+    <span class="info" id="info-signal">signal —</span>
+    <span class="info" id="info-operator">—</span>
+    <span class="status" id="conn-status">connecting…</span>
+</header>
+
+<nav id="tabs">
+    <button data-tab="sms" class="active">sms</button>
+    <button data-tab="send">send text</button>
+    <button data-tab="system">system</button>
+</nav>
+
+<main>
+    <section id="tab-sms" class="tab active">
+        <div class="sms-layout">
+            <aside id="sms-list">
+                <button id="sms-refresh" class="ghost">refresh</button>
+                <ul id="sms-threads"></ul>
+            </aside>
+            <article id="sms-thread">
+                <header id="sms-thread-header">select a conversation</header>
+                <div id="sms-thread-body"></div>
+            </article>
+        </div>
+    </section>
+
+    <section id="tab-send" class="tab">
+        <label>
+            target
+            <select id="send-target">
+                <option value="openai_key">OpenAI / Whisper key</option>
+                <option value="openclaw_chat">OpenClaw chat (live session)</option>
+            </select>
+        </label>
+        <textarea id="send-text" rows="6" placeholder="paste or type text…"></textarea>
+        <div id="send-hint" class="hint"></div>
+        <button id="send-button" class="primary">send to R1</button>
+    </section>
+
+    <section id="tab-system" class="tab">
+        <div class="card">
+            <h3>device</h3>
+            <div class="row"><span>battery</span><span id="sys-battery">—</span></div>
+            <div class="row"><span>charging</span><span id="sys-charging">—</span></div>
+            <div class="row"><span>operator</span><span id="sys-operator">—</span></div>
+            <div class="row"><span>radio</span><span id="sys-radio">—</span></div>
+            <div class="row"><span>signal</span><span id="sys-signal">—</span></div>
+            <div class="row"><span>panel ip</span><span id="sys-ip">—</span></div>
+        </div>
+        <div class="card">
+            <h3>toggles</h3>
+            <div class="toggle"><span>wifi</span><input type="checkbox" id="toggle-wifi"></div>
+            <div class="toggle"><span>cellular</span><input type="checkbox" id="toggle-cellular"></div>
+            <div class="toggle"><span>bluetooth</span><input type="checkbox" id="toggle-bt"></div>
+            <div class="toggle"><span>hotspot</span><input type="checkbox" id="toggle-hotspot"></div>
+        </div>
+        <div class="card">
+            <h3>sliders</h3>
+            <label>brightness <input type="range" id="brightness" min="1" max="255"></label>
+            <label>volume <input type="range" id="volume" min="0" max="15"></label>
+        </div>
+        <div class="card">
+            <h3>openclaw</h3>
+            <div class="row"><span>status</span><span id="oc-status">—</span></div>
+            <div class="row"><span>openai key</span><span id="oc-key">—</span></div>
+        </div>
+    </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

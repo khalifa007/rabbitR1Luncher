@@ -87,7 +87,14 @@ fun OpenClawQrPanel(
 
             DisposableEffect(scanner) {
                 scanner?.resume()
-                onDispose { runCatching { scanner?.pause() } }
+                // QR scanner aims at EXTERNAL codes (posters, screens,
+                // packages), so pivot the lens fully away from the user
+                // (BACK = 180°). On close, return to IDLE (HOME = 90°).
+                setMotorOrientation(MOTOR_BACK)
+                onDispose {
+                    runCatching { scanner?.pause() }
+                    setMotorOrientation(MOTOR_HOME)
+                }
             }
 
             // Header overlay

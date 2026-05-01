@@ -6,4 +6,5 @@ sealed class AppEntry {
     data class Real(val info: ResolveInfo) : AppEntry()
     object Settings : AppEntry()
     object OpenClaw : AppEntry()
+    object Messages : AppEntry()
 }

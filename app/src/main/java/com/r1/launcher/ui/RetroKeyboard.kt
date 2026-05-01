@@ -34,7 +34,9 @@ fun RetroKeyboard(
     var isNumeric by remember { mutableStateOf(false) }
 
     val row1 = if (isNumeric) listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0") else listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p")
-    val row2 = if (isNumeric) listOf("@", "#", "$", "%", "&", "-", "+", "(", ")") else listOf("a", "s", "d", "f", "g", "h", "j", "k", "l", "/")
+    // `/` lives only in numeric mode (row3) — kept off the default layout so
+    // users don't slash a sentence by accident; tap `123` to reach it.
+    val row2 = if (isNumeric) listOf("@", "#", "$", "%", "&", "-", "+", "(", ")") else listOf("a", "s", "d", "f", "g", "h", "j", "k", "l")
     val row3 = if (isNumeric) listOf("*", "\"", "'", ":", ";", "!", "?", "/", "<") else listOf("^", "z", "x", "c", "v", "b", "n", "m", "<")
     val row4 = listOf(if (isNumeric) "abc" else "123", ",", "space", ".", "hide")
 
@@ -71,8 +73,14 @@ fun RetroKeyboard(
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             row3.forEach { key ->
                 val weight = if (key == "^" || key == "<") 1.5f else 1f
+                val isLetter = !isNumeric && key !in listOf("^", "<")
+                // Display the shifted form when caps is on so the row visibly
+                // matches what gets typed. Earlier code always displayed
+                // `key`, so z–m stayed lowercase even though pressing them
+                // produced Z–M.
+                val displayText = if (isLetter && isShifted) key.uppercase() else key
                 KeyboardKey(
-                    text = key,
+                    text = displayText,
                     modifier = Modifier.weight(weight),
                     isSpecial = key == "^" || key == "<",
                     isActive = key == "^" && isShifted,

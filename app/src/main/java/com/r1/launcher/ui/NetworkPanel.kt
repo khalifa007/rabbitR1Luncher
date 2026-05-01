@@ -39,6 +39,16 @@ fun NetworkPanel(
             SettingsItem.Toggle("wifi", state.wifiEnabled, subtitle = if (state.wifiEnabled) state.wifiConnectedSsid else ""),
             SettingsItem.Toggle("cellular data", state.cellularOn),
             SettingsItem.Toggle("bluetooth", state.btOn),
+            SettingsItem.Toggle(
+                "wifi share",
+                state.wifiShareEnabled,
+                subtitle = if (state.wifiShareEnabled) "${state.wifiShareConnectedClients.size} connected" else "",
+            ),
+            SettingsItem.Toggle(
+                "remote panel",
+                state.webServerEnabled,
+                subtitle = if (state.webServerEnabled) "http://${state.webServerIp.ifEmpty { "?" }}:${state.webServerPort}" else "",
+            ),
             SettingsItem.Standard("scan wifi networks"),
         )
 

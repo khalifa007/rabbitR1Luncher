@@ -122,7 +122,7 @@ fun Topbar(state: LauncherState, modifier: Modifier = Modifier) {
                 UpdateIcon(rotating = state.updateIconState == 2, halfAlpha = state.updateIconState == 1)
                 IconSpacer()
             }
-            BatteryPill(pct = state.batteryPct)
+            BatteryPill(pct = state.batteryPct, charging = state.batteryCharging)
         }
     }
 }
@@ -159,13 +159,14 @@ private fun UpdateIcon(rotating: Boolean, halfAlpha: Boolean) {
 }
 
 @Composable
-private fun BatteryPill(pct: Float) {
+private fun BatteryPill(pct: Float, charging: Boolean) {
     val scale = pct.coerceIn(0.08f, 1f)
+    val tint = if (charging) Color(0xFF35D26F) else Color(0xFFFF6B00)
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
             .size(width = 26.dp, height = 12.dp)
-            .border(1.dp, Color(0xFFFF6B00), RoundedCornerShape(3.dp))
+            .border(1.dp, tint, RoundedCornerShape(3.dp))
             .padding(1.dp),
     ) {
         Box(
@@ -177,7 +178,7 @@ private fun BatteryPill(pct: Float) {
                     transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0.5f)
                 }
                 .clip(RoundedCornerShape(2.dp))
-                .background(Color(0xFFFF6B00)),
+                .background(tint),
         )
         Text(
             text = "${(pct * 100).toInt()}",
