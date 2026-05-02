@@ -5,6 +5,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -133,7 +135,7 @@ fun AppsPanel(
                         .zIndex((state.apps.size + 1).toFloat())
                         .fillMaxWidth()
                         .height(120.dp)
-                        .offset(y = (-75).dp),
+                        .offset(y = (-65).dp),
                 )
             }
         }
@@ -194,10 +196,14 @@ private fun AppCard(
         }
     }
 
-    val height = if (focused) FOCUSED_HEIGHT else COLLAPSED_HEIGHT
+    val height by animateDpAsState(
+        targetValue = if (focused) FOCUSED_HEIGHT else COLLAPSED_HEIGHT,
+        animationSpec = tween(durationMillis = 260, easing = LinearOutSlowInEasing),
+        label = "cardHeight",
+    )
     val focusGlow by animateFloatAsState(
         targetValue = if (focused) 1f else 0f,
-        animationSpec = tween(durationMillis = 150, easing = FastOutSlowInEasing),
+        animationSpec = tween(durationMillis = 260, easing = LinearOutSlowInEasing),
         label = "cardFocusGlow",
     )
 
@@ -289,32 +295,50 @@ class FolderShape : androidx.compose.ui.graphics.Shape {
         layoutDirection: androidx.compose.ui.unit.LayoutDirection,
         density: androidx.compose.ui.unit.Density,
     ): androidx.compose.ui.graphics.Outline {
-        val path = androidx.compose.ui.graphics.Path().apply {
-            val width = size.width
-            val height = size.height
-            val radius = 12f * density.density
+        val w = size.width
+        val h = size.height
+        val r = 10f * density.density
+        val tr = 8f * density.density
+        val tabW = w * 0.42f
+        val tabH = h * 0.22f
 
-            moveTo(0f, height * 0.3f)
-            cubicTo(
-                width * 0.3f, height * 0.3f,
-                width * 0.6f, height * 0.6f,
-                width, height * 0.6f,
-            )
-            lineTo(width, height - radius)
+        val path = androidx.compose.ui.graphics.Path().apply {
+            moveTo(0f, r)
             arcTo(
-                rect = androidx.compose.ui.geometry.Rect(width - radius * 2, height - radius * 2, width, height),
+                rect = androidx.compose.ui.geometry.Rect(0f, 0f, r * 2, r * 2),
+                startAngleDegrees = 180f,
+                sweepAngleDegrees = 90f,
+                forceMoveTo = false,
+            )
+            lineTo(tabW - tr, 0f)
+            arcTo(
+                rect = androidx.compose.ui.geometry.Rect(tabW - tr * 2, 0f, tabW, tr * 2),
+                startAngleDegrees = 270f,
+                sweepAngleDegrees = 90f,
+                forceMoveTo = false,
+            )
+            lineTo(tabW, tabH)
+            lineTo(w - r, tabH)
+            arcTo(
+                rect = androidx.compose.ui.geometry.Rect(w - r * 2, tabH, w, tabH + r * 2),
+                startAngleDegrees = 270f,
+                sweepAngleDegrees = 90f,
+                forceMoveTo = false,
+            )
+            lineTo(w, h - r)
+            arcTo(
+                rect = androidx.compose.ui.geometry.Rect(w - r * 2, h - r * 2, w, h),
                 startAngleDegrees = 0f,
                 sweepAngleDegrees = 90f,
                 forceMoveTo = false,
             )
-            lineTo(radius, height)
+            lineTo(r, h)
             arcTo(
-                rect = androidx.compose.ui.geometry.Rect(0f, height - radius * 2, radius * 2, height),
+                rect = androidx.compose.ui.geometry.Rect(0f, h - r * 2, r * 2, h),
                 startAngleDegrees = 90f,
                 sweepAngleDegrees = 90f,
                 forceMoveTo = false,
             )
-            lineTo(0f, height * 0.3f)
             close()
         }
         return androidx.compose.ui.graphics.Outline.Generic(path)
