@@ -22,11 +22,29 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      # The release APK is signed with the LineageOS platform key so its
+      # signature matches the prebuilt /system/app/R1Launcher/ in CarrotOS
+      # (LOCAL_CERTIFICATE := platform). The keystore is .gitignored — CI
+      # gets it by base64-decoding the PLATFORM_KEYSTORE_B64 repo secret.
+      - name: Restore platform.keystore from secret
+        run: |
+          if [ -z "${{ secrets.PLATFORM_KEYSTORE_B64 }}" ]; then
+            echo "::error::PLATFORM_KEYSTORE_B64 secret is not set."
+            echo "::error::Add it under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          echo "${{ secrets.PLATFORM_KEYSTORE_B64 }}" | base64 -d > platform.keystore
+          # Sanity check: PKCS12 magic bytes are 30 82, refuse to proceed otherwise.
+          if ! head -c 2 platform.keystore | xxd -p | grep -q "^3082"; then
+            echo "::error::Decoded keystore is not a valid PKCS12 file."
+            exit 1
+          fi
+
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug
+      - name: Build Release APK
+        run: ./gradlew assembleRelease
 
       - name: Extract Version Name
         id: version
@@ -39,7 +57,7 @@ jobs:
         with:
           tag_name: "v${{ env.VERSION_NAME }}"
           name: "Release v${{ env.VERSION_NAME }}"
-          files: app/build/outputs/apk/debug/app-debug.apk
+          files: app/build/outputs/apk/release/app-release.apk
           fail_on_unmatched_files: true
           prerelease: false
         env:
