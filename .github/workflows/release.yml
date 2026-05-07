@@ -33,7 +33,10 @@ jobs:
             echo "::error::Add it under Settings → Secrets and variables → Actions."
             exit 1
           fi
-          echo "${{ secrets.PLATFORM_KEYSTORE_B64 }}" | base64 -d > platform.keystore
+          # Tolerate line-wrapped output (`base64` without -w 0) and any pasted
+          # whitespace by stripping non-base64 chars before decoding.
+          printf '%s' "${{ secrets.PLATFORM_KEYSTORE_B64 }}" | tr -d '[:space:]' \
+            | base64 -d --ignore-garbage > platform.keystore
           # Sanity check: PKCS12 magic bytes are 30 82, refuse to proceed otherwise.
           if ! head -c 2 platform.keystore | xxd -p | grep -q "^3082"; then
             echo "::error::Decoded keystore is not a valid PKCS12 file."
