@@ -79,6 +79,7 @@ fun Topbar(state: LauncherState, modifier: Modifier = Modifier) {
                     style = type.appCard.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
                     color = Color.Black,
                     modifier = Modifier
+                        .pulse(active = true, peakScale = 1.05f)
                         .background(Color(0xFFFF6B00), RoundedCornerShape(3.dp))
                         .padding(horizontal = 4.dp, vertical = 1.dp),
                 )

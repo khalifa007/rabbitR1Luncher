@@ -73,14 +73,35 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         private const val REQ_SMS_PERM = 4804
     }
 
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(
+            com.r1.launcher.locale.applyLocale(
+                newBase,
+                com.r1.launcher.locale.LocalePrefs.get(newBase).language,
+            )
+        )
+    }
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        // We intercept locale|layoutDirection in configChanges so the system
+        // doesn't auto-recreate when only the system locale changes (we honour
+        // the user's per-app pick). User-initiated locale changes call recreate()
+        // explicitly via setLanguage().
+        super.onConfigurationChanged(newConfig)
+    }
+
     private val state = LauncherState()
     private var tone: ToneGenerator? = null
     private var soundPool: SoundPool? = null
-    private var popSoundId: Int = 0
     private var movingSoundId: Int = 0
+    private var uiClickSoundId: Int = 0
+    private var selectSoundId: Int = 0
+    private var recordStartSoundId: Int = 0
+    private var recordStopSoundId: Int = 0
     private var audioManager: AudioManager? = null
 
     private val openClawPrefs by lazy { OpenClawPrefs.get(this) }
+    private val soundPrefs by lazy { com.r1.launcher.sound.SoundPrefs.get(this) }
     private val wifiSharePrefs by lazy { com.r1.launcher.wifishare.WifiSharePrefs.get(this) }
     private var wifiShareTimerEndMs: Long = 0L
     private val wifiShareTimerRunnable = Runnable { toggleWifiShare(false) }
@@ -100,14 +121,27 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
     }
     private var openClawSession: GatewaySession? = null
-    private var openClawCapture: com.r1.launcher.openclaw.AudioCapture? = null
     private var openClawSpeechPlayer: MediaPlayer? = null
+    // In-flight TTS HTTP call — cancellable when the user starts a new
+    // recording mid-playback (interrupts download + may save credits).
+    private var openClawTtsCall: okhttp3.Call? = null
     private var openClawSpeakNextAssistant = false
     private var openClawLastSpokenKey = ""
 
+    // Voice/STT state — shared across chat / terminal / claude.
+    private val voicePrefs by lazy { com.r1.launcher.voice.VoicePrefs.get(this) }
+    private var voiceCapture: com.r1.launcher.voice.StreamingAudioCapture? = null
+    private var voiceSession: com.r1.launcher.voice.ElevenLabsRealtimeClient? = null
+    /** Which sink to deliver the STT transcript to. */
+    private enum class VoiceSink { CHAT, TERMINAL, CLAUDE }
+    private var voiceSink: VoiceSink? = null
+
     private val ui = Handler(Looper.getMainLooper())
-    private val hm = SimpleDateFormat("h:mm a", Locale.getDefault())
-    private val dt = SimpleDateFormat("EEEE, MMMM d", Locale.getDefault())
+    // Lazy so Locale.getDefault() resolves AFTER attachBaseContext. The locale
+    // helper pins ASCII numerals via the `-u-nu-latn` Unicode extension — see
+    // com.r1.launcher.locale.digitFriendlyLocale.
+    private val hm by lazy { SimpleDateFormat("h:mm a", com.r1.launcher.locale.digitFriendlyLocale()) }
+    private val dt by lazy { SimpleDateFormat("EEEE, MMMM d", com.r1.launcher.locale.digitFriendlyLocale()) }
 
     private var lastSidePressMs: Long = 0L
     private var lastPauseMs: Long = 0L
@@ -159,20 +193,20 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
     }
 
-    // adb-installable openai key receiver:
-    //   adb shell "am broadcast -a com.r1.launcher.SET_OPENAI_KEY --es key sk-..."
-    // Lets the user inject the Whisper API key without typing it on a 480x480
-    // round screen. Receiver is exported so adb (uid 2000) can reach it.
-    private val openaiKeyRx = object : BroadcastReceiver() {
+    // adb-installable ElevenLabs key receiver:
+    //   adb shell "am broadcast -a com.r1.launcher.SET_ELEVENLABS_KEY --es key sk_..."
+    // Lets the user inject the API key without typing it on a 480x480 round
+    // screen. Receiver is exported so adb (uid 2000) can reach it.
+    private val voiceKeyRx = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent?) {
             val k = i?.getStringExtra("key")?.trim().orEmpty()
             when {
                 k.isEmpty() -> toast("--es key missing")
-                !k.startsWith("sk-") || k.length < 20 -> toast("not an openai key")
+                !isValidElevenKey(k) -> toast("not an elevenlabs key")
                 else -> {
-                    openClawPrefs.openaiKey = k
-                    refreshOpenaiKeyState()
-                    toast("key saved via adb")
+                    voicePrefs.elevenlabsKey = k
+                    refreshVoiceKeyState()
+                    toast("voice key saved")
                 }
             }
         }
@@ -234,13 +268,28 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             .setAudioAttributes(attrs)
             .build()
         runCatching {
-            val afd = assets.openFd("pop.mp3")
-            popSoundId = soundPool?.load(afd, 1) ?: 0
+            val afd = assets.openFd("moving.mp3")
+            movingSoundId = soundPool?.load(afd, 1) ?: 0
             afd.close()
         }
         runCatching {
-            val afd = assets.openFd("moving.mp3")
-            movingSoundId = soundPool?.load(afd, 1) ?: 0
+            val afd = assets.openFd("UIClick-Very_short_wooden_UI-Elevenlabs.mp3")
+            uiClickSoundId = soundPool?.load(afd, 1) ?: 0
+            afd.close()
+        }
+        runCatching {
+            val afd = assets.openFd("UIClick-very_subtle_button_p-Elevenlabs.mp3")
+            selectSoundId = soundPool?.load(afd, 1) ?: 0
+            afd.close()
+        }
+        runCatching {
+            val afd = assets.openFd("record.mp3")
+            recordStartSoundId = soundPool?.load(afd, 1) ?: 0
+            afd.close()
+        }
+        runCatching {
+            val afd = assets.openFd("release-record.mp3")
+            recordStopSoundId = soundPool?.load(afd, 1) ?: 0
             afd.close()
         }
 
@@ -254,15 +303,39 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
         state.openClawHideChat = openClawPrefs.hideChat
         state.chatFontSize = openClawPrefs.chatFontSize
-        state.chatTtsEnabled = openClawPrefs.ttsEnabled
+        // Hydrate global voice state from prefs.
+        state.voiceEnabled = voicePrefs.enabled
+        state.voiceId = voicePrefs.voiceId
+        refreshVoiceKeyState()
         state.wifiShareSsid = wifiSharePrefs.ssid
         state.wifiSharePassword = wifiSharePrefs.password
         state.wifiShareTimerMinutes = wifiSharePrefs.timerMinutes
         loadApps()
 
-        // Auto-start the companion web server on boot. Cheap when nobody connects;
-        // having it always-on means the user just types the URL when they need it.
-        toggleWebServer(true)
+        // Default the remote panel and Bluetooth to off on every cold start —
+        // user opts in via the Network panel.
+        toggleBluetooth(false)
+
+        // Make sure the alpine bootstrap helpers are present at /data/local/tmp/.
+        // Bundling them as launcher assets means a fresh device (post-`fastboot
+        // -w`) boots with the launcher already able to install Claude Code on
+        // demand — no adb push, no shell intervention. Background thread so
+        // we never block the UI on first launch.
+        Thread { runCatching { deployClaudeScripts() } }.start()
+        // Also probe Claude's auth state in the background so the on-device
+        // tile knows whether to show the QR-redirect (logged out) or drop
+        // straight into chat (logged in). Cheap — single carroot test calls.
+        refreshClaudeAuthFlag()
+
+        if (!com.r1.launcher.onboarding.OnboardingPrefs.isDone(this)) {
+            state.openOnboarding()
+            // If the user already picked a language (typically on the previous
+            // run before recreate(), or when launching after factory-fresh prefs),
+            // skip the language picker and start at welcome.
+            if (com.r1.launcher.locale.LocalePrefs.get(this).picked) {
+                state.onboardingStep = 1
+            }
+        }
 
         setContent {
             R1Theme {
@@ -280,6 +353,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         found.forEach { state.apps.add(AppEntry.Real(it)) }
         state.apps.add(AppEntry.Messages)
         state.apps.add(AppEntry.OpenClaw)
+        state.apps.add(AppEntry.Terminal)
+        state.apps.add(AppEntry.Claude)
         state.apps.add(AppEntry.Settings)
         state.appsLoaded = true
         if (state.appsFocus >= state.apps.size) state.appsFocus = 0
@@ -316,11 +391,11 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
         registerReceiver(packageRx, pkgFilter)
 
-        val keyFilter = IntentFilter("com.r1.launcher.SET_OPENAI_KEY")
+        val keyFilter = IntentFilter("com.r1.launcher.SET_ELEVENLABS_KEY")
         if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(openaiKeyRx, keyFilter, Context.RECEIVER_EXPORTED)
+            registerReceiver(voiceKeyRx, keyFilter, Context.RECEIVER_EXPORTED)
         } else {
-            registerReceiver(openaiKeyRx, keyFilter)
+            registerReceiver(voiceKeyRx, keyFilter)
         }
 
         val smsLocalFilter = IntentFilter(com.r1.launcher.messages.SmsReceiver.ACTION_NEW_SMS_LOCAL)
@@ -351,11 +426,16 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     override fun onPause() {
         super.onPause()
         lastPauseMs = System.currentTimeMillis()
+        // Cancel any in-flight push-to-talk recording — the activity is
+        // singleTask so backgrounding doesn't tear down the AudioCapture
+        // automatically, which would otherwise complete and send after
+        // the user has left the app.
+        if (state.chatRecording) runCatching { openClawRecordStop() }
         ui.removeCallbacks(tick)
         runCatching { unregisterReceiver(netRx) }
         runCatching { unregisterReceiver(batteryRx) }
         runCatching { unregisterReceiver(packageRx) }
-        runCatching { unregisterReceiver(openaiKeyRx) }
+        runCatching { unregisterReceiver(voiceKeyRx) }
         runCatching { unregisterReceiver(smsLocalRx) }
         runCatching { unregisterReceiver(webToggleRx) }
         runCatching { telephony?.listen(phoneListener, PhoneStateListener.LISTEN_NONE) }
@@ -364,6 +444,10 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     override fun onDestroy() {
         super.onDestroy()
         runCatching { openClawCloseSessionInternal() }
+        runCatching { voiceCapture?.close() }
+        voiceCapture = null
+        runCatching { voiceSession?.cancel() }
+        voiceSession = null
         runCatching { webServer?.stopServer() }
         webServer = null
         // Clean up UI handlers
@@ -372,6 +456,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         tone = null
         runCatching { soundPool?.release() }
         soundPool = null
+        runCatching { openClawTtsCall?.cancel() }
+        openClawTtsCall = null
         runCatching { openClawSpeechPlayer?.release() }
         openClawSpeechPlayer = null
     }
@@ -505,7 +591,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             AppEntry.OpenClaw -> {
                 selectTone()
                 if (openClawPrefs.hasPairing()) {
-                    refreshOpenaiKeyState()
+                    refreshVoiceKeyState()
                     openClawStartSession()
                     state.openOpenClawChat()
                 } else {
@@ -520,6 +606,23 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 if (ensureSmsPerm()) loadSmsConversations()
                 else state.smsError = "permission required"
             }
+            AppEntry.Terminal -> {
+                selectTone()
+                state.openTerminal()
+            }
+            AppEntry.Claude -> {
+                selectTone()
+                state.openClaude()
+                // Auto-start the web companion so the QR redirect screen
+                // points at a URL that actually serves. No-op if it's
+                // already running.
+                if (!state.webServerEnabled) toggleWebServer(true)
+                // Re-probe auth on every entry — the user may have just
+                // logged in from the web companion in another tab without
+                // hitting any of the auth-action callbacks. Cheap; runs on
+                // a background thread.
+                refreshClaudeAuthFlag()
+            }
             null -> Unit
         }
     }
@@ -531,14 +634,19 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.selectedSessionKey = openClawPrefs.selectedSessionKey?.takeUnless { it.isBlank() } ?: "main"
         state.mainSessionKey = openClawPrefs.lastMainSessionKey?.takeUnless { it.isBlank() } ?: "main"
         val session = GatewaySession(this, openClawPrefs)
+        // Each callback compares the captured `session` against the current
+        // `openClawSession` — late events from a session the user has since
+        // closed or replaced must not mutate UI state.
         session.onState = { st ->
             ui.post {
+                if (openClawSession !== session) return@post
                 state.chatStatus = when (st) {
                     GatewaySession.State.Idle -> "idle"
                     GatewaySession.State.Connecting -> "connecting"
                     is GatewaySession.State.Live -> "live"
                     is GatewaySession.State.Switching -> "switching"
                     is GatewaySession.State.Error -> "error: ${st.message}"
+                    is GatewaySession.State.AuthExpired -> "error: ${st.message}"
                 }
                 if (st is GatewaySession.State.Live) {
                     state.selectedSessionKey = st.sessionKey
@@ -551,29 +659,27 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 if (st is GatewaySession.State.Switching) {
                     state.selectedSessionKey = st.sessionKey
                 }
-                // Self-recover if the saved bootstrap is dead. Wipe the bad
-                // token + (still-empty) device key, route back to the QR panel
-                // for a fresh scan. Don't auto-recover from generic errors —
-                // user might just be offline and shouldn't lose their pairing.
-                if (st is GatewaySession.State.Error) {
+                // Only structured AuthExpired (emitted on connect-time auth
+                // failures with known token codes) wipes pairing. Generic
+                // method-level "unauthorized" errors no longer force re-pair.
+                if (st is GatewaySession.State.AuthExpired) {
                     state.chatBusy = false
-                    val msg = st.message.lowercase()
-                    val expired = "expired" in msg || "invalid" in msg || "unauthorized" in msg
-                    if (expired) {
-                        openClawPrefs.bootstrapToken = null
-                        openClawPrefs.deviceToken = null
-                        openClawPrefs.sharedToken = null
-                        runCatching { openClawCloseSessionInternal() }
-                        if (state.panel == Panel.OPENCLAW_CHAT) {
-                            state.qrError = st.message
-                            state.openOpenClawQr()
-                        }
+                    openClawPrefs.bootstrapToken = null
+                    openClawPrefs.deviceToken = null
+                    openClawPrefs.sharedToken = null
+                    runCatching { openClawCloseSessionInternal() }
+                    if (state.panel == Panel.OPENCLAW_CHAT) {
+                        state.qrError = st.message
+                        state.openOpenClawQr()
                     }
+                } else if (st is GatewaySession.State.Error) {
+                    state.chatBusy = false
                 }
             }
         }
         session.onHistory = { msgs ->
             ui.post {
+                if (openClawSession !== session) return@post
                 applyOpenClawHistory(msgs)
                 state.chatScrollIndex = 0
                 speakLatestAssistantIfNeeded()
@@ -581,6 +687,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
         session.onChatDelta = { runId, text ->
             ui.post {
+                if (openClawSession !== session) return@post
                 // Only show streaming preview for runs *we* initiated. Other
                 // operators talking to the same agent shouldn't bleed into our
                 // local UI (matches official client ChatController.kt:347).
@@ -591,22 +698,27 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
         session.onChatTerminal = { runId, evState, errMsg ->
             ui.post {
+                if (openClawSession !== session) return@post
                 if (runId != null) state.chatPendingRunIds.remove(runId)
-                // Clear the streaming preview so it doesn't duplicate the
-                // final message that refreshHistory() is about to load.
-                state.chatStreamingText = ""
+                // Don't clear chatStreamingText here — refreshHistory() takes a
+                // network round-trip, and clearing now would leave a flicker
+                // gap where the assistant bubble vanishes before its persisted
+                // copy lands. applyOpenClawHistory() clears it once the new
+                // messages are in chatMessages, in the same frame.
                 state.chatBusy = false
                 openClawSession?.refreshHistory()
             }
         }
         session.onMainSessionKey = { key ->
             ui.post {
+                if (openClawSession !== session) return@post
                 state.mainSessionKey = key
                 openClawPrefs.lastMainSessionKey = key
             }
         }
         session.onSessions = { list ->
             ui.post {
+                if (openClawSession !== session) return@post
                 state.chatSessions.clear()
                 state.chatSessions.addAll(list)
                 state.sessionsLoading = false
@@ -626,8 +738,10 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     /**
      * The gateway is authoritative when it returns a complete history, but some
      * OpenClaw builds can briefly return a shorter tail or empty list during
-     * long/tool-heavy runs. Preserve the local prefix in that case so messages
-     * already visible on the R1 do not vanish after a refresh.
+     * long/tool-heavy runs. Preserve the local prefix only while a run is in
+     * flight — once the run terminates and history refreshes, trust the
+     * server. Otherwise legitimate server-side deletes/truncations would
+     * leave stale messages on the R1 forever.
      */
     private fun applyOpenClawHistory(msgs: List<com.r1.launcher.openclaw.ChatMessage>) {
         val incoming = if (msgs.size > state.chatMessagesMax) {
@@ -636,10 +750,11 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         val current = state.chatMessages.filterNot { it.streaming }
         val lastLocal = current.lastOrNull()?.text?.trim().orEmpty()
         val likelyCommandReset = lastLocal.startsWith("/") && lastLocal.length < 40
-        val next = if (current.isNotEmpty() && incoming.size < current.size && !likelyCommandReset) {
+        val runInFlight = state.chatBusy || state.chatPendingRunIds.isNotEmpty()
+        val next = if (runInFlight && current.isNotEmpty() && incoming.size < current.size && !likelyCommandReset) {
             android.util.Log.w(
                 "OpenClaw",
-                "chat.history returned fewer messages (${incoming.size}) than local UI (${current.size}); preserving local prefix",
+                "chat.history returned fewer messages (${incoming.size}) than local UI (${current.size}); preserving local prefix (run in flight)",
             )
             current.take(current.size - incoming.size) + incoming
         } else {
@@ -647,43 +762,75 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
         state.chatMessages.clear()
         state.chatMessages.addAll(next.takeLast(state.chatMessagesMax))
+        // Drop the streaming preview now that the persisted messages have
+        // landed — same-frame replacement so there's no flicker between the
+        // streaming bubble disappearing and the final assistant bubble
+        // appearing in chatMessages.
+        state.chatStreamingText = ""
     }
 
     private fun speakLatestAssistantIfNeeded() {
-        if (!state.chatTtsEnabled || state.panel != Panel.OPENCLAW_TALK || !openClawSpeakNextAssistant) return
+        // No more "OPENCLAW_TALK panel" guard — the talk panel is gone, and
+        // we now auto-speak whenever the user's enabled it globally and the
+        // chat panel is the active surface (avoid speaking while scanning QR
+        // or buried in settings).
+        if (!state.voiceEnabled || state.panel != Panel.OPENCLAW_CHAT || !openClawSpeakNextAssistant) return
         val msg = state.chatMessages.lastOrNull { it.role == "assistant" && it.text.isNotBlank() } ?: return
         val key = "${msg.timestamp}:${msg.text.hashCode()}"
         if (key == openClawLastSpokenKey) return
-        val apiKey = openClawPrefs.openaiKey
+        val apiKey = voicePrefs.elevenlabsKey
         if (apiKey.isNullOrBlank()) {
-            toast("voice needs openai key")
+            toast("voice: set elevenlabs key in settings → voice")
             openClawSpeakNextAssistant = false
             return
         }
         openClawLastSpokenKey = key
         openClawSpeakNextAssistant = false
-        com.r1.launcher.openclaw.OpenAiSpeechClient.synthesize(
+        // Cancel any prior in-flight TTS download / playback before starting a
+        // new one — back-to-back assistant messages shouldn't stack audio.
+        cancelOpenClawSpeech()
+        val outFile = File(File(cacheDir, "openclaw-voice").apply { mkdirs() }, "assistant.mp3")
+        openClawTtsCall = com.r1.launcher.voice.ElevenLabsTtsClient.synthesize(
             text = msg.text,
             apiKey = apiKey,
-        ) { wavBytes, err ->
-            if (err != null || wavBytes == null) {
+            voiceId = state.voiceId,
+            outFile = outFile,
+        ) { mp3Bytes, err ->
+            openClawTtsCall = null
+            if (err == "canceled") return@synthesize  // user-initiated, silent
+            if (err != null || mp3Bytes == null) {
                 toast("voice: ${err ?: "no audio"}")
                 return@synthesize
             }
-            playOpenClawSpeech(wavBytes)
+            playOpenClawSpeech(mp3Bytes)
         }
     }
 
-    private fun playOpenClawSpeech(wavBytes: ByteArray) {
+    /** Cancel any in-flight TTS download AND stop current playback. Safe to
+     *  call when nothing is happening. Used for: back-to-back assistant
+     *  messages (stack-prevent), session close, and the interrupt-on-record
+     *  path in startVoiceCapture (so press-to-talk over a playing reply
+     *  immediately silences it instead of waiting for the audio to finish). */
+    private fun cancelOpenClawSpeech() {
+        runCatching { openClawTtsCall?.cancel() }
+        openClawTtsCall = null
+        runCatching { openClawSpeechPlayer?.stop() }
+        runCatching { openClawSpeechPlayer?.release() }
+        openClawSpeechPlayer = null
+    }
+
+    /** Play TTS audio bytes (MP3 from ElevenLabs Flash v2.5) via MediaPlayer.
+     *  MediaPlayer handles MP3 natively — no WAV header normalization needed
+     *  like the prior Whisper/Sherpa pipelines. */
+    private fun playOpenClawSpeech(audioBytes: ByteArray) {
         runCatching {
-            val am = audioManager ?: getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-            if (am != null) {
-                val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
-                am.setStreamVolume(AudioManager.STREAM_MUSIC, max, 0)
-            }
+            // Don't force MEDIA volume to max — that ignored the user's volume
+            // setting and blasted every TTS reply. Playback still routes through
+            // USAGE_MEDIA → STREAM_MUSIC, so the existing Settings → Sound →
+            // Volume slider directly controls reply loudness.
             val dir = File(cacheDir, "openclaw-voice").apply { mkdirs() }
-            val out = File(dir, "assistant.wav")
-            out.writeBytes(normalizeWavHeader(wavBytes))
+            val out = File(dir, "assistant.mp3")
+            out.writeBytes(audioBytes)
             runCatching { openClawSpeechPlayer?.stop() }
             runCatching { openClawSpeechPlayer?.release() }
             openClawSpeechPlayer = MediaPlayer().apply {
@@ -712,51 +859,14 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
     }
 
-    private fun normalizeWavHeader(bytes: ByteArray): ByteArray {
-        if (bytes.size < 44) return bytes
-        val isWav = bytes[0] == 'R'.code.toByte() &&
-            bytes[1] == 'I'.code.toByte() &&
-            bytes[2] == 'F'.code.toByte() &&
-            bytes[3] == 'F'.code.toByte() &&
-            bytes[8] == 'W'.code.toByte() &&
-            bytes[9] == 'A'.code.toByte() &&
-            bytes[10] == 'V'.code.toByte() &&
-            bytes[11] == 'E'.code.toByte()
-        if (!isWav) return bytes
-        val out = bytes.copyOf()
-        writeIntLe(out, 4, out.size - 8)
-        var i = 12
-        while (i + 8 <= out.size) {
-            val id = String(out, i, 4, Charsets.US_ASCII)
-            val size = readIntLe(out, i + 4)
-            if (id == "data") {
-                val dataBytes = (out.size - (i + 8)).coerceAtLeast(0)
-                writeIntLe(out, i + 4, dataBytes)
-                break
-            }
-            if (size <= 0 || size == -1) break
-            i += 8 + size + (size and 1)
-        }
-        return out
-    }
-
-    private fun readIntLe(bytes: ByteArray, offset: Int): Int {
-        return (bytes[offset].toInt() and 0xFF) or
-            ((bytes[offset + 1].toInt() and 0xFF) shl 8) or
-            ((bytes[offset + 2].toInt() and 0xFF) shl 16) or
-            ((bytes[offset + 3].toInt() and 0xFF) shl 24)
-    }
-
-    private fun writeIntLe(bytes: ByteArray, offset: Int, value: Int) {
-        bytes[offset] = (value and 0xFF).toByte()
-        bytes[offset + 1] = ((value shr 8) and 0xFF).toByte()
-        bytes[offset + 2] = ((value shr 16) and 0xFF).toByte()
-        bytes[offset + 3] = ((value shr 24) and 0xFF).toByte()
-    }
-
     private fun openClawCloseSessionInternal() {
-        runCatching { openClawCapture?.close() }
-        openClawCapture = null
+        runCatching { voiceCapture?.close() }
+        voiceCapture = null
+        runCatching { voiceSession?.cancel() }
+        voiceSession = null
+        voiceSink = null
+        runCatching { openClawTtsCall?.cancel() }
+        openClawTtsCall = null
         runCatching { openClawSpeechPlayer?.stop() }
         runCatching { openClawSpeechPlayer?.release() }
         openClawSpeechPlayer = null
@@ -783,6 +893,9 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             state.volumeLevel = am.getStreamVolume(AudioManager.STREAM_MUSIC)
                 .coerceIn(0, state.volumeMax)
         }
+        // UI feedback volume comes from our own pref — independent of STREAM_MUSIC.
+        state.uiVolumeMax = com.r1.launcher.sound.SoundPrefs.MAX_UI_LEVEL
+        state.uiVolumeLevel = soundPrefs.uiVolumeLevel
     }
 
     private fun ensureWriteSettingsGrant(): Boolean {
@@ -827,6 +940,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
     }
 
+    override fun setUiVolume(level: Int) {
+        val clamped = level.coerceIn(0, com.r1.launcher.sound.SoundPrefs.MAX_UI_LEVEL)
+        state.uiVolumeLevel = clamped
+        soundPrefs.uiVolumeLevel = clamped
+    }
+
     override fun lockScreen() {
         val ok = PowerService.lockScreen()
         if (!ok) toast("Enable Accessibility → R1 Launcher to lock screen")
@@ -836,6 +955,22 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         OTAUpdater.checkForUpdates(this, state, forcePrompt = true) { msg ->
             toast(msg)
         }
+    }
+
+    override fun onOnboardingDone() {
+        com.r1.launcher.onboarding.OnboardingPrefs.markDone(this)
+        state.isOnboarding = false
+        state.goHome()
+    }
+
+    override fun setLanguage(code: String) {
+        val prefs = com.r1.launcher.locale.LocalePrefs.get(this)
+        if (prefs.language == code && prefs.picked) return
+        prefs.language = code
+        prefs.picked = true
+        // recreate() rebuilds attachBaseContext → applyLocale → all stringResource
+        // lookups + LocalLayoutDirection re-evaluate against the new locale.
+        recreate()
     }
 
     override fun openAirplaneSettings() {
@@ -974,7 +1109,11 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     override fun connectToWifi(ssid: String, pass: String) {
-        state.back()
+        if (state.isOnboarding) {
+            state.advanceOnboarding()
+        } else {
+            state.back()
+        }
         toast("Connecting to $ssid...")
         Thread {
             val escapedSsid = ssid.replace("\"", "\\\"")
@@ -1253,6 +1392,34 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }.start()
     }
 
+    override fun rebootDevice() {
+        toast("Restarting…")
+        Thread {
+            // `svc power reboot` is the userspace API; falls back to the binary
+            // `reboot` (toybox) which carroot can invoke as root.
+            if (!sendToCarroot("svc power reboot null")) {
+                Thread.sleep(200)
+                if (!sendToCarroot("reboot")) {
+                    ui.post { toast("Reboot failed: no root shell") }
+                }
+            }
+        }.start()
+    }
+
+    override fun powerOffDevice() {
+        toast("Powering off…")
+        Thread {
+            // `svc power shutdown` triggers the orderly Android shutdown
+            // sequence; `reboot -p` is the busybox/toybox fallback.
+            if (!sendToCarroot("svc power shutdown")) {
+                Thread.sleep(200)
+                if (!sendToCarroot("reboot -p")) {
+                    ui.post { toast("Power off failed: no root shell") }
+                }
+            }
+        }.start()
+    }
+
     private fun sendToCarroot(cmd: String): Boolean = try {
         Socket().use { s ->
             s.connect(InetSocketAddress("127.0.0.1", 1337), 1500)
@@ -1266,23 +1433,917 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         false
     }
 
+    // --- LauncherHost: terminal panel ---
+
+    private var terminalActiveThread: Thread? = null
+
+    /**
+     * One-shot streaming variant of [sendToCarroot]. Each carroot connection
+     * gets a fresh `sh`, so cwd doesn't survive between calls — we wrap the
+     * user command in `cd <cwd> ; (cmd) ; pwd > <pwdFile> ; printf SENTINEL`
+     * and read the new cwd from disk after the stream ends.
+     *
+     * `onLine` fires on a background thread for every newline-terminated chunk
+     * the shell emits. `onDone(exitCode, newCwd)` fires once after EOF.
+     */
+    private fun sendToCarrootStreaming(
+        userCmd: String,
+        cwd: String,
+        onLine: (String) -> Unit,
+        onDone: (exitCode: Int, newCwd: String) -> Unit,
+    ): Thread {
+        val t = Thread {
+            val pwdFile = "/data/local/tmp/r1_term_cwd"
+            val safeCwd = cwd.replace("\"", "\\\"")
+            // ; not && so the user's command runs even if `cd` fails (e.g.
+            // first launch where cwd doesn't exist yet). The trailing pwd
+            // captures whatever directory the shell ended up in — that's how
+            // `cd X` from the user persists into the next command.
+            val script = "cd \"$safeCwd\" 2>/dev/null; $userCmd; ec=\$?; " +
+                "pwd > $pwdFile 2>/dev/null; printf '\\n__R1_END__%s__\\n' \"\$ec\""
+            var exitCode = -1
+            try {
+                Socket().use { s ->
+                    s.connect(InetSocketAddress("127.0.0.1", 1337), 1500)
+                    val out = s.getOutputStream()
+                    out.write((script + "\n").toByteArray())
+                    out.flush()
+                    s.shutdownOutput()  // signal EOF so `sh` reads the script and exits
+                    val reader = s.getInputStream().bufferedReader()
+                    while (true) {
+                        val line = reader.readLine() ?: break
+                        val sentinel = Regex("__R1_END__(-?\\d+)__").find(line)
+                        if (sentinel != null) {
+                            exitCode = sentinel.groupValues[1].toIntOrNull() ?: -1
+                            break
+                        }
+                        onLine(line)
+                    }
+                }
+            } catch (e: Exception) {
+                onLine("[r1-terminal] socket: ${e.message ?: e.javaClass.simpleName}")
+            }
+            val newCwd = runCatching { File(pwdFile).readText().trim() }.getOrNull()
+                ?.takeIf { it.isNotEmpty() } ?: cwd
+            onDone(exitCode, newCwd)
+        }
+        t.start()
+        return t
+    }
+
+    private fun appendTerminalLine(line: String) {
+        state.terminalOutput.add(line)
+        while (state.terminalOutput.size > state.terminalOutputMax) {
+            state.terminalOutput.removeAt(0)
+        }
+        // Fan out to any connected web clients so the Terminal tab mirrors
+        // the on-device buffer in real time.
+        runCatching { webServer?.broadcastTerminalOutput(line, state.terminalCwd) }
+    }
+
+    override fun terminalRun(cmd: String) {
+        val trimmed = cmd.trim()
+        if (trimmed.isEmpty()) return
+        if (state.terminalBusy) {
+            toast("busy")
+            return
+        }
+        // Echo prompt + command into the buffer so the scrollback is readable.
+        appendTerminalLine("${promptLabel(state.terminalCwd)} $trimmed")
+        state.terminalInput = ""
+        state.terminalScrollIndex = 0
+
+        // Client-side `clear` shortcut: don't burn a carroot round-trip on it.
+        if (trimmed == "clear" || trimmed == "cls") {
+            state.terminalOutput.clear()
+            return
+        }
+
+        // Auto-route Alpine-only commands (npm, node, python, …) through the
+        // chroot wrapper so the user can type `npm install foo` directly
+        // instead of `sh /data/local/tmp/r1-alpine "npm install foo"`. Use
+        // `alpine: <anything>` to force-route any other command.
+        val resolved = resolveAlpineWrapping(trimmed)
+
+        state.terminalBusy = true
+        terminalActiveThread = sendToCarrootStreaming(
+            userCmd = resolved,
+            cwd = state.terminalCwd,
+            onLine = { line -> ui.post { appendTerminalLine(line) } },
+            onDone = { exitCode, newCwd ->
+                ui.post {
+                    if (newCwd != state.terminalCwd) state.terminalCwd = newCwd
+                    if (exitCode != 0 && exitCode != -1) {
+                        appendTerminalLine("[exit $exitCode]")
+                    }
+                    state.terminalBusy = false
+                    terminalActiveThread = null
+                }
+            },
+        )
+    }
+
+    override fun terminalClear() {
+        state.terminalOutput.clear()
+        state.terminalScrollIndex = 0
+    }
+
+    override fun setWebTerminalEnabled(enable: Boolean) {
+        state.webTerminalEnabled = enable
+        toast(if (enable) "remote terminal: on (root over LAN)" else "remote terminal: off")
+    }
+
+    /**
+     * Open an ElevenLabs Realtime STT session and start streaming mic PCM
+     * into it. Single shared client across the three voice-input panels —
+     * different sinks for the final transcript:
+     *   CHAT:     auto-send via openClawSendText (release-to-send UX)
+     *   TERMINAL: paste into terminalInput (don't auto-execute)
+     *   CLAUDE:   paste into claudeInput (don't auto-execute)
+     *
+     * Does the audio-perm check, voice-key check, and recording-state setup;
+     * also wires partial transcripts to the right state field for the UI to
+     * show "listening: <live text>" while the user speaks.
+     */
+    private fun startVoiceCapture(sink: VoiceSink) {
+        if (!ensureAudioPerm()) return
+        val key = voicePrefs.elevenlabsKey
+        if (key.isNullOrBlank()) {
+            toast("voice: set elevenlabs key in settings → voice")
+            return
+        }
+        if (voiceCapture != null) return // already recording
+        // Interrupt any TTS reply that's mid-download or mid-playback. Two
+        // wins: (1) the user can cut the assistant off to interject without
+        // waiting for it to finish speaking, (2) cancelling the OkHttp call
+        // mid-stream stops further bytes from arriving (saves bandwidth, may
+        // also save credits depending on ElevenLabs' refund behavior for
+        // cancelled streams).
+        cancelOpenClawSpeech()
+        voiceSink = sink
+        when (sink) {
+            VoiceSink.CHAT -> {
+                state.chatRecording = true
+                state.chatPartialText = ""
+                state.chatInputLevel = 0
+            }
+            VoiceSink.TERMINAL -> {
+                state.terminalRecording = true
+                state.terminalPartial = ""
+            }
+            VoiceSink.CLAUDE -> {
+                state.claudeRecording = true
+                state.claudePartial = ""
+            }
+        }
+        playRecordStartTone()
+
+        val session = com.r1.launcher.voice.ElevenLabsRealtimeClient.open(
+            apiKey = key,
+            onPartial = { text ->
+                ui.post {
+                    when (sink) {
+                        VoiceSink.CHAT -> state.chatPartialText = text
+                        VoiceSink.TERMINAL -> state.terminalPartial = text
+                        VoiceSink.CLAUDE -> state.claudePartial = text
+                    }
+                }
+            },
+            onCommitted = { text ->
+                ui.post { handleCommittedTranscript(sink, text) }
+            },
+            onError = { msg ->
+                ui.post {
+                    toast("voice: $msg")
+                    cancelVoiceCapture()
+                }
+            },
+        )
+        voiceSession = session
+
+        val cap = com.r1.launcher.voice.StreamingAudioCapture()
+        voiceCapture = cap
+        // Delay mic open by ~200ms so the recording cue (record.mp3 via SoundPool
+        // on USAGE_MEDIA) plays through. AudioRecord on VOICE_RECOGNITION steals
+        // the audio path and silences MEDIA mid-sample, so without the delay
+        // the cue is inaudible. Re-check voiceCapture inside the post — the
+        // user may have released before the delay fired (very-short tap).
+        ui.postDelayed({
+            if (voiceCapture !== cap) return@postDelayed
+            cap.start(object : com.r1.launcher.voice.StreamingAudioCapture.Callback {
+                override fun onPcm(chunk: ByteArray) {
+                    voiceSession?.sendPcm(chunk)
+                }
+                override fun onLevel(levelPct: Int) {
+                    if (sink == VoiceSink.CHAT) state.chatInputLevel = levelPct
+                }
+                override fun onError(msg: String) {
+                    ui.post {
+                        toast("mic: $msg")
+                        cancelVoiceCapture()
+                    }
+                }
+            })
+        }, 200L)
+    }
+
+    /** Stop streaming and ask the server for a final transcript via VAD/commit.
+     *  The committed_transcript callback will deliver the result, then we
+     *  finalize through handleCommittedTranscript. */
+    private fun stopVoiceCapture() {
+        voiceCapture?.close()
+        voiceCapture = null
+        voiceSession?.finish()
+        // voiceSession nulled inside handleCommittedTranscript or onError.
+        when (voiceSink) {
+            VoiceSink.CHAT -> {
+                state.chatRecording = false
+                state.chatInputLevel = 0
+            }
+            VoiceSink.TERMINAL -> state.terminalRecording = false
+            VoiceSink.CLAUDE -> state.claudeRecording = false
+            null -> {}
+        }
+        playRecordStopTone()
+    }
+
+    /** Hard-cancel: drop session, no transcript expected. */
+    private fun cancelVoiceCapture() {
+        voiceCapture?.close()
+        voiceCapture = null
+        voiceSession?.cancel()
+        voiceSession = null
+        when (voiceSink) {
+            VoiceSink.CHAT -> {
+                state.chatRecording = false
+                state.chatInputLevel = 0
+                state.chatPartialText = ""
+            }
+            VoiceSink.TERMINAL -> {
+                state.terminalRecording = false
+                state.terminalPartial = ""
+            }
+            VoiceSink.CLAUDE -> {
+                state.claudeRecording = false
+                state.claudePartial = ""
+            }
+            null -> {}
+        }
+        voiceSink = null
+    }
+
+    private fun handleCommittedTranscript(sink: VoiceSink, text: String) {
+        val clean = text.trim()
+        when (sink) {
+            VoiceSink.CHAT -> {
+                state.chatPartialText = ""
+                if (clean.isNotEmpty()) openClawSendText(clean)
+            }
+            VoiceSink.TERMINAL -> {
+                state.terminalPartial = ""
+                if (clean.isNotEmpty()) {
+                    state.terminalInput = if (state.terminalInput.isBlank()) clean
+                        else state.terminalInput.trimEnd() + " " + clean
+                }
+            }
+            VoiceSink.CLAUDE -> {
+                state.claudePartial = ""
+                if (clean.isNotEmpty()) {
+                    state.claudeInput = if (state.claudeInput.isBlank()) clean
+                        else state.claudeInput.trimEnd() + " " + clean
+                }
+            }
+        }
+        voiceSession = null
+        voiceSink = null
+    }
+
+    override fun terminalRecordStart() = startVoiceCapture(VoiceSink.TERMINAL)
+    override fun terminalRecordStop()  = stopVoiceCapture()
+
+    override fun terminalPasteFromClipboard() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val raw = cm?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
+        if (raw.isEmpty()) {
+            toast("clipboard empty")
+            return
+        }
+        // Append (with a leading space if the field is non-empty) so prior
+        // typing isn't clobbered. User can wheel-press to run.
+        state.terminalInput = if (state.terminalInput.isBlank()) raw
+            else state.terminalInput.trimEnd() + " " + raw
+    }
+
+    // --- LauncherHost: claude code app (Panel.CLAUDE) ---
+
+    private var claudeActiveThread: Thread? = null
+
+    private fun appendClaudeMessage(msg: com.r1.launcher.claude.ClaudeMessage) {
+        state.claudeMessages.add(msg)
+        while (state.claudeMessages.size > state.claudeMessagesMax) {
+            state.claudeMessages.removeAt(0)
+        }
+        // Mirror to the web companion's claude tab (no-op when no clients).
+        runCatching { webServer?.broadcastClaudeMessage(msg.role, msg.text, msg.error) }
+    }
+
+    override fun claudeSend(text: String) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
+        if (state.claudeBusy) {
+            toast("busy — wait for reply")
+            return
+        }
+        appendClaudeMessage(com.r1.launcher.claude.ClaudeMessage(role = "user", text = trimmed))
+        state.claudeInput = ""
+        state.claudeScrollIndex = 0
+        state.claudeBusy = true
+        state.claudeStreamingText = ""
+        runCatching { webServer?.broadcastClaudeBusy(true) }
+
+        // Encode user text via base64 so any quotes / special chars / newlines
+        // round-trip cleanly through the carroot socket → ash → chroot → ash
+        // → claude pipeline without any escaping headaches. base64 is in
+        // busybox on Android and present in alpine.
+        val b64 = android.util.Base64.encodeToString(
+            trimmed.toByteArray(Charsets.UTF_8),
+            android.util.Base64.NO_WRAP,
+        )
+        // First turn omits `--continue` (no prior session); subsequent turns
+        // use `-c` to continue the most recent session, giving claude full
+        // memory of prior turns. Reset on "clear chat" pill.
+        val resumeFlag = if (state.claudeFirstTurn) "" else "-c"
+        // Pipe decoded prompt through claude --print as stdin; --output-format
+        // text gives us plain UTF-8 with no JSON wrapping. claude streams
+        // tokens to stdout line-by-line (well, mostly; we accept whatever
+        // arrives). Each line goes into state.claudeStreamingText until done.
+        val script = "echo '$b64' | base64 -d | " +
+            "sh /data/local/tmp/r1-alpine 'claude --print $resumeFlag --output-format text 2>&1'"
+
+        claudeActiveThread = sendToCarrootStreaming(
+            userCmd = script,
+            cwd = "/sdcard",
+            onLine = { line -> ui.post {
+                // Accumulate streamed lines into the live preview cell.
+                val sep = if (state.claudeStreamingText.isEmpty()) "" else "\n"
+                state.claudeStreamingText = state.claudeStreamingText + sep + line
+                runCatching { webServer?.broadcastClaudeStreaming(state.claudeStreamingText) }
+            } },
+            onDone = { exitCode, _ ->
+                ui.post {
+                    val body = state.claudeStreamingText
+                    state.claudeStreamingText = ""
+                    if (body.isNotBlank()) {
+                        appendClaudeMessage(
+                            com.r1.launcher.claude.ClaudeMessage(
+                                role = "assistant",
+                                text = body,
+                                error = exitCode != 0 && exitCode != -1,
+                            ),
+                        )
+                    } else if (exitCode != 0 && exitCode != -1) {
+                        appendClaudeMessage(
+                            com.r1.launcher.claude.ClaudeMessage(
+                                role = "assistant",
+                                text = "claude exited $exitCode (no output)",
+                                error = true,
+                            ),
+                        )
+                    }
+                    state.claudeBusy = false
+                    state.claudeFirstTurn = false
+                    claudeActiveThread = null
+                    runCatching {
+                        webServer?.broadcastClaudeStreaming("")
+                        webServer?.broadcastClaudeBusy(false)
+                    }
+                }
+            },
+        )
+    }
+
+    override fun claudeClear() {
+        state.claudeMessages.clear()
+        state.claudeStreamingText = ""
+        state.claudeScrollIndex = 0
+        // Next send starts a fresh session (no `-c`) so the cleared UI
+        // matches a cleared conversation context on the claude side too.
+        state.claudeFirstTurn = true
+        runCatching {
+            webServer?.broadcastClaudeStreaming("")
+            webServer?.broadcastClaudeCleared()
+        }
+    }
+
+    override fun claudePasteFromClipboard() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val raw = cm?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
+        if (raw.isEmpty()) {
+            toast("clipboard empty")
+            return
+        }
+        state.claudeInput = if (state.claudeInput.isBlank()) raw
+            else state.claudeInput.trimEnd() + " " + raw
+    }
+
+    override fun claudeRecordStart() = startVoiceCapture(VoiceSink.CLAUDE)
+    override fun claudeRecordStop()  = stopVoiceCapture()
+
+    // --- LauncherHost: claude bootstrap (alpine + claude binary deploy) ---
+
+    /**
+     * Names of every script we ship as a launcher asset. Each lives at
+     * `assets/scripts/<name>` and gets copied to `/data/local/tmp/<name>`
+     * via carroot on first run. Order doesn't matter — they're independent
+     * files. The bootstrap chain only runs `bootstrap-alpine.sh` →
+     * `setup-claude-agent.sh` → `setup-claude-user.sh` (see [claudeSetupRun]).
+     */
+    private val claudeAssetScripts = listOf(
+        "bootstrap-alpine.sh",
+        "setup-claude-agent.sh",
+        "setup-claude-user.sh",
+        "claude-auth-start.sh",
+        "claude-auth-finish.sh",
+        "r1-alpine",
+    )
+
+    /**
+     * Stage every helper script under `/data/local/tmp/` if it isn't already
+     * there, or if the bytes don't match the asset (so a launcher upgrade
+     * picks up newer script versions). Runs as `shell` for the asset → app
+     * dir copy, then carroots a `cp` to land the file in `/data/local/tmp/`
+     * (which `shell` cannot write to).
+     */
+    private fun deployClaudeScripts() {
+        val stagingDir = java.io.File(filesDir, "scripts").apply { mkdirs() }
+        claudeAssetScripts.forEach { name ->
+            val staged = java.io.File(stagingDir, name)
+            val bytes = runCatching {
+                assets.open("scripts/$name").use { it.readBytes() }
+            }.getOrNull() ?: return@forEach
+
+            // Only rewrite when content drifts — keeps the writeText cheap on
+            // boot if the launcher version didn't change the script.
+            val current = runCatching { staged.readBytes() }.getOrNull()
+            if (current == null || !current.contentEquals(bytes)) {
+                staged.writeBytes(bytes)
+            }
+        }
+        // Bridge from the launcher's private dir to /data/local/tmp/ via
+        // carroot. carroot is root, so it can read /data/data/<pkg>/files/
+        // (mode 700, owner u0_a*) and write to /data/local/tmp/. Single
+        // carroot call to amortise the socket overhead.
+        val cmd = buildString {
+            append("mkdir -p /data/local/tmp && ")
+            claudeAssetScripts.forEach { name ->
+                append("cp -f ${stagingDir.absolutePath}/$name /data/local/tmp/$name && ")
+            }
+            append("chmod 755 /data/local/tmp/*.sh /data/local/tmp/r1-alpine 2>/dev/null && ")
+            append("echo SCRIPTS_DEPLOYED")
+        }
+        val log = runCarrootBlocking(cmd, timeoutMs = 8_000)
+        if (!log.contains("SCRIPTS_DEPLOYED")) {
+            android.util.Log.w(
+                "LauncherActivity",
+                "deployClaudeScripts: carroot copy did not confirm — log: ${log.take(400)}",
+            )
+        }
+    }
+
+    // --- LauncherHost: claude OAuth + API-key auth ---
+
+    /**
+     * Run a one-shot script via carroot, capturing all stdout+stderr until
+     * the shell EOFs or [timeoutMs] elapses. Used for the auth helper scripts
+     * which print a few lines and exit. Blocks the calling thread; callers
+     * MUST be on a background thread (web RPC handler is fine).
+     */
+    private fun runCarrootBlocking(cmd: String, timeoutMs: Long = 15_000): String {
+        val sb = StringBuilder()
+        val done = java.util.concurrent.CountDownLatch(1)
+        val script = "$cmd ; printf '\\n__R1_END__\\n'"
+        val t = Thread {
+            try {
+                Socket().use { s ->
+                    s.connect(InetSocketAddress("127.0.0.1", 1337), 1500)
+                    s.soTimeout = timeoutMs.toInt()
+                    val out = s.getOutputStream()
+                    out.write((script + "\n").toByteArray())
+                    out.flush()
+                    s.shutdownOutput()
+                    val reader = s.getInputStream().bufferedReader()
+                    while (true) {
+                        val line = reader.readLine() ?: break
+                        if (line.contains("__R1_END__")) break
+                        sb.appendLine(line)
+                    }
+                }
+            } catch (e: Exception) {
+                sb.appendLine("[carroot-error] ${e.message ?: e.javaClass.simpleName}")
+            } finally {
+                done.countDown()
+            }
+        }
+        t.start()
+        if (!done.await(timeoutMs + 2_000, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            sb.appendLine("[carroot-error] timeout")
+        }
+        return sb.toString()
+    }
+
+    /**
+     * Pull the first OAuth URL from a script log. The Anthropic flow prints
+     * URLs like https://claude.ai/oauth/authorize?... — we accept anything
+     * that starts with https:// to be lenient with future format changes.
+     */
+    private fun parseOAuthUrl(log: String): String {
+        val rx = Regex("""https://[^\s'"<>]+""")
+        return rx.findAll(log)
+            .map { it.value }
+            .firstOrNull { it.contains("oauth") || it.contains("claude.ai") || it.contains("anthropic") }
+            ?: rx.find(log)?.value
+            ?: ""
+    }
+
+    private fun chrootReady(): Boolean {
+        // "Ready" means: (1) the wrapper is staged at /data/local/tmp/r1-alpine,
+        // (2) alpine is extracted (alpine/usr exists), AND (3) the claude binary
+        // is installed (its symlink at /root/.local/bin/claude resolves). The
+        // third check is critical — without it, the auth scripts fail the
+        // moment they try to launch `claude auth login`. Mid-bootstrap we want
+        // chrootReady=false so the web UI keeps showing the "installing"
+        // state instead of prematurely flipping to the login form.
+        val log = runCarrootBlocking(
+            "test -x /data/local/tmp/r1-alpine && " +
+                "test -d /data/local/tmp/alpine/usr && " +
+                "{ test -e /data/local/tmp/alpine/root/.local/bin/claude || test -L /data/local/tmp/alpine/root/.local/bin/claude; } && " +
+                "echo READY || echo NOT_READY",
+            timeoutMs = 5_000,
+        )
+        return log.contains("READY") && !log.contains("NOT_READY")
+    }
+
+    override fun claudeAuthStatus(): com.r1.launcher.claude.ClaudeAuthStatus {
+        // OAuth surface is `claude auth login --claudeai` (FIFO flow, see
+        // claude-auth-{start,finish}.sh). It writes credentials.json under
+        // the chroot's /root/.claude/ then we sync to /home/claude/.claude/
+        // for the unprivileged claude user. Either path being non-empty is
+        // proof of an OAuth login.
+        val log = runCarrootBlocking(
+            """
+            CHROOT=NO; OAUTH=NO; KEY=NO
+            test -x /data/local/tmp/r1-alpine && \
+                test -d /data/local/tmp/alpine/usr && \
+                { test -e /data/local/tmp/alpine/root/.local/bin/claude || test -L /data/local/tmp/alpine/root/.local/bin/claude; } && CHROOT=YES
+            test -s /data/local/tmp/alpine/home/claude/.claude/.credentials.json && OAUTH=YES
+            test -s /data/local/tmp/alpine/root/.claude/.credentials.json && OAUTH=YES
+            test -s /data/local/tmp/.anthropic_key && KEY=YES
+            echo CHROOT=${'$'}CHROOT OAUTH=${'$'}OAUTH KEY=${'$'}KEY
+            """.trimIndent(),
+            timeoutMs = 5_000,
+        )
+        return com.r1.launcher.claude.ClaudeAuthStatus(
+            hasOAuth = log.contains("OAUTH=YES"),
+            hasApiKey = log.contains("KEY=YES"),
+            chrootReady = log.contains("CHROOT=YES"),
+        )
+    }
+
+    /**
+     * Background-thread refresh of [LauncherState.claudeAuthed]. Drives the
+     * "show QR redirect vs. drop into chat" decision in the Claude tile.
+     * Runs cheap carroot test calls; safe to fire from onCreate, after
+     * bootstrap completion, and after every auth-action handler.
+     */
+    private fun refreshClaudeAuthFlag() {
+        Thread {
+            runCatching {
+                val s = claudeAuthStatus()
+                runOnUiThread { state.claudeAuthed = s.hasOAuth || s.hasApiKey }
+            }
+        }.apply { isDaemon = true }.start()
+    }
+
+    override fun claudeAuthStart(): com.r1.launcher.claude.ClaudeAuthStartResult {
+        if (!chrootReady()) {
+            return com.r1.launcher.claude.ClaudeAuthStartResult(
+                url = "", log = "",
+                error = "alpine chroot not bootstrapped on this device",
+            )
+        }
+        // The script blocks for ~4s after kicking off the daemon then cats
+        // the log it has captured so far. 12s gives ample slack for slow
+        // first-token TLS handshakes to claude.ai.
+        val log = runCarrootBlocking(
+            "sh /data/local/tmp/claude-auth-start.sh",
+            timeoutMs = 12_000,
+        )
+        val url = parseOAuthUrl(log)
+        return com.r1.launcher.claude.ClaudeAuthStartResult(
+            url = url,
+            log = log,
+            error = if (url.isEmpty()) {
+                "no OAuth URL printed — check log (claude binary may be missing)"
+            } else null,
+        )
+    }
+
+    override fun claudeAuthFinish(code: String): com.r1.launcher.claude.ClaudeAuthFinishResult {
+        val trimmed = code.trim()
+        if (trimmed.isEmpty()) {
+            return com.r1.launcher.claude.ClaudeAuthFinishResult(
+                ok = false, log = "", error = "empty code",
+            )
+        }
+        // Single-quote the code so the '#' it contains doesn't start a shell
+        // comment. The script itself uses double quotes around $1 so single
+        // quotes round-trip safely.
+        val safe = trimmed.replace("'", "'\\''")
+        val log = runCarrootBlocking(
+            "sh /data/local/tmp/claude-auth-finish.sh '$safe'",
+            // Script polls up to 20s for /root/.claude/.credentials.json
+            // to land *and* runs a `claude --print` probe as the
+            // unprivileged user to verify the credentials actually
+            // authenticate. 50s gives both phases plenty of room without
+            // dropping the socket mid-verify on a slow uplink.
+            timeoutMs = 50_000,
+        )
+        // Two-tier success: the file must land AND the verify probe inside
+        // finish.sh must not surface "Not logged in". File-only success was
+        // the source of the "I logged in but it still says not logged in"
+        // bug — a code-reuse / expired-token attempt writes a partial
+        // .credentials.json (> 0 bytes) but `claude --print` rejects it.
+        val status = claudeAuthStatus()
+        val probeFailed = log.contains("Not logged in", ignoreCase = true) ||
+            log.contains("Please run /login", ignoreCase = true) ||
+            log.contains("CREDS_READABLE=NO")
+        val ok = status.hasOAuth && !probeFailed
+        runOnUiThread { state.claudeAuthed = status.hasOAuth || status.hasApiKey }
+        return com.r1.launcher.claude.ClaudeAuthFinishResult(
+            ok = ok,
+            log = log,
+            error = when {
+                !status.hasOAuth -> "no .credentials.json after finish — code may be expired or already used"
+                probeFailed -> "credentials saved but claude rejected them — use 'reset credentials' and retry with a fresh url"
+                else -> null
+            },
+        )
+    }
+
+    override fun claudeAuthVerify(): com.r1.launcher.claude.ClaudeAuthVerifyResult {
+        // Light end-to-end probe: launches `claude --print 'pong'` as the
+        // unprivileged `claude` user (the one the chat panel actually uses)
+        // and reports back whether the auth succeeded. Used by the web
+        // companion's "test login" action to disambiguate
+        // "credentials file present" from "credentials actually work".
+        if (!chrootReady()) {
+            return com.r1.launcher.claude.ClaudeAuthVerifyResult(
+                ok = false, log = "", error = "alpine chroot not bootstrapped",
+            )
+        }
+        // Just route through the r1-alpine wrapper — it handles bind-mount
+        // restoration, auth env-var assembly (skipping empties so OAuth
+        // precedence isn't poisoned), and the drop to the unprivileged
+        // claude user. Asking it to run `claude auth status` first gives a
+        // structured JSON we can parse for the actual loggedIn state, then
+        // a real `--print` round-trip confirms inference works end-to-end.
+        val cmd = "sh /data/local/tmp/r1-alpine \"claude auth status 2>&1; " +
+            "echo --probe--; claude --print 'reply only with PONG' 2>&1 | head -5\""
+        val log = runCarrootBlocking(cmd, timeoutMs = 30_000)
+        val notLoggedIn = log.contains("Not logged in", ignoreCase = true) ||
+            log.contains("Please run /login", ignoreCase = true)
+        return com.r1.launcher.claude.ClaudeAuthVerifyResult(
+            ok = !notLoggedIn && log.isNotBlank(),
+            log = log,
+            error = if (notLoggedIn) "claude says it's not logged in" else null,
+        )
+    }
+
+    @Volatile private var claudeSetupThread: Thread? = null
+
+    override fun claudeSetupRunning(): Boolean = claudeSetupThread?.isAlive == true
+
+    override fun claudeSetupStart(): Boolean {
+        if (claudeSetupRunning()) return false
+        // Run sequentially: bootstrap-alpine (downloads + extracts ~84 MB) →
+        // setup-claude-agent (writes r1-root + CLAUDE.md, installs claude
+        // binary side-effect via the install.sh fetch in step 1's chroot —
+        // here we explicitly fetch it as a separate stage so the progress UI
+        // can show distinct phases) → setup-claude-user (creates `claude`
+        // user, syncs creds dir, fixes inet gid + resolv.conf perms).
+        // Each phase wraps in `( … ) 2>&1` so stderr lands in the carroot
+        // socket → progress event stream. Without this, apk lock errors
+        // and missing-bash failures during the install go to /dev/null and
+        // the user sees a silent stall in the log pane.
+        //
+        // Phase 2 uses `/bin/ash` (not bash) to launch the installer because
+        // a freshly-bootstrapped alpine minirootfs ships only ash; bash gets
+        // installed by phase 1 (apk add bash). The installer's `#!/bin/bash`
+        // shebang resolves at exec time *inside* the curl|bash pipe, where
+        // bash IS now present.
+        // Phase 2 is gated on phase 1's chroot existing — if we just blast the
+        // chroot command, a missing /bin/ash either no-ops the export line or
+        // silently uses host bins (curl/bash not found is what the user saw).
+        // The leading `test -x` makes the failure mode loud and short-circuits
+        // the install step before it spews confusing "command not found" noise.
+        val phases = listOf(
+            "[1/4] alpine rootfs"   to "( sh /data/local/tmp/bootstrap-alpine.sh ) 2>&1",
+            "[2/4] claude binary"   to "( test -x /data/local/tmp/alpine/bin/ash || " +
+                "{ echo '[FAIL] alpine /bin/ash missing — phase 1 did not complete'; exit 1; }; " +
+                "chroot /data/local/tmp/alpine /bin/ash -c " +
+                "'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; " +
+                "export HOME=/root; cd /root && curl -fsSL https://claude.ai/install.sh | bash' ) 2>&1",
+            "[3/4] r1-root bridge"  to "( sh /data/local/tmp/setup-claude-agent.sh ) 2>&1",
+            "[4/4] claude user"     to "( sh /data/local/tmp/setup-claude-user.sh ) 2>&1",
+        )
+        val t = Thread {
+            try {
+                webServer?.broadcastClaudeSetupProgress("starting bootstrap...")
+                // Sentinel-driven short-circuit: any phase that prints a line
+                // beginning with "[FAIL]" aborts the loop. The scripts emit
+                // this on validated-failure conditions (network down, corrupt
+                // tarball, missing chroot prereq), so we can stop before
+                // chaining noise from later phases.
+                var aborted = false
+                for ((label, cmd) in phases) {
+                    if (aborted) {
+                        webServer?.broadcastClaudeSetupProgress("--- $label SKIPPED (previous phase failed) ---")
+                        continue
+                    }
+                    webServer?.broadcastClaudeSetupProgress("--- $label ---")
+                    streamCarroot(cmd) { line ->
+                        if (line.startsWith("[FAIL]")) aborted = true
+                        webServer?.broadcastClaudeSetupProgress(line)
+                    }
+                }
+                val status = claudeAuthStatus()
+                val finalMsg = if (status.chrootReady) {
+                    "DONE — claude code is ready, log in next"
+                } else {
+                    "ERROR — chroot still missing after bootstrap (check log above)"
+                }
+                webServer?.broadcastClaudeSetupProgress(finalMsg)
+                webServer?.broadcastClaudeSetupDone(status.chrootReady)
+                runOnUiThread { state.claudeAuthed = status.hasOAuth || status.hasApiKey }
+            } catch (e: Exception) {
+                webServer?.broadcastClaudeSetupProgress("[error] ${e.message ?: e.javaClass.simpleName}")
+                webServer?.broadcastClaudeSetupDone(false)
+            } finally {
+                claudeSetupThread = null
+            }
+        }
+        claudeSetupThread = t
+        t.isDaemon = true
+        t.start()
+        return true
+    }
+
+    /**
+     * Streaming carroot helper used by [claudeSetupStart]. Same shape as
+     * [sendToCarrootStreaming] but without the cwd / sentinel / pwdFile
+     * scaffolding, since these scripts don't care about cwd persistence and
+     * each one ends with an explicit `echo DONE` we don't need to gate on.
+     */
+    private fun streamCarroot(cmd: String, onLine: (String) -> Unit) {
+        try {
+            Socket().use { s ->
+                s.connect(InetSocketAddress("127.0.0.1", 1337), 1500)
+                s.soTimeout = 600_000  // 10 min ceiling per phase — alpine extract is slow
+                val out = s.getOutputStream()
+                out.write((cmd + "\n").toByteArray())
+                out.flush()
+                s.shutdownOutput()
+                val reader = s.getInputStream().bufferedReader()
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    onLine(line)
+                }
+            }
+        } catch (e: Exception) {
+            onLine("[carroot] ${e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    override fun claudeAuthReset(): Boolean {
+        // Wipe every credential surface so the next start.sh / api-key paste
+        // begins from a clean slate: both .credentials.json paths (root +
+        // claude user), the cached projects dir (which can pin a stale
+        // identity), the auth FIFO/log, and the API key file. Also kills
+        // any half-finished `claude auth login` daemon — its FIFO writer
+        // would otherwise block start.sh from creating a fresh pipe. The
+        // `|| true` tail keeps the reset idempotent for users who never got
+        // past the chroot bootstrap.
+        val log = runCarrootBlocking(
+            """
+            ALPINE=/data/local/tmp/alpine
+            for p in 'claude auth login' 'sleep 86400'; do
+                pids=${'$'}(ps -ef 2>/dev/null | grep "${'$'}p" | grep -v grep | awk '{print ${'$'}2}')
+                [ -n "${'$'}pids" ] && kill -9 ${'$'}pids 2>/dev/null || true
+            done
+            rm -f /data/local/tmp/.anthropic_key 2>/dev/null || true
+            rm -f "${'$'}ALPINE/root/.claude/.credentials.json" 2>/dev/null || true
+            rm -f "${'$'}ALPINE/home/claude/.claude/.credentials.json" 2>/dev/null || true
+            rm -rf "${'$'}ALPINE/root/.claude/projects" 2>/dev/null || true
+            rm -rf "${'$'}ALPINE/home/claude/.claude/projects" 2>/dev/null || true
+            rm -f "${'$'}ALPINE/tmp/claude-auth.log" 2>/dev/null || true
+            rm -f "${'$'}ALPINE/tmp/claude-auth.pipe" 2>/dev/null || true
+            echo RESET_OK
+            """.trimIndent(),
+            timeoutMs = 8_000,
+        )
+        val ok = log.contains("RESET_OK")
+        if (ok) runOnUiThread { state.claudeAuthed = false }
+        return ok
+    }
+
+    override fun claudeSaveApiKey(key: String): Boolean {
+        val k = key.trim()
+        if (k.isEmpty()) return false
+        // Light validation: real keys start with `sk-ant-`. Don't be strict
+        // about exact length (Anthropic has rotated formats). Reject anything
+        // with a newline or quote — we shell-interpolate this.
+        if (k.contains('\n') || k.contains('\'') || k.contains('"')) return false
+        // Write via carroot so the file is owned by root and readable by the
+        // r1-alpine wrapper (which sources it as ANTHROPIC_API_KEY).
+        val log = runCarrootBlocking(
+            "printf '%s\\n' '$k' > /data/local/tmp/.anthropic_key && " +
+                "chmod 600 /data/local/tmp/.anthropic_key && echo OK",
+            timeoutMs = 5_000,
+        )
+        val ok = log.contains("OK")
+        if (ok) runOnUiThread { state.claudeAuthed = true }
+        return ok
+    }
+
+    override fun copyToClipboard(text: String, label: String) {
+        if (text.isEmpty()) {
+            toast("nothing to copy")
+            return
+        }
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        if (cm == null) {
+            toast("clipboard unavailable")
+            return
+        }
+        cm.setPrimaryClip(android.content.ClipData.newPlainText(label, text))
+        toast("copied (${text.length} chars)")
+    }
+
+    private fun promptLabel(cwd: String): String {
+        // Compact home-style indicator: /sdcard/foo → ~/foo when on the
+        // user-data root, otherwise the absolute path.
+        val short = if (cwd == "/sdcard") "~"
+            else if (cwd.startsWith("/sdcard/")) "~" + cwd.removePrefix("/sdcard")
+            else cwd
+        return "$short \$"
+    }
+
+    /** Commands that only exist inside the Alpine chroot. Typing one of these
+     *  in the terminal panel transparently re-routes through the r1-alpine
+     *  wrapper so the user doesn't need the `sh /data/local/tmp/r1-alpine "…"`
+     *  prefix every time. */
+    private val alpineCommands = setOf(
+        "npm", "node", "npx", "yarn", "pnpm",
+        "python", "python3", "pip", "pip3",
+        "apk", "openclaw", "claude",
+    )
+
+    private fun resolveAlpineWrapping(cmd: String): String {
+        // Explicit override: `alpine: <anything>` always routes through chroot.
+        if (cmd.startsWith("alpine:")) {
+            return wrapAlpine(cmd.removePrefix("alpine:").trim())
+        }
+        // Auto-route on the first whitespace-separated token.
+        val firstToken = cmd.split(Regex("\\s+")).firstOrNull().orEmpty()
+        return if (firstToken in alpineCommands) wrapAlpine(cmd) else cmd
+    }
+
+    private fun wrapAlpine(cmd: String): String {
+        // Escape backslashes first, then double quotes, so the shell sees
+        // the original command verbatim inside the wrapper's "$*" arg.
+        val esc = cmd.replace("\\", "\\\\").replace("\"", "\\\"")
+        return "sh /data/local/tmp/r1-alpine \"$esc\""
+    }
+
     // --- LauncherHost: openclaw ---
 
     override fun openClawScanned(raw: String) {
         if (state.qrScanMode == QrScanMode.OPENAI_KEY) {
+            // Note: enum name kept for back-compat; this branch now scans the
+            // ElevenLabs voice key from QR.
             val k = raw.trim()
-            if (!k.startsWith("sk-") || k.length < 20) {
-                state.qrError = "Not an openai key"
+            if (!isValidElevenKey(k)) {
+                state.qrError = "Not an elevenlabs key"
                 return
             }
-            openClawPrefs.openaiKey = k
-            refreshOpenaiKeyState()
+            voicePrefs.elevenlabsKey = k
+            refreshVoiceKeyState()
             state.qrError = null
             selectTone()
-            toast("openai key saved via QR")
-            // Bounce back to the settings panel where the user came from.
+            toast("voice key saved via QR")
+            // Bounce back to the Settings → Voice panel where the user came from.
             state.qrScanMode = QrScanMode.GATEWAY_PAIRING
-            state.openOpenClawSettings()
+            state.openSettingsVoice()
             return
         }
         val code = decodeGatewaySetupCode(raw) ?: run {
@@ -1293,6 +2354,11 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         openClawPrefs.bootstrapToken = code.bootstrapToken
         openClawPrefs.sharedToken = code.token
         openClawPrefs.deviceToken = null
+        // Drop any selected/main session key carried over from a previous
+        // gateway — those keys are scoped to that gateway and would 404
+        // (or join an unrelated thread) on the new one.
+        openClawPrefs.selectedSessionKey = null
+        openClawPrefs.lastMainSessionKey = null
         state.qrError = null
         selectTone()
         openClawStartSession()
@@ -1301,101 +2367,19 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     override fun openClawToggleRecord() {
-        val cap = openClawCapture
-        if (cap != null && cap.isRecording) openClawRecordStop() else openClawRecordStart()
+        if (state.chatRecording) openClawRecordStop() else openClawRecordStart()
     }
 
     override fun openClawRecordStart() {
-        val session = openClawSession ?: return
+        // Don't even open the mic if there's no live OpenClaw session — the
+        // committed transcript would have nowhere to send. (Original Whisper
+        // flow checked the same thing.)
+        openClawSession ?: return
         if (state.chatStatus.startsWith("error") || state.chatStatus == "idle") return
-        if (!ensureAudioPerm()) return
-        val cap = openClawCapture ?: com.r1.launcher.openclaw.AudioCapture().also { openClawCapture = it }
-        if (cap.isRecording) return
-        if (movingSoundId != 0) soundPool?.play(movingSoundId, 1f, 1f, 0, 0, 1f)
-        state.chatPartialText = ""
-        state.chatRecording = true
-        cap.start(object : com.r1.launcher.openclaw.AudioCapture.Callback {
-            override fun onLevel(levelPct: Int) {
-                state.chatInputLevel = levelPct
-            }
-
-            override fun onDone(wavBytes: ByteArray, durationMs: Int, peakPct: Int) {
-                ui.post {
-                    state.chatRecording = false
-                    state.chatInputLevel = 0
-                    state.chatPartialText = ""
-                    if (durationMs < 300 || peakPct < 2) {
-                        toast(if (peakPct < 2) "no audio captured" else "too short")
-                        return@post
-                    }
-                    val key = openClawPrefs.openaiKey
-                    if (key.isNullOrBlank()) {
-                        toast("set openai key first (tap key pill)")
-                        return@post
-                    }
-                    // Hand the WAV to Whisper. While it's in flight, show
-                    // a transcribing indicator in the header.
-                    state.chatTranscribing = true
-                    com.r1.launcher.openclaw.WhisperClient.transcribe(
-                        wavBytes = wavBytes,
-                        apiKey = key,
-                    ) { transcript, err ->
-                        state.chatTranscribing = false
-                        if (err != null) {
-                            toast("whisper: $err")
-                            return@transcribe
-                        }
-                        val text = transcript?.trim().orEmpty()
-                        if (text.isEmpty()) {
-                            toast("whisper: empty transcript")
-                            return@transcribe
-                        }
-                        val optimistic = com.r1.launcher.openclaw.ChatMessage(
-                            role = "user", text = text,
-                        )
-                        state.chatMessages.add(optimistic)
-                        trimChatMessages()
-                        state.chatScrollIndex = 0
-                        state.chatBusy = true
-                        if (state.chatTtsEnabled && state.panel == Panel.OPENCLAW_TALK) {
-                            openClawSpeakNextAssistant = true
-                        }
-                        session.send(text = text, audioBase64 = null) { ok, runId, err ->
-                            ui.post {
-                                if (!ok) {
-                                    val idx = state.chatMessages
-                                        .indexOfFirst { it.id == optimistic.id }
-                                    if (idx >= 0) state.chatMessages.removeAt(idx)
-                                    state.chatBusy = false
-                                    if (!err.isNullOrBlank()) toast("send failed: $err")
-                                } else if (runId != null) {
-                                    state.chatPendingRunIds.add(runId)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            override fun onError(msg: String) {
-                ui.post {
-                    state.chatRecording = false
-                    state.chatInputLevel = 0
-                    state.chatPartialText = ""
-                    toast("mic: $msg")
-                }
-            }
-        })
+        startVoiceCapture(VoiceSink.CHAT)
     }
 
-    override fun openClawRecordStop() {
-        val cap = openClawCapture ?: return
-        if (!cap.isRecording) return
-        cap.stop()
-        state.chatRecording = false
-        state.chatInputLevel = 0
-        if (popSoundId != 0) soundPool?.play(popSoundId, 1f, 1f, 0, 0, 1f)
-    }
+    override fun openClawRecordStop() = stopVoiceCapture()
 
     override fun openClawSendText(text: String) {
         val session = openClawSession ?: return
@@ -1409,7 +2393,10 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.chatScrollIndex = 0
         if (!trimmed.startsWith("/")) {
             state.chatBusy = true
-            if (state.chatTtsEnabled && state.panel == Panel.OPENCLAW_TALK) {
+            // Arm the auto-speak gate when the user has voice enabled and is
+            // sitting in the chat panel; the response will go through
+            // ElevenLabs TTS as soon as the assistant text lands.
+            if (state.voiceEnabled && state.panel == Panel.OPENCLAW_CHAT) {
                 openClawSpeakNextAssistant = true
             }
         }
@@ -1430,26 +2417,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
     }
 
-    override fun openClawOpenTalk() {
-        openClawStartSession()
-        if (!state.chatTtsEnabled) {
-            state.chatTtsEnabled = true
-            openClawPrefs.ttsEnabled = true
-        }
-        state.openOpenClawTalk()
-    }
-
-    override fun openClawSetSpeaker(enabled: Boolean) {
-        state.chatTtsEnabled = enabled
-        openClawPrefs.ttsEnabled = enabled
-        if (enabled) {
-            popTone()
-        } else {
-            runCatching { openClawSpeechPlayer?.stop() }
-            navTone()
-        }
-    }
-
     override fun openClawScrollUp() {
         state.chatScrollIndex++
     }
@@ -1462,58 +2429,100 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         openClawCloseSessionInternal()
     }
 
-    override fun openClawPasteOpenaiKey() {
+    private fun isValidElevenKey(raw: String): Boolean {
+        // ElevenLabs keys: either "sk_<29 hex>" prefix form (~32 char) or a
+        // bare 32-char hex string. Lower-case hex is the canonical form.
+        if (raw.startsWith("sk_") && raw.length >= 20) return true
+        if (raw.length == 32 && raw.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }) return true
+        return false
+    }
+
+    override fun voiceToggleEnabled() {
+        val next = !state.voiceEnabled
+        state.voiceEnabled = next
+        voicePrefs.enabled = next
+        if (!next) runCatching { openClawSpeechPlayer?.stop() }
+        popTone()
+    }
+
+    override fun voiceCycleVoiceId() {
+        val voices = com.r1.launcher.voice.VoicePrefs.VOICES
+        val curIdx = voices.indexOfFirst { it.second == state.voiceId }
+        val next = voices[(curIdx + 1).coerceAtLeast(0) % voices.size]
+        state.voiceId = next.second
+        voicePrefs.voiceId = next.second
+        toast("voice: ${next.first}")
+        popTone()
+    }
+
+    override fun voiceSaveKey(key: String) {
+        val k = key.trim()
+        when {
+            k.isEmpty() -> { toast("key is empty"); return }
+            !isValidElevenKey(k) -> { toast("not an elevenlabs key"); return }
+            else -> {
+                voicePrefs.elevenlabsKey = k
+                refreshVoiceKeyState()
+                toast("voice key saved")
+                state.back()
+            }
+        }
+    }
+
+    override fun voiceClearKey() {
+        voicePrefs.elevenlabsKey = null
+        refreshVoiceKeyState()
+        toast("voice key cleared")
+    }
+
+    override fun voicePasteKeyFromClipboard() {
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
         val raw = cm?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()?.trim().orEmpty()
         if (raw.isEmpty()) {
             toast("clipboard empty"); return
         }
-        if (!raw.startsWith("sk-") || raw.length < 20) {
-            toast("not an openai key"); return
+        if (!isValidElevenKey(raw)) {
+            toast("not an elevenlabs key"); return
         }
-        openClawPrefs.openaiKey = raw
-        refreshOpenaiKeyState()
-        toast("key saved")
+        voicePrefs.elevenlabsKey = raw
+        refreshVoiceKeyState()
+        toast("voice key saved")
     }
 
-    override fun openClawClearOpenaiKey() {
-        openClawPrefs.openaiKey = null
-        refreshOpenaiKeyState()
-        toast("key cleared")
-    }
-
-    override fun openClawSaveOpenaiKey(key: String) {
-        val k = key.trim()
-        when {
-            k.isEmpty() -> { toast("key is empty"); return }
-            !k.startsWith("sk-") || k.length < 20 -> { toast("not an openai key"); return }
-            else -> {
-                openClawPrefs.openaiKey = k
-                refreshOpenaiKeyState()
-                toast("key saved")
-                state.back()
+    override fun voiceSettingsRowActivate(idx: Int) {
+        when (idx) {
+            0 -> { state.back(); backTone() }
+            1 -> voiceToggleEnabled()
+            // 2 (key) is handled entirely by the voice settings panel UI keyboard
+            3 -> {
+                ensureCameraPerm()
+                state.openOpenAiKeyQr() // QR scan path is reused — see openClawScanned
+                selectTone()
             }
+            4 -> voiceCycleVoiceId()
+            5 -> voiceClearKey()
         }
     }
 
     override fun openClawSettingsRowActivate(idx: Int) {
         when (idx) {
             0 -> { state.back(); backTone() }
-            // 1 (whisper key) is handled entirely by UI (toggles keyboard)
-            2 -> {
-                ensureCameraPerm()
-                state.openOpenAiKeyQr()
-                selectTone()
+            1 -> {
+                // Convenience inline toggle for the global voice-enabled flag.
+                // The canonical config still lives in Settings → Voice; this row
+                // just flips the same VoicePrefs.enabled, so it stays in sync.
+                voiceToggleEnabled()
+                popTone()
             }
-            3 -> {
+            2 -> {
                 val newHide = !state.openClawHideChat
                 state.openClawHideChat = newHide
                 openClawPrefs.hideChat = newHide
                 popTone()
             }
-            // 4 (font size) is handled by +/- buttons in the UI
-            5 -> { openClawClearHistory(); popTone() }
-            6 -> { openClawDisconnect(); popTone() }
+            // 3 (font size) is handled by +/- buttons in the UI
+            4 -> { openClawClearHistory(); popTone() }
+            5 -> { openClawDisconnect(); popTone() }
         }
     }
 
@@ -1675,14 +2684,22 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.smsLoading = true
         state.smsError = null
         Thread {
-            val list = runCatching {
-                com.r1.launcher.messages.SmsLoader.loadConversations(this)
+            val fastList = runCatching {
+                com.r1.launcher.messages.SmsLoader.loadConversationsFast(this)
             }.getOrElse { emptyList() }
             ui.post {
                 state.smsConversations.clear()
-                state.smsConversations.addAll(list)
+                state.smsConversations.addAll(fastList)
+            }
+
+            val fullList = runCatching {
+                com.r1.launcher.messages.SmsLoader.loadConversations(this)
+            }.getOrElse { fastList }
+            ui.post {
+                state.smsConversations.clear()
+                state.smsConversations.addAll(fullList)
                 state.smsLoading = false
-                if (list.isEmpty() && state.smsError == null) state.smsError = "no messages"
+                if (fullList.isEmpty() && state.smsError == null) state.smsError = "no messages"
             }
         }.start()
     }
@@ -1696,18 +2713,19 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             ui.post {
                 state.smsThreadMessages.clear()
                 state.smsThreadMessages.addAll(items)
+                state.smsThreadLoading = false
             }
         }.start()
     }
 
-    private fun refreshOpenaiKeyState() {
-        val k = openClawPrefs.openaiKey
+    private fun refreshVoiceKeyState() {
+        val k = voicePrefs.elevenlabsKey
         if (k.isNullOrBlank()) {
-            state.chatHasOpenaiKey = false
-            state.chatOpenaiKeyTail = ""
+            state.hasVoiceKey = false
+            state.voiceKeyTail = ""
         } else {
-            state.chatHasOpenaiKey = true
-            state.chatOpenaiKeyTail = k.takeLast(4)
+            state.hasVoiceKey = true
+            state.voiceKeyTail = k.takeLast(4)
         }
     }
 
@@ -1776,19 +2794,75 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     // --- tones ---
 
     override fun navTone() {
-        if (movingSoundId != 0) soundPool?.play(movingSoundId, 1f, 1f, 0, 0, 1f)
-        else playTone(ToneGenerator.TONE_PROP_BEEP, 18)
+        when {
+            uiClickSoundId != 0 -> playUiClickSound()
+            movingSoundId != 0  -> playMovingSound()
+            else                -> playTone(ToneGenerator.TONE_PROP_BEEP, 18)
+        }
     }
     
-    override fun selectTone() = playTone(ToneGenerator.TONE_PROP_ACK, 55)
+    override fun selectTone() {
+        when {
+            selectSoundId != 0  -> playSelectSound()
+            movingSoundId != 0  -> playMovingSound()
+            else                -> playTone(ToneGenerator.TONE_PROP_BEEP, 30)
+        }
+    }
     
-    override fun popTone() {
-        if (popSoundId != 0) soundPool?.play(popSoundId, 1f, 1f, 0, 0, 1f)
+    override fun popTone() = playMovingSound()
+
+    /** Recording-start cue — record.mp3 at full volume, plus a ToneGenerator
+     *  beep as a guaranteed-audible fallback. SoundPool on MTK silently drops
+     *  some plays (especially when the audio path is in flux from another
+     *  stream just being released), so the ToneGenerator beep makes sure the
+     *  user always gets audible feedback that the mic opened. Falls back to
+     *  moving.mp3 if the dedicated cue isn't loaded yet. */
+    private fun playRecordStartTone() {
+        val sid = if (recordStartSoundId != 0) recordStartSoundId else movingSoundId
+        if (sid != 0) {
+            soundPool?.play(sid, 1f, 1f, 0, 0, 1f)
+        }
+        runCatching { tone?.startTone(ToneGenerator.TONE_PROP_BEEP, 60) }
+    }
+
+    /** Recording-stop cue — release-record.mp3, mirrored shape of start. Same
+     *  fallback chain. Slightly different ToneGenerator type (PROMPT vs BEEP)
+     *  so even when the mp3 drops the user hears a distinctly different cue
+     *  for "released / sending" versus "recording started". */
+    private fun playRecordStopTone() {
+        val sid = if (recordStopSoundId != 0) recordStopSoundId else movingSoundId
+        if (sid != 0) {
+            soundPool?.play(sid, 1f, 1f, 0, 0, 1f)
+        }
+        runCatching { tone?.startTone(ToneGenerator.TONE_PROP_PROMPT, 60) }
     }
     
     override fun backTone() = playTone(ToneGenerator.TONE_PROP_PROMPT, 35)
     
     private fun launchTone() = playTone(ToneGenerator.TONE_PROP_BEEP2, 80)
+
+    private fun uiSoundGain(): Float {
+        val max = state.uiVolumeMax.coerceAtLeast(1).toFloat()
+        return (state.uiVolumeLevel.toFloat() / max).coerceIn(0f, 1f)
+    }
+
+    private fun playMovingSound() {
+        if (movingSoundId == 0) return
+        val g = uiSoundGain()
+        soundPool?.play(movingSoundId, g, g, 0, 0, 1f)
+    }
+
+    private fun playUiClickSound() {
+        if (uiClickSoundId == 0) return
+        val g = uiSoundGain()
+        soundPool?.play(uiClickSoundId, g, g, 0, 0, 1f)
+    }
+
+    private fun playSelectSound() {
+        if (selectSoundId == 0) return
+        val g = uiSoundGain()
+        soundPool?.play(selectSoundId, g, g, 0, 0, 1f)
+    }
 
     private fun playTone(type: Int, durationMs: Int) {
         val t = tone ?: return
@@ -1804,7 +2878,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val code = event.keyCode
 
-        if ((state.panel == Panel.OPENCLAW_CHAT || state.panel == Panel.OPENCLAW_TALK) && isOpenClawPttKey(code)) {
+        if (state.panel == Panel.OPENCLAW_CHAT && isOpenClawPttKey(code)) {
             return handleOpenClawPttKey(event)
         }
 
@@ -1833,12 +2907,22 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                         sideLastShortUpMs = 0L
                         if (state.panel == Panel.HOME) {
                             PowerService.openPowerDialog()
+                        } else if (state.panel == Panel.TERMINAL) {
+                            // Push-to-talk dictation. Stop fires on the matching UP
+                            // (handled below in the sideLongFired branch).
+                            terminalRecordStart()
+                        } else if (state.panel == Panel.CLAUDE) {
+                            claudeRecordStart()
                         }
                     }
                 }
                 KeyEvent.ACTION_UP -> {
                     if (sideLongFired) {
-                        // Long-press already handled at DOWN-repeat; swallow the UP.
+                        // Long-press already handled at DOWN-repeat. Mirror the
+                        // start side-effect on UP for the terminal PTT path so
+                        // recording stops when the user releases.
+                        if (state.panel == Panel.TERMINAL) terminalRecordStop()
+                        else if (state.panel == Panel.CLAUDE) claudeRecordStop()
                         sideLongFired = false
                         return true
                     }

@@ -4,6 +4,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
@@ -24,11 +26,14 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.r1.launcher.LauncherState
@@ -48,8 +53,12 @@ fun HomeScreen(
     val type = LocalR1Type.current
     AnimatedVisibility(
         visible = state.panel == Panel.HOME,
-        enter = fadeIn(tween(ANIM_OPEN_MS)) + slideInVertically(tween(ANIM_OPEN_MS)) { -it },
-        exit = fadeOut(tween(ANIM_CLOSE_MS)) + slideOutVertically(tween(ANIM_CLOSE_MS)) { -it },
+        enter = fadeIn(tween(ANIM_OPEN_MS, easing = EnterEasing)) +
+            slideInVertically(tween(ANIM_OPEN_MS, easing = EnterEasing)) { -it / 3 } +
+            scaleIn(tween(ANIM_OPEN_MS, easing = EnterEasing), initialScale = 0.96f),
+        exit = fadeOut(tween(ANIM_CLOSE_MS, easing = ExitEasing)) +
+            slideOutVertically(tween(ANIM_CLOSE_MS, easing = ExitEasing)) { -it / 3 } +
+            scaleOut(tween(ANIM_CLOSE_MS, easing = ExitEasing), targetScale = 1.04f),
     ) {
         Column(
             modifier = modifier
@@ -68,15 +77,21 @@ fun HomeScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center,
             ) {
-                Text(state.dateText.lowercase(), style = type.date, color = Color(0xFFFF6B00)) // Bright Orange
-                Spacer(Modifier.height(6.dp))
-                Text(state.clockText.lowercase(), style = type.clock, color = colors.labelBright)
+                // Date + clock are time strings — read LTR even in Arabic
+                // (digits are LTR-strong, Arabic AM/PM markers are RTL-strong;
+                // forcing LTR keeps "ص 2:34" rendering as "2:34 ص" instead of
+                // bidi-flipping the components mid-string).
+                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                    Text(state.dateText.lowercase(), style = type.date, color = Color(0xFFFF6B00)) // Bright Orange
+                    Spacer(Modifier.height(6.dp))
+                    Text(state.clockText.lowercase(), style = type.clock, color = colors.labelBright)
+                }
                 if (state.wifiShareEnabled) {
                     val n = state.wifiShareConnectedClients.size
                     val label = when (n) {
-                        0 -> "hotspot on · 0 devices"
-                        1 -> "1 device connected"
-                        else -> "$n devices connected"
+                        0 -> stringResource(R.string.home_hotspot_zero)
+                        1 -> stringResource(R.string.home_hotspot_one)
+                        else -> stringResource(R.string.home_hotspot_many, n)
                     }
                     Spacer(Modifier.height(6.dp))
                     Text(

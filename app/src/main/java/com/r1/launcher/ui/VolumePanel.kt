@@ -5,8 +5,10 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.res.stringResource
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
+import com.r1.launcher.R
 
 @Composable
 fun VolumePanel(
@@ -18,12 +20,11 @@ fun VolumePanel(
         enter = fadeIn(tween(ANIM_OPEN_MS)),
         exit = fadeOut(tween(ANIM_CLOSE_MS)),
     ) {
-        val max = state.volumeMax.coerceAtLeast(1)
-        LevelCard(
-            title = "volume",
-            hint = "wheel ↑↓   press OK",
-            fraction = state.volumeLevel.toFloat() / max.toFloat(),
-            percent = (state.volumeLevel * 100f / max.toFloat()).toInt(),
+        SegmentedLevelCard(
+            title = stringResource(R.string.panel_volume_title),
+            hint = stringResource(R.string.panel_volume_hint),
+            level = state.volumeLevel,
+            max = state.volumeMax,
             onScrimClick = onScrimClick,
         )
     }

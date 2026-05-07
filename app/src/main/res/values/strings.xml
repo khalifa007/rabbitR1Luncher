@@ -10,4 +10,209 @@
     <string name="store_title">Store</string>
     <string name="home_back">Home</string>
     <string name="accessibility_description">Lets the R1 Launcher open the system Power Dialog. Required for the Power and Reboot buttons.</string>
+
+    <!-- Common -->
+    <string name="back">← back</string>
+    <string name="back_short">&lt; back</string>
+
+    <!-- Synthetic apps (apps grid labels) -->
+    <string name="app_label_settings">settings</string>
+    <string name="app_label_openclaw">openclaw</string>
+    <string name="app_label_messages">messages</string>
+    <string name="app_label_terminal">terminal</string>
+    <string name="app_label_claude">claude code</string>
+
+    <!-- Settings root -->
+    <string name="settings_title">settings</string>
+    <string name="settings_row_network">network</string>
+    <string name="settings_row_display">display</string>
+    <string name="settings_row_sound">sound</string>
+    <string name="settings_row_voice">voice</string>
+    <string name="settings_row_device">device</string>
+    <string name="settings_row_about">about</string>
+    <string name="settings_row_language">language</string>
+
+    <!-- Settings sub-panels -->
+    <string name="settings_display_title">display</string>
+    <string name="settings_display_row_brightness">brightness</string>
+    <string name="settings_sound_title">sound</string>
+    <string name="settings_sound_row_ui">ui sound</string>
+    <string name="settings_sound_row_speaker">speaker</string>
+    <string name="settings_device_title">device</string>
+    <string name="settings_device_row_check_updates">check for updates</string>
+    <string name="settings_device_row_language">language</string>
+    <string name="settings_device_row_reboot">restart</string>
+    <string name="settings_device_row_power_off">power off</string>
+    <string name="settings_device_row_factory_reset">factory reset</string>
+    <string name="settings_about_title">about</string>
+    <string name="settings_about_app">R1 Launcher</string>
+    <string name="settings_about_version">v%s</string>
+
+    <!-- Settings language picker -->
+    <string name="settings_language_title">language</string>
+
+    <!-- Network panel -->
+    <string name="network_row_wifi">wifi</string>
+    <string name="network_row_cellular">cellular data</string>
+    <string name="network_row_bluetooth">bluetooth</string>
+    <string name="network_row_share">wifi share</string>
+    <string name="network_row_remote">remote panel</string>
+    <string name="network_row_terminal">remote terminal</string>
+    <string name="network_row_scan">scan wifi networks</string>
+    <string name="network_share_clients">%d connected</string>
+    <string name="network_terminal_needs_panel">needs remote panel</string>
+    <string name="network_terminal_warn_lan">root shell exposed on lan</string>
+
+    <!-- Onboarding -->
+    <string name="onboarding_continue">→ continue</string>
+    <string name="onboarding_finish">→ finish</string>
+    <string name="onboarding_welcome_title">welcome</string>
+    <string name="onboarding_welcome_body">scroll the wheel to navigate.\npress to select.\nside button locks the screen.</string>
+    <string name="onboarding_language_title">language</string>
+    <string name="onboarding_language_body">pick your language.</string>
+    <string name="onboarding_network_title">network</string>
+    <string name="onboarding_network_body">connect for updates and online apps.</string>
+    <string name="onboarding_network_wifi">connect wi-fi</string>
+    <string name="onboarding_network_cellular">use cellular</string>
+    <string name="onboarding_network_skip">skip</string>
+    <string name="onboarding_network_no_sim">no sim card</string>
+    <string name="onboarding_network_ready">ready</string>
+    <string name="onboarding_updates_title">updates</string>
+    <string name="onboarding_updates_body">check for system updates.</string>
+    <string name="onboarding_updates_check">check now</string>
+    <string name="onboarding_updates_skip">skip</string>
+    <string name="onboarding_updates_checking">checking…</string>
+    <string name="onboarding_updates_downloading">downloading…</string>
+    <string name="onboarding_done_title">all set!</string>
+    <string name="onboarding_done_body">you\'re ready to go.</string>
+
+    <!-- Common reusable -->
+    <string name="common_loading">loading…</string>
+    <string name="common_paste">paste</string>
+    <string name="common_send">send</string>
+    <string name="common_clear">clear</string>
+    <string name="common_save">save</string>
+    <string name="common_close">close</string>
+    <string name="common_thinking_dots">...</string>
+    <string name="common_ellipsis">…</string>
+
+    <!-- Brightness / volume / ui-volume -->
+    <string name="panel_brightness_title">brightness</string>
+    <string name="panel_volume_title">speaker</string>
+    <string name="panel_uivolume_title">ui sound</string>
+    <string name="panel_volume_hint">wheel ↑↓   press OK</string>
+
+    <!-- Factory reset -->
+    <string name="factory_confirm_title">factory reset</string>
+    <string name="factory_confirm_warn">this wipes all user data\nand resets the device.\ncannot be undone.</string>
+    <string name="factory_confirm_action">→ continue</string>
+
+    <!-- Wi-Fi share -->
+    <string name="wifi_share_off">off</string>
+    <string name="wifi_share_on">on</string>
+    <string name="wifi_share_15min">15 min</string>
+    <string name="wifi_share_30min">30 min</string>
+    <string name="wifi_share_1hour">1 hour</string>
+    <string name="wifi_share_2hours">2 hours</string>
+    <string name="wifi_share_row_enable">enable</string>
+    <string name="wifi_share_row_name">name</string>
+    <string name="wifi_share_row_password">password</string>
+    <string name="wifi_share_row_connected">connected</string>
+    <string name="wifi_share_row_autooff">auto-off</string>
+    <string name="wifi_share_panel_label">panel</string>
+
+    <!-- Wi-Fi share edit -->
+    <string name="wifi_share_edit_password_label">Hotspot password:</string>
+    <string name="wifi_share_edit_name_label">Hotspot name:</string>
+    <string name="wifi_share_edit_password_hint">Enter password...</string>
+    <string name="wifi_share_edit_name_hint">Enter name...</string>
+    <string name="wifi_share_edit_save">[ SAVE ]</string>
+
+    <!-- Wi-Fi password -->
+    <string name="wifi_password_connect_to">Connect to:</string>
+    <string name="wifi_password_hint">Enter password...</string>
+    <string name="wifi_password_action">[ CONNECT ]</string>
+
+    <!-- Settings → Voice -->
+    <string name="voice_key_set_short">set · …</string>
+    <string name="voice_key_not_set">not set</string>
+    <string name="voice_row_toggle_on">voice: on</string>
+    <string name="voice_row_toggle_off">voice: off</string>
+    <string name="voice_row_key">elevenlabs key</string>
+    <string name="voice_row_scan_qr">scan key from qr</string>
+    <string name="voice_row_clear_key">clear key</string>
+    <string name="voice_kb_hint">type sk_… or paste</string>
+
+    <!-- Messages -->
+    <string name="messages_empty">no messages</string>
+
+    <!-- Terminal -->
+    <string name="terminal_kb_hide">hide</string>
+    <string name="terminal_kb_show">kbd</string>
+    <string name="terminal_empty_hint">tap a key to start. wheel scrolls. wheel-press runs.</string>
+    <string name="terminal_prompt">$</string>
+    <string name="terminal_run">run</string>
+    <string name="terminal_short_clear">clr</string>
+    <string name="terminal_status_rec">rec</string>
+    <string name="terminal_status_stt">stt</string>
+    <string name="terminal_status_idle">idle</string>
+
+    <!-- Claude -->
+    <string name="claude_back_label">apps</string>
+    <string name="claude_thinking">thinking</string>
+    <string name="claude_input_hint">type here...</string>
+    <string name="claude_empty_hint">ask claude code anything\n\nwheel-press to send\nlong-press side button to dictate</string>
+
+    <!-- OpenClaw chat -->
+    <string name="openclaw_back_home">home</string>
+    <string name="openclaw_back_chat">chat</string>
+    <string name="openclaw_writing">writing</string>
+    <string name="openclaw_input_hint">type here...</string>
+    <string name="openclaw_status_connecting">connecting to gate…</string>
+    <string name="openclaw_empty_hint">no messages yet — press wheel to record</string>
+    <string name="openclaw_not_approved">device not approved yet —\nrun: openclaw devices approve &lt;id&gt;\non your gate, then reopen</string>
+    <string name="openclaw_btn_cam">cam</string>
+    <string name="openclaw_btn_sessions">sessions</string>
+    <string name="openclaw_btn_settings">settings</string>
+    <string name="openclaw_attached_image">attached image</string>
+    <string name="openclaw_copy_code">copy code</string>
+    <string name="openclaw_copy_code_n">copy code (%d)</string>
+
+    <!-- OpenClaw settings -->
+    <string name="openclaw_settings_speak">speak replies</string>
+    <string name="openclaw_settings_hide_input">hide text input</string>
+    <string name="openclaw_settings_font">font size</string>
+    <string name="openclaw_settings_clear">clear history</string>
+    <string name="openclaw_settings_disconnect">disconnect gate</string>
+
+    <!-- OpenClaw camera -->
+    <string name="openclaw_camera_snap_ask">snap ask</string>
+    <string name="openclaw_camera_review_ask">review ask</string>
+    <string name="openclaw_camera_prompt_hint">what should I ask?</string>
+    <string name="openclaw_camera_snap">snap</string>
+    <string name="openclaw_camera_perm_needed">camera permission needed</string>
+    <string name="openclaw_camera_retake">retake</string>
+    <string name="openclaw_camera_sending">sending</string>
+    <string name="openclaw_camera_ask">ask</string>
+    <string name="openclaw_camera_default_prompt">what do you see?</string>
+    <string name="openclaw_camera_motor_face">face %d°</string>
+    <string name="openclaw_camera_motor_idle">idle %d°</string>
+    <string name="openclaw_camera_motor_back">back %d°</string>
+    <string name="openclaw_camera_motor_to_face">→face %d°</string>
+    <string name="openclaw_camera_motor_to_back">→back %d°</string>
+
+    <!-- OpenClaw sessions -->
+    <string name="openclaw_sessions_empty">no threads</string>
+    <string name="openclaw_sessions_refreshing">refresh…</string>
+    <string name="openclaw_sessions_refresh">refresh</string>
+
+    <!-- OpenClaw QR -->
+    <string name="openclaw_qr_back_home">home</string>
+    <string name="openclaw_qr_title_gateway">scan gate qr</string>
+    <string name="openclaw_qr_title_openai">show your gate setup-code qr</string>
+
+    <!-- Home hotspot status -->
+    <string name="home_hotspot_zero">hotspot on · 0 devices</string>
+    <string name="home_hotspot_one">1 device connected</string>
+    <string name="home_hotspot_many">%d devices connected</string>
 </resources>

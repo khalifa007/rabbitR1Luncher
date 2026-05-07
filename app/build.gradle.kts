@@ -13,22 +13,37 @@ android {
         applicationId = "com.r1.launcher"
         minSdk = 23
         targetSdk = 33
-        versionCode = 172
-        versionName = "3.19.0"
+        versionCode = 263
+        versionName = "3.40.1"
+
+        // R1 is single-ABI (arm64-v8a). Restricting filter avoids accidentally
+        // pulling in armeabi-v7a / x86_64 / x86 from any future native deps.
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     signingConfigs {
+        // Platform key from ~/lineage/build/make/target/product/security/platform.{pk8,x509.pem},
+        // converted to PKCS12 via openssl. Signing with the platform key gives the APK every
+        // signature-protected permission (e.g. ACCESS_MESSAGES_ON_ICC for SmsManager.getAllMessagesFromIcc),
+        // and matches the signature of the prebuilt R1Launcher in the system image — so
+        // `adb install -r` over the system version doesn't fail with INSTALL_FAILED_UPDATE_INCOMPATIBLE.
+        // Both build types use the same key so debug and release stay swap-compatible with
+        // /system/app/R1Launcher/.
         create("release") {
-            storeFile = file("../debug.keystore")
+            storeFile = file("../platform.keystore")
             storePassword = "android"
-            keyAlias = "launcher"
+            keyAlias = "platform"
             keyPassword = "android"
+            storeType = "PKCS12"
         }
         named("debug") {
-            storeFile = file("../debug.keystore")
+            storeFile = file("../platform.keystore")
             storePassword = "android"
-            keyAlias = "launcher"
+            keyAlias = "platform"
             keyPassword = "android"
+            storeType = "PKCS12"
         }
     }
 
@@ -92,7 +107,13 @@ dependencies {
     // Material3 pulled in only for the type tokens; we style everything custom.
     implementation("androidx.compose.material3:material3")
 
-    // Markdown rendering for AI chat bubbles
+    // Markdown rendering for AI chat bubbles. Every version we tried (0.16,
+    // 0.20, 0.24) calls DrawScope.drawLine-NGM6Ib0$default with a value-class
+    // signature that doesn't exist in compose.ui 1.7.x (the version our BOM
+    // ships). It crashes the first time an assistant reply contains a
+    // blockquote (`> ...`). Workaround: strip `>` line markers before passing
+    // text to Markdown — see OpenClawChatPanel. Real
+    // fix would be bumping Compose BOM to 2025.x.
     implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.24.0")
 
     // OpenClaw panel: WebSocket JSON-RPC + JSON + encrypted prefs + QR scanner.

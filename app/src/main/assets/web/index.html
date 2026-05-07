@@ -1,83 +1,289 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" dir="ltr">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="theme-color" content="#000000">
-    <title>R1 panel</title>
+    <meta name="theme-color" content="#0A0A0C">
+    <title>r1 // remote</title>
     <link rel="stylesheet" href="/style.css">
+    <script src="/i18n.js"></script>
 </head>
-<body>
-<header id="topbar">
-    <span class="logo">R1</span>
-    <span class="info" id="info-clock">--:--</span>
-    <span class="info" id="info-battery">battery —</span>
-    <span class="info" id="info-signal">signal —</span>
-    <span class="info" id="info-operator">—</span>
-    <span class="status" id="conn-status">connecting…</span>
+<body class="view-home">
+
+<!-- subtle CRT/scanline overlay drawn in CSS over a fixed pseudo-element -->
+<div class="scanlines" aria-hidden="true"></div>
+<div class="grain" aria-hidden="true"></div>
+
+<header class="topbar">
+    <div class="brand">
+        <span class="brand-mark">R1</span>
+        <span class="brand-divider">//</span>
+        <span class="brand-text">remote</span>
+    </div>
+    <div class="topbar-meta">
+        <span class="meta" id="topbar-clock">--:--</span>
+        <span class="meta" id="topbar-operator">—</span>
+        <span class="meta" id="topbar-radio">—</span>
+        <span class="meta meta-bars" id="topbar-signal" data-i18n-title="topbar.signal" title="signal">○○○○</span>
+        <span class="meta meta-battery" id="topbar-battery">—</span>
+        <span class="conn-pill" id="conn-status" data-i18n="conn.connecting">connecting</span>
+    </div>
 </header>
 
-<nav id="tabs">
-    <button data-tab="sms" class="active">sms</button>
-    <button data-tab="send">send text</button>
-    <button data-tab="system">system</button>
-</nav>
+<main id="surface">
 
-<main>
-    <section id="tab-sms" class="tab active">
-        <div class="sms-layout">
-            <aside id="sms-list">
-                <button id="sms-refresh" class="ghost">refresh</button>
-                <ul id="sms-threads"></ul>
+    <!-- HOME — clock + apps grid -->
+    <section id="view-home" class="view active">
+        <div class="hero">
+            <div class="hero-clock" id="hero-clock">--:--</div>
+            <div class="hero-date" id="hero-date">—</div>
+            <div class="hero-status">
+                <span class="dot" id="hero-conn-dot"></span>
+                <span id="hero-status-text" data-i18n="hero.connecting">connecting to r1</span>
+            </div>
+        </div>
+
+        <nav class="apps-grid" data-i18n-aria-label="apps.label" aria-label="apps">
+            <button class="app-tile" data-app="claude" style="--i:0">
+                <span class="tile-glyph">⌬</span>
+                <span class="tile-label" data-i18n="tile.claude.label">claude code</span>
+                <span class="tile-sub" data-i18n="tile.claude.sub">chat with claude</span>
+            </button>
+            <button class="app-tile" data-app="terminal" style="--i:1">
+                <span class="tile-glyph">▶_</span>
+                <span class="tile-label" data-i18n="tile.terminal.label">terminal</span>
+                <span class="tile-sub" data-i18n="tile.terminal.sub">root shell</span>
+            </button>
+            <button class="app-tile" data-app="sms" style="--i:2">
+                <span class="tile-glyph">✉</span>
+                <span class="tile-label" data-i18n="tile.sms.label">messages</span>
+                <span class="tile-sub" data-i18n="tile.sms.sub">sms threads</span>
+            </button>
+            <button class="app-tile" data-app="send" style="--i:3">
+                <span class="tile-glyph">↗</span>
+                <span class="tile-label" data-i18n="tile.send.label">send text</span>
+                <span class="tile-sub" data-i18n="tile.send.sub">paste into r1</span>
+            </button>
+            <button class="app-tile" data-app="system" style="--i:4">
+                <span class="tile-glyph">◉</span>
+                <span class="tile-label" data-i18n="tile.system.label">system</span>
+                <span class="tile-sub" data-i18n="tile.system.sub">toggles + sliders</span>
+            </button>
+        </nav>
+    </section>
+
+    <!-- generic per-view header (back pill + title) — shown inside every app view -->
+    <template id="tpl-app-header">
+        <header class="app-header">
+            <button class="back-pill" data-back data-i18n="back.home">&lt; home</button>
+            <h2 class="app-title"></h2>
+            <span class="app-status"></span>
+        </header>
+    </template>
+
+    <!-- CLAUDE CODE -->
+    <section id="view-claude" class="view view-app" data-title-key="view.claude" data-title="claude code">
+        <div class="app-mount"></div>
+        <div class="app-body claude-body">
+
+            <!-- Setup banner — shown when the alpine chroot isn't bootstrapped
+                 yet (post-wipe / fresh install). One-tap installer that
+                 streams progress lines from /data/local/tmp/bootstrap-alpine.sh
+                 et al. Hidden once chrootReady=true. -->
+            <div id="claude-setup-banner" class="claude-auth hidden">
+                <div class="claude-auth-card">
+                    <h3 class="claude-auth-title" data-i18n="claude.setup.title">set up claude code</h3>
+                    <p class="claude-auth-sub" data-i18n="claude.setup.sub">first run on this device — installs an alpine chroot + the claude binary. ~85 mb download.</p>
+                    <button id="claude-setup-start" type="button" class="primary-btn primary-btn-block"
+                            data-i18n="claude.setup.start">install (~85 mb)</button>
+                    <pre id="claude-setup-log" class="claude-setup-log hidden"></pre>
+                    <p id="claude-setup-status" class="claude-auth-status"></p>
+                </div>
+            </div>
+
+            <!-- Login banner — only visible when neither OAuth creds nor an
+                 API key are present. claude.auth.status drives this. -->
+            <div id="claude-auth-banner" class="claude-auth hidden">
+                <div class="claude-auth-card">
+                    <h3 class="claude-auth-title" data-i18n="claude.auth.title">log in to claude</h3>
+                    <p class="claude-auth-sub" data-i18n="claude.auth.sub">choose a sign-in method to use claude code on the r1.</p>
+
+                    <!-- Mode tabs: OAuth vs API key -->
+                    <div class="claude-auth-tabs">
+                        <button type="button" class="claude-auth-tab active" data-auth-tab="oauth"
+                                data-i18n="claude.auth.tab.oauth">sign in with claude.ai</button>
+                        <button type="button" class="claude-auth-tab" data-auth-tab="key"
+                                data-i18n="claude.auth.tab.key">use api key</button>
+                    </div>
+
+                    <!-- OAuth flow — three states: idle / awaiting code / done -->
+                    <div class="claude-auth-pane active" data-auth-pane="oauth">
+                        <p class="claude-auth-step" data-i18n="claude.auth.oauth.step1">step 1 — generate the sign-in url</p>
+                        <button id="claude-auth-start" type="button" class="primary-btn primary-btn-block"
+                                data-i18n="claude.auth.oauth.start">start sign-in</button>
+                        <div id="claude-auth-url-row" class="claude-auth-url-row hidden">
+                            <p class="claude-auth-step" data-i18n="claude.auth.oauth.step2">step 2 — open this url and approve</p>
+                            <a id="claude-auth-url" class="claude-auth-url" href="#" target="_blank" rel="noopener">—</a>
+                            <p class="claude-auth-step" data-i18n="claude.auth.oauth.step3">step 3 — paste the code from the redirect page</p>
+                            <input id="claude-auth-code" type="text" autocomplete="off" spellcheck="false"
+                                   data-i18n-placeholder="claude.auth.oauth.codePh"
+                                   placeholder="paste &lt;code&gt;#&lt;state&gt;">
+                            <button id="claude-auth-submit" type="button" class="primary-btn primary-btn-block"
+                                    data-i18n="claude.auth.oauth.submit">submit code</button>
+                        </div>
+                    </div>
+
+                    <!-- API-key flow -->
+                    <div class="claude-auth-pane" data-auth-pane="key">
+                        <p class="claude-auth-step" data-i18n="claude.auth.key.label">paste an anthropic api key</p>
+                        <input id="claude-auth-key" type="text" autocomplete="off" spellcheck="false"
+                               data-i18n-placeholder="claude.auth.key.ph"
+                               placeholder="sk-ant-...">
+                        <button id="claude-auth-key-submit" type="button" class="primary-btn primary-btn-block"
+                                data-i18n="claude.auth.key.submit">save key</button>
+                    </div>
+
+                    <!-- Generic status line (errors + progress) -->
+                    <p id="claude-auth-status" class="claude-auth-status"></p>
+
+                    <!-- Diagnostic + reset row: probe whether claude actually
+                         accepts the saved credentials, and wipe them if not. -->
+                    <div class="claude-auth-actions">
+                        <button id="claude-auth-verify" type="button" class="claude-auth-reset"
+                                data-i18n="claude.auth.verify">test login</button>
+                        <button id="claude-auth-reset" type="button" class="claude-auth-reset"
+                                data-i18n="claude.auth.reset">reset credentials</button>
+                    </div>
+                    <pre id="claude-auth-verify-log" class="claude-auth-verify-log hidden"></pre>
+                </div>
+            </div>
+
+            <div id="claude-messages" class="claude-messages"></div>
+            <form id="claude-form" class="claude-input-row" autocomplete="off">
+                <textarea id="claude-input" rows="2"
+                          data-i18n-placeholder="claude.placeholder"
+                          placeholder="ask claude code anything (Enter to send · Shift+Enter for newline)"
+                          spellcheck="true"></textarea>
+                <div class="claude-input-actions">
+                    <button id="claude-clear" type="button" class="ghost-btn" data-i18n="claude.clear">clear</button>
+                    <button id="claude-send" type="submit" class="primary-btn" data-i18n="claude.send">send</button>
+                </div>
+            </form>
+        </div>
+    </section>
+
+    <!-- TERMINAL -->
+    <section id="view-terminal" class="view view-app" data-title-key="view.terminal" data-title="terminal">
+        <div class="app-mount"></div>
+        <div class="app-body terminal-body">
+            <div id="term-banner" class="term-banner hidden" data-i18n="terminal.banner">
+                remote terminal is off. enable it on the r1 at settings → network → remote terminal.
+            </div>
+            <div class="term-meta">
+                <span class="term-cwd-label" data-i18n="terminal.cwd">cwd</span>
+                <span id="term-cwd" class="term-cwd">~</span>
+            </div>
+            <pre id="term-output" class="term-output"></pre>
+            <form id="term-form" class="term-input-row" autocomplete="off">
+                <span class="term-prompt">$</span>
+                <input id="term-input" type="text"
+                       data-i18n-placeholder="terminal.placeholder"
+                       placeholder="ls /sdcard"
+                       spellcheck="false" autocapitalize="off" autocorrect="off">
+                <button id="term-run" type="submit" class="primary-btn" data-i18n="terminal.run">run</button>
+                <button id="term-clear" type="button" class="ghost-btn" data-i18n="terminal.clr">clr</button>
+            </form>
+        </div>
+    </section>
+
+    <!-- SMS -->
+    <section id="view-sms" class="view view-app" data-title-key="view.sms" data-title="messages">
+        <div class="app-mount"></div>
+        <div class="app-body sms-body">
+            <aside id="sms-list" class="sms-list">
+                <button id="sms-refresh" class="ghost-btn" data-i18n="sms.refresh">refresh</button>
+                <ul id="sms-threads" class="sms-threads"></ul>
             </aside>
-            <article id="sms-thread">
-                <header id="sms-thread-header">select a conversation</header>
-                <div id="sms-thread-body"></div>
+            <article id="sms-thread" class="sms-thread">
+                <header id="sms-thread-header" class="sms-thread-header" data-i18n="sms.threadHeader">select a conversation</header>
+                <div id="sms-thread-body" class="sms-thread-body"></div>
             </article>
         </div>
     </section>
 
-    <section id="tab-send" class="tab">
-        <label>
-            target
-            <select id="send-target">
-                <option value="openai_key">OpenAI / Whisper key</option>
-                <option value="openclaw_chat">OpenClaw chat (live session)</option>
-            </select>
-        </label>
-        <textarea id="send-text" rows="6" placeholder="paste or type text…"></textarea>
-        <div id="send-hint" class="hint"></div>
-        <button id="send-button" class="primary">send to R1</button>
+    <!-- SEND TEXT -->
+    <section id="view-send" class="view view-app" data-title-key="view.send" data-title="send text">
+        <div class="app-mount"></div>
+        <div class="app-body send-body">
+            <label class="field">
+                <span class="field-label" data-i18n="send.target">target</span>
+                <select id="send-target">
+                    <option value="voice_key" data-i18n="send.targetVoice">elevenlabs voice key</option>
+                    <option value="openclaw_chat" data-i18n="send.targetChat">openclaw chat (live session)</option>
+                </select>
+            </label>
+            <label class="field">
+                <span class="field-label" data-i18n="send.payload">payload</span>
+                <textarea id="send-text" rows="6"
+                          data-i18n-placeholder="send.placeholder"
+                          placeholder="paste or type text…"></textarea>
+            </label>
+            <div id="send-hint" class="hint"></div>
+            <button id="send-button" class="primary-btn primary-btn-block" data-i18n="send.button">send to r1</button>
+        </div>
     </section>
 
-    <section id="tab-system" class="tab">
-        <div class="card">
-            <h3>device</h3>
-            <div class="row"><span>battery</span><span id="sys-battery">—</span></div>
-            <div class="row"><span>charging</span><span id="sys-charging">—</span></div>
-            <div class="row"><span>operator</span><span id="sys-operator">—</span></div>
-            <div class="row"><span>radio</span><span id="sys-radio">—</span></div>
-            <div class="row"><span>signal</span><span id="sys-signal">—</span></div>
-            <div class="row"><span>panel ip</span><span id="sys-ip">—</span></div>
-        </div>
-        <div class="card">
-            <h3>toggles</h3>
-            <div class="toggle"><span>wifi</span><input type="checkbox" id="toggle-wifi"></div>
-            <div class="toggle"><span>cellular</span><input type="checkbox" id="toggle-cellular"></div>
-            <div class="toggle"><span>bluetooth</span><input type="checkbox" id="toggle-bt"></div>
-            <div class="toggle"><span>hotspot</span><input type="checkbox" id="toggle-hotspot"></div>
-        </div>
-        <div class="card">
-            <h3>sliders</h3>
-            <label>brightness <input type="range" id="brightness" min="1" max="255"></label>
-            <label>volume <input type="range" id="volume" min="0" max="15"></label>
-        </div>
-        <div class="card">
-            <h3>openclaw</h3>
-            <div class="row"><span>status</span><span id="oc-status">—</span></div>
-            <div class="row"><span>openai key</span><span id="oc-key">—</span></div>
+    <!-- SYSTEM -->
+    <section id="view-system" class="view view-app" data-title-key="view.system" data-title="system">
+        <div class="app-mount"></div>
+        <div class="app-body system-body">
+            <div class="card">
+                <h3 class="card-title" data-i18n="system.device">device</h3>
+                <div class="card-row"><span data-i18n="system.battery">battery</span><span id="sys-battery">—</span></div>
+                <div class="card-row"><span data-i18n="system.charging">charging</span><span id="sys-charging">—</span></div>
+                <div class="card-row"><span data-i18n="system.operator">operator</span><span id="sys-operator">—</span></div>
+                <div class="card-row"><span data-i18n="system.radio">radio</span><span id="sys-radio">—</span></div>
+                <div class="card-row"><span data-i18n="system.signal">signal</span><span id="sys-signal">—</span></div>
+                <div class="card-row"><span data-i18n="system.panelIp">panel ip</span><span id="sys-ip">—</span></div>
+            </div>
+            <div class="card">
+                <h3 class="card-title" data-i18n="system.toggles">toggles</h3>
+                <div class="toggle-row">
+                    <span data-i18n="system.wifi">wifi</span>
+                    <label class="switch"><input type="checkbox" id="toggle-wifi"><span class="slider"></span></label>
+                </div>
+                <div class="toggle-row">
+                    <span data-i18n="system.cellular">cellular</span>
+                    <label class="switch"><input type="checkbox" id="toggle-cellular"><span class="slider"></span></label>
+                </div>
+                <div class="toggle-row">
+                    <span data-i18n="system.bluetooth">bluetooth</span>
+                    <label class="switch"><input type="checkbox" id="toggle-bt"><span class="slider"></span></label>
+                </div>
+                <div class="toggle-row">
+                    <span data-i18n="system.hotspot">hotspot</span>
+                    <label class="switch"><input type="checkbox" id="toggle-hotspot"><span class="slider"></span></label>
+                </div>
+            </div>
+            <div class="card">
+                <h3 class="card-title" data-i18n="system.sliders">sliders</h3>
+                <label class="slider-field">
+                    <span data-i18n="system.brightness">brightness</span>
+                    <input type="range" id="brightness" min="1" max="255">
+                </label>
+                <label class="slider-field">
+                    <span data-i18n="system.volume">volume</span>
+                    <input type="range" id="volume" min="0" max="15">
+                </label>
+            </div>
+            <div class="card">
+                <h3 class="card-title" data-i18n="system.openclaw">openclaw</h3>
+                <div class="card-row"><span data-i18n="system.status">status</span><span id="oc-status">—</span></div>
+                <div class="card-row"><span data-i18n="system.voiceKey">voice key</span><span id="oc-key">—</span></div>
+            </div>
         </div>
     </section>
+
 </main>
 
 <script src="/app.js"></script>

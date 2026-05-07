@@ -1,7 +1,16 @@
 package com.r1.launcher.ui
 
+import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -35,15 +44,25 @@ internal const val ANIM_FOCUS_MS = 140
 internal const val FOCUS_SCALE = 1.04f
 internal const val UNFOCUS_ALPHA = 0.55f
 
+internal val EnterEasing = LinearOutSlowInEasing
+internal val ExitEasing = FastOutLinearInEasing
+
 /**
  * Applies the focus animation (scale + alpha) used by apps/store rows.
  * Kept as a Modifier so it composes cleanly with other modifiers.
+ *
+ * Scale uses a low-stiffness spring for a subtle bounce on snap-to-focus;
+ * alpha stays on a tween so unfocused fade is monotonic (no over/undershoot
+ * past 0..1, which would clip).
  */
 @Composable
 fun Modifier.focusAnim(focused: Boolean): Modifier {
     val scale by animateFloatAsState(
         targetValue = if (focused) FOCUS_SCALE else 1f,
-        animationSpec = tween(ANIM_FOCUS_MS, easing = FastOutSlowInEasing),
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessLow,
+        ),
         label = "focusScale",
     )
     val alpha by animateFloatAsState(
@@ -55,6 +74,33 @@ fun Modifier.focusAnim(focused: Boolean): Modifier {
         scaleX = scale
         scaleY = scale
         this.alpha = alpha
+    }
+}
+
+/**
+ * Subtle infinite "alive" pulse — 1.00 ↔ 1.02 scale, 1500ms reverse.
+ * Used on small accent chips (LTE pill, recording indicator) to avoid
+ * the dead-static feel without competing with focus animations.
+ *
+ * Disabled when [active] is false (returns identity modifier — important
+ * because rememberInfiniteTransition keeps animating even off-screen).
+ */
+@Composable
+fun Modifier.pulse(active: Boolean = true, peakScale: Float = 1.06f): Modifier {
+    if (!active) return this
+    val transition = rememberInfiniteTransition(label = "pulse")
+    val scale by transition.animateFloat(
+        initialValue = 1f,
+        targetValue = peakScale,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1500, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "pulseScale",
+    )
+    return this.graphicsLayer {
+        scaleX = scale
+        scaleY = scale
     }
 }
 

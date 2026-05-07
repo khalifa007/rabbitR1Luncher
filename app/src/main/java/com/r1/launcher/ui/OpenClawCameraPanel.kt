@@ -52,6 +52,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -59,6 +60,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
+import com.r1.launcher.R
 
 @Composable
 fun OpenClawCameraPanel(
@@ -151,17 +153,31 @@ fun OpenClawCameraPanel(
                     .fillMaxWidth()
                     .padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 4.dp),
             ) {
-                BackPill(label = "chat", onClick = onBack)
+                BackPill(label = stringResource(R.string.openclaw_back_chat), onClick = onBack)
                 Spacer(Modifier.width(10.dp))
                 Text(
-                    text = if (capturedBitmap == null) "snap ask" else "review ask",
+                    text = stringResource(
+                        if (capturedBitmap == null) R.string.openclaw_camera_snap_ask
+                        else R.string.openclaw_camera_review_ask
+                    ),
                     style = type.appCard.copy(fontSize = 20.sp),
                     color = accent,
                 )
                 Spacer(Modifier.weight(1f))
                 if (capturedBitmap == null) {
+                    val angle = state.openClawCameraMotor
+                    val motorTxt = stringResource(
+                        when {
+                            angle <= 15 -> R.string.openclaw_camera_motor_face
+                            angle in 75..105 -> R.string.openclaw_camera_motor_idle
+                            angle >= 165 -> R.string.openclaw_camera_motor_back
+                            angle < 90 -> R.string.openclaw_camera_motor_to_face
+                            else -> R.string.openclaw_camera_motor_to_back
+                        },
+                        angle,
+                    )
                     Text(
-                        text = motorAngleLabel(state.openClawCameraMotor),
+                        text = motorTxt,
                         style = type.appCard.copy(fontSize = 14.sp),
                         color = Color.White.copy(alpha = 0.85f),
                         modifier = Modifier
@@ -208,8 +224,9 @@ fun OpenClawCameraPanel(
                         .padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    val promptHint = stringResource(R.string.openclaw_camera_prompt_hint)
                     Text(
-                        text = prompt.ifBlank { "what should I ask?" } + if (showKeyboard) "_" else "",
+                        text = prompt.ifBlank { promptHint } + if (showKeyboard) "_" else "",
                         style = type.appCard.copy(fontSize = 18.sp),
                         color = if (prompt.isBlank()) Color.DarkGray else Color.White,
                         maxLines = 2,
@@ -222,26 +239,35 @@ fun OpenClawCameraPanel(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    val permNeeded = stringResource(R.string.openclaw_camera_perm_needed)
+                    val defaultPrompt = stringResource(R.string.openclaw_camera_default_prompt)
                     if (capturedBitmap == null) {
-                        CameraAction(label = "snap", accent = accent, enabled = !state.openClawCameraBusy) {
+                        CameraAction(label = stringResource(R.string.openclaw_camera_snap), accent = accent, enabled = !state.openClawCameraBusy) {
                             val hasPermission = ContextCompat.checkSelfPermission(
                                 context,
                                 Manifest.permission.CAMERA,
                             ) == PackageManager.PERMISSION_GRANTED
                             if (!hasPermission) {
-                                localError = "camera permission needed"
+                                localError = permNeeded
                             } else {
                                 localError = null
                                 cameraView?.capture()
                             }
                         }
                     } else {
-                        CameraAction(label = "retake", accent = Color.White, enabled = !state.openClawCameraBusy) {
+                        CameraAction(label = stringResource(R.string.openclaw_camera_retake), accent = Color.White, enabled = !state.openClawCameraBusy) {
                             localError = null
                             onRetake()
                         }
-                        CameraAction(label = if (state.openClawCameraBusy) "sending" else "ask", accent = accent, enabled = !state.openClawCameraBusy) {
-                            onSend(prompt.ifBlank { "what do you see?" })
+                        CameraAction(
+                            label = stringResource(
+                                if (state.openClawCameraBusy) R.string.openclaw_camera_sending
+                                else R.string.openclaw_camera_ask
+                            ),
+                            accent = accent,
+                            enabled = !state.openClawCameraBusy,
+                        ) {
+                            onSend(prompt.ifBlank { defaultPrompt })
                         }
                     }
                 }
@@ -295,14 +321,6 @@ private fun CameraAction(
             color = if (enabled) accent else Color.DarkGray,
         )
     }
-}
-
-private fun motorAngleLabel(angle: Int): String = when {
-    angle <= 15 -> "face $angle°"
-    angle in 75..105 -> "idle $angle°"
-    angle >= 165 -> "back $angle°"
-    angle < 90 -> "→face $angle°"
-    else -> "→back $angle°"
 }
 
 private class R1StillCameraView(

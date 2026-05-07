@@ -20,12 +20,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
+import com.r1.launcher.R
 import com.r1.launcher.WifiShareEditTarget
 
 @Composable
@@ -43,8 +45,12 @@ fun WifiShareEditPanel(
     ) {
         val type = LocalR1Type.current
         val isPass = state.wifiShareEditTarget == WifiShareEditTarget.PASSWORD
-        val header = if (isPass) "Hotspot password:" else "Hotspot name:"
-        val placeholder = if (isPass) "Enter password..." else "Enter name..."
+        val header = stringResource(
+            if (isPass) R.string.wifi_share_edit_password_label else R.string.wifi_share_edit_name_label
+        )
+        val placeholder = stringResource(
+            if (isPass) R.string.wifi_share_edit_password_hint else R.string.wifi_share_edit_name_hint
+        )
         val display = state.wifiShareEditInput.ifEmpty { placeholder }
         val canSubmit = if (isPass) state.wifiShareEditInput.length >= 8 else state.wifiShareEditInput.isNotEmpty()
 
@@ -57,7 +63,7 @@ fun WifiShareEditPanel(
                 Spacer(modifier = Modifier.height(24.dp))
 
                 Text(
-                    text = "< back",
+                    text = stringResource(R.string.back_short),
                     color = Color.White,
                     fontSize = 20.sp,
                     fontFamily = type.appCard.fontFamily,
@@ -85,7 +91,7 @@ fun WifiShareEditPanel(
                 )
 
                 Text(
-                    text = "[ SAVE ]",
+                    text = stringResource(R.string.wifi_share_edit_save),
                     color = if (canSubmit) Color.Black else Color.DarkGray,
                     fontSize = 22.sp,
                     fontFamily = type.appCard.fontFamily,

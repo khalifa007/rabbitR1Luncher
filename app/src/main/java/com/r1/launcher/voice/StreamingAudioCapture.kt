@@ -1,4 +1,4 @@
-package com.r1.launcher.openclaw
+package com.r1.launcher.voice
 
 import android.media.AudioFormat
 import android.media.AudioRecord
@@ -7,23 +7,27 @@ import android.os.Handler
 import android.os.Looper
 
 /**
- * Mic → WAV capture for the openclaw chat panel. Records 16 kHz mono PCM_16BIT
- * into memory (capped at 30 s ≈ 960 KB), wraps it in a 44-byte WAV header on
- * stop, returns the bytes via callback. Transcription is done by the OpenAI
- * Whisper API (see WhisperClient) — no on-device STT.
+ * Mic → live PCM frame stream. Same audio format as the legacy AudioCapture
+ * (16 kHz mono PCM_16BIT, VOICE_RECOGNITION source) — but instead of buffering
+ * the whole take into a final WAV, this fires `onPcm(chunk)` every read so the
+ * caller can stream it (e.g. into ElevenLabs Realtime STT WebSocket).
+ *
+ * Hard cap of 60 s to avoid runaway sessions if the user holds the side button
+ * forever.
  */
-class AudioCapture {
+class StreamingAudioCapture {
 
     interface Callback {
         fun onLevel(levelPct: Int) {}
-        fun onDone(wavBytes: ByteArray, durationMs: Int, peakPct: Int)
-        fun onError(msg: String)
+        /** Called on a background thread for every PCM chunk read from the mic. */
+        fun onPcm(chunk: ByteArray) {}
+        fun onError(msg: String) {}
+        fun onStopped(durationMs: Int, peakPct: Int) {}
     }
 
     private val main = Handler(Looper.getMainLooper())
     private val sampleRate = 16_000
-    private val maxSeconds = 30
-    private val maxBytes = sampleRate * 2 * maxSeconds
+    private val maxSeconds = 60
 
     @Volatile private var feeder: Thread? = null
     @Volatile private var stopRequested = false
@@ -41,9 +45,7 @@ class AudioCapture {
         }.also { feeder = it }.start()
     }
 
-    fun stop() {
-        stopRequested = true
-    }
+    fun stop() { stopRequested = true }
 
     fun close() {
         stopRequested = true
@@ -71,19 +73,24 @@ class AudioCapture {
             feeder = null
             return
         }
-        val sink = java.io.ByteArrayOutputStream(maxBytes)
+        val maxBytes = sampleRate * 2 * maxSeconds
+        var totalBytes = 0
         var peak = 0
         try {
             rec.startRecording()
             val buf = ByteArray(bufBytes)
             val started = System.currentTimeMillis()
             var lastLevelAt = 0L
-            while (!stopRequested && sink.size() < maxBytes) {
+            while (!stopRequested && totalBytes < maxBytes) {
                 val n = rec.read(buf, 0, buf.size)
                 if (n <= 0) continue
-                val cap = minOf(n, maxBytes - sink.size())
-                sink.write(buf, 0, cap)
-                val p = chunkPeak(buf, cap)
+                // Copy because the inner buffer is reused on next read; we
+                // emit to the callback which may be processing async.
+                val chunk = ByteArray(n)
+                System.arraycopy(buf, 0, chunk, 0, n)
+                cb.onPcm(chunk)
+                totalBytes += n
+                val p = chunkPeak(buf, n)
                 if (p > peak) peak = p
                 val now = System.currentTimeMillis()
                 if (now - lastLevelAt >= 80L) {
@@ -93,12 +100,8 @@ class AudioCapture {
                 }
             }
             val durMs = (System.currentTimeMillis() - started).toInt()
-            val pcm = sink.toByteArray()
-            val wav = ByteArray(44 + pcm.size)
-            buildWavHeader(pcm.size).copyInto(wav, 0)
-            pcm.copyInto(wav, 44)
             val peakPct = (peak * 100 / 32767).coerceIn(0, 100)
-            main.post { cb.onDone(wav, durMs, peakPct) }
+            main.post { cb.onStopped(durMs, peakPct) }
         } finally {
             runCatching { rec.stop() }
             runCatching { rec.release() }
@@ -118,37 +121,5 @@ class AudioCapture {
             i += 2
         }
         return p
-    }
-
-    private fun buildWavHeader(pcmBytes: Int): ByteArray {
-        val byteRate = sampleRate * 2
-        val totalSize = 36 + pcmBytes
-        val h = ByteArray(44)
-        "RIFF".toByteArray().copyInto(h, 0)
-        writeIntLE(h, 4, totalSize)
-        "WAVE".toByteArray().copyInto(h, 8)
-        "fmt ".toByteArray().copyInto(h, 12)
-        writeIntLE(h, 16, 16)
-        writeShortLE(h, 20, 1)
-        writeShortLE(h, 22, 1)
-        writeIntLE(h, 24, sampleRate)
-        writeIntLE(h, 28, byteRate)
-        writeShortLE(h, 32, 2)
-        writeShortLE(h, 34, 16)
-        "data".toByteArray().copyInto(h, 36)
-        writeIntLE(h, 40, pcmBytes)
-        return h
-    }
-
-    private fun writeIntLE(b: ByteArray, off: Int, v: Int) {
-        b[off]     = (v and 0xFF).toByte()
-        b[off + 1] = ((v shr 8) and 0xFF).toByte()
-        b[off + 2] = ((v shr 16) and 0xFF).toByte()
-        b[off + 3] = ((v shr 24) and 0xFF).toByte()
-    }
-
-    private fun writeShortLE(b: ByteArray, off: Int, v: Int) {
-        b[off]     = (v and 0xFF).toByte()
-        b[off + 1] = ((v shr 8) and 0xFF).toByte()
     }
 }

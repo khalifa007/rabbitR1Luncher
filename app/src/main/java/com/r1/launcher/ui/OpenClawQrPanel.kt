@@ -29,6 +29,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -42,6 +43,7 @@ import com.journeyapps.barcodescanner.DecoratedBarcodeView
 import com.journeyapps.barcodescanner.DefaultDecoderFactory
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
+import com.r1.launcher.R
 
 @Composable
 fun OpenClawQrPanel(
@@ -104,10 +106,10 @@ fun OpenClawQrPanel(
                     .fillMaxWidth()
                     .padding(horizontal = 14.dp, vertical = 10.dp),
             ) {
-                BackPill(label = "home", onClick = onBack)
+                BackPill(label = stringResource(R.string.openclaw_qr_back_home), onClick = onBack)
                 Spacer(Modifier.width(10.dp))
                 Text(
-                    text = "scan gate qr",
+                    text = stringResource(R.string.openclaw_qr_title_gateway),
                     style = type.appCard.copy(fontSize = 18.sp),
                     color = colors.accent,
                 )
@@ -141,7 +143,7 @@ fun OpenClawQrPanel(
                         }
                     }
                     Text(
-                        text = "show your gate setup-code qr",
+                        text = stringResource(R.string.openclaw_qr_title_openai),
                         style = type.appCard,
                         color = Color.White,
                         textAlign = TextAlign.Center,

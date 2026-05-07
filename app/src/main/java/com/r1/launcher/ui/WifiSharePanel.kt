@@ -22,11 +22,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
+import com.r1.launcher.R
 
 @Composable
 fun WifiSharePanel(
@@ -44,26 +46,26 @@ fun WifiSharePanel(
         val ssid = state.wifiShareSsid.ifBlank { "—" }
         val passDisplay = state.wifiSharePassword.ifEmpty { "—" }
         val timerLabel = when (state.wifiShareTimerMinutes) {
-            0 -> "off"
-            15 -> "15 min"
-            30 -> "30 min"
-            60 -> "1 hour"
-            120 -> "2 hours"
+            0 -> stringResource(R.string.wifi_share_off)
+            15 -> stringResource(R.string.wifi_share_15min)
+            30 -> stringResource(R.string.wifi_share_30min)
+            60 -> stringResource(R.string.wifi_share_1hour)
+            120 -> stringResource(R.string.wifi_share_2hours)
             else -> "${state.wifiShareTimerMinutes} min"
         }
         val enableSubtitle = when {
             state.wifiShareEnabled && state.wifiShareTimerMinutes > 0 ->
                 formatRemaining(state.wifiShareTimerRemainingSec) + " left"
-            state.wifiShareEnabled -> "on"
+            state.wifiShareEnabled -> stringResource(R.string.wifi_share_on)
             else -> ""
         }
         val items = listOf(
-            ShareRow.Plain("< back"),
-            ShareRow.Toggle("enable", state.wifiShareEnabled, enableSubtitle),
-            ShareRow.Plain("name", ssid),
-            ShareRow.Plain("password", passDisplay),
-            ShareRow.Plain("connected", "${state.wifiShareConnectedClients.size}"),
-            ShareRow.Plain("auto-off", timerLabel),
+            ShareRow.Plain(stringResource(R.string.back_short)),
+            ShareRow.Toggle(stringResource(R.string.wifi_share_row_enable), state.wifiShareEnabled, enableSubtitle),
+            ShareRow.Plain(stringResource(R.string.wifi_share_row_name), ssid),
+            ShareRow.Plain(stringResource(R.string.wifi_share_row_password), passDisplay),
+            ShareRow.Plain(stringResource(R.string.wifi_share_row_connected), "${state.wifiShareConnectedClients.size}"),
+            ShareRow.Plain(stringResource(R.string.wifi_share_row_autooff), timerLabel),
         )
 
         val listState = rememberLazyListState()
@@ -127,7 +129,7 @@ fun WifiSharePanel(
                                 .padding(horizontal = 12.dp, vertical = 8.dp),
                         ) {
                             Text(
-                                text = "panel",
+                                text = stringResource(R.string.wifi_share_panel_label),
                                 color = Color.Gray,
                                 fontSize = 12.sp,
                                 fontFamily = type.appCard.fontFamily,

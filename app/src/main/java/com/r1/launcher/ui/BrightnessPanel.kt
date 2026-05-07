@@ -21,12 +21,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
+import com.r1.launcher.R
 
 private val HIGHLIGHT_BG = Color(0xFFFF4500)
 private val TRACK_OFF = Color(0xFF333333)
@@ -42,8 +44,8 @@ fun BrightnessPanel(
         exit = fadeOut(tween(ANIM_CLOSE_MS)),
     ) {
         LevelCard(
-            title = "brightness",
-            hint = "wheel ↑↓   press OK",
+            title = stringResource(R.string.panel_brightness_title),
+            hint = stringResource(R.string.panel_volume_hint),
             fraction = state.brightnessLevel.toFloat() / 255f,
             percent = (state.brightnessLevel * 100f / 255f).toInt(),
             onScrimClick = onScrimClick,

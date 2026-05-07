@@ -18,9 +18,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
+import com.r1.launcher.R
 
 @Composable
 fun WifiScanPanel(
@@ -35,7 +37,7 @@ fun WifiScanPanel(
             slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
     ) {
         val items = mutableListOf<String>()
-        items.add("< back")
+        items.add(stringResource(R.string.back_short))
         items.addAll(state.wifiScanResults)
 
         val listState = rememberLazyListState()

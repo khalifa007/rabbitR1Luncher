@@ -47,12 +47,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
+import com.r1.launcher.R
 import com.r1.launcher.openclaw.ChatMessage
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
@@ -69,14 +71,11 @@ fun OpenClawChatPanel(
     state: LauncherState,
     onBack: () -> Unit,
     onSend: (String) -> Unit,
-    onPasteKey: () -> Unit = {},
-    onClearKey: () -> Unit = {},
     onOpenSettings: () -> Unit = {},
     onSwitchSession: (String) -> Unit = {},
     onOpenSessions: () -> Unit = {},
     onOpenCamera: () -> Unit = {},
-    onOpenTalk: () -> Unit = {},
-    onOpenCanvas: () -> Unit = {},
+    onCopyCode: (String) -> Unit = {},
 ) {
     AnimatedVisibility(
         visible = state.panel == Panel.OPENCLAW_CHAT,
@@ -99,21 +98,21 @@ fun OpenClawChatPanel(
                         .fillMaxWidth()
                         .padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 4.dp),
                 ) {
-                    BackPill(label = "home", onClick = onBack)
+                    BackPill(label = stringResource(R.string.openclaw_back_home), onClick = onBack)
                     Spacer(Modifier.weight(1f))
                     StatusDot(state.chatStatus)
                     when {
                         state.chatRecording -> {
                             Spacer(Modifier.width(6.dp))
-                            Text("rec", style = type.appCard, color = Color(0xFFFF4500))
+                            Text(stringResource(R.string.terminal_status_rec), style = type.appCard, color = Color(0xFFFF4500))
                         }
                         state.chatTranscribing -> {
                             Spacer(Modifier.width(6.dp))
-                            Text("stt", style = type.appCard, color = Color(0xFFFFC107))
+                            Text(stringResource(R.string.terminal_status_stt), style = type.appCard, color = Color(0xFFFFC107))
                         }
                         state.chatBusy -> {
                             Spacer(Modifier.width(6.dp))
-                            Text("...", style = type.appCard, color = Color.White)
+                            Text(stringResource(R.string.common_thinking_dots), style = type.appCard, color = Color.White)
                         }
                     }
                     Spacer(Modifier.width(8.dp))
@@ -137,6 +136,7 @@ fun OpenClawChatPanel(
                     }
                 }
 
+                val writingText = stringResource(R.string.openclaw_writing)
                 LazyColumn(
                     state = listState,
                     reverseLayout = true,
@@ -153,17 +153,35 @@ fun OpenClawChatPanel(
                             Bubble(
                                 ChatMessage(
                                     role = "assistant",
-                                    text = "writing",
+                                    text = writingText,
                                     streaming = true,
                                 ),
                                 fontSize = state.chatFontSize,
                             )
                         }
                     }
-                    // Live assistant streaming preview — sits at item 0 so with
-                    // reverseLayout=true it renders at the bottom of the chat,
-                    // beneath the most recent persisted bubble. Cleared when the
-                    // run reaches a terminal state and chat.history refreshes.
+                    // Pending user bubble — live STT partial transcript. Gated on
+                    // chatPartialText alone (not chatRecording) so the bubble
+                    // persists across the round-trip between button release and
+                    // committed_transcript landing — otherwise it'd vanish for
+                    // ~200-500ms before the orange bubble appears, which reads as
+                    // a flicker. handleCommittedTranscript clears the partial
+                    // and adds the orange bubble in the same frame.
+                    if (state.chatPartialText.isNotBlank()) {
+                        item("partial") {
+                            Bubble(
+                                ChatMessage(
+                                    role = "user",
+                                    text = state.chatPartialText,
+                                ),
+                                fontSize = state.chatFontSize,
+                                pending = true,
+                            )
+                        }
+                    }
+                    // Live assistant streaming preview — sits beneath the partial
+                    // (item index 1) so the user's pending input always reads as
+                    // the most recent line.
                     if (state.chatStreamingText.isNotBlank()) {
                         item("streaming") {
                             Bubble(
@@ -183,26 +201,8 @@ fun OpenClawChatPanel(
                     } else {
                         val reversed = state.chatMessages.asReversed()
                         itemsIndexed(reversed) { _, msg ->
-                            Bubble(msg, fontSize = state.chatFontSize)
+                            Bubble(msg, fontSize = state.chatFontSize, onCopyCode = onCopyCode)
                         }
-                    }
-                }
-
-                // live transcript (only while recording)
-                if (state.chatRecording && state.chatPartialText.isNotBlank()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 4.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = state.chatPartialText,
-                            style = type.appCard,
-                            color = Color(0xFFFF4500),
-                            textAlign = TextAlign.Center,
-                            maxLines = 2,
-                        )
                     }
                 }
 
@@ -221,15 +221,16 @@ fun OpenClawChatPanel(
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        val openClawHint = stringResource(R.string.openclaw_input_hint)
                         Text(
-                            text = if (inputText.isEmpty()) "type here..." else inputText + if (showKeyboard) "_" else "",
+                            text = if (inputText.isEmpty()) openClawHint else inputText + if (showKeyboard) "_" else "",
                             style = type.appCard,
                             color = if (inputText.isEmpty()) Color.Gray else Color.White,
                             modifier = Modifier.weight(1f)
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            text = "send",
+                            text = stringResource(R.string.common_send),
                             style = type.appCard,
                             color = Color(0xFFFF4500),
                             modifier = Modifier.clickable {
@@ -260,8 +261,6 @@ fun OpenClawChatPanel(
             ChatDropdownMenu(
                 expanded = menuOpen,
                 onDismiss = { menuOpen = false },
-                onTalk = { menuOpen = false; onOpenTalk() },
-                onCanvas = { menuOpen = false; onOpenCanvas() },
                 onCamera = { menuOpen = false; onOpenCamera() },
                 onSessions = { menuOpen = false; onOpenSessions() },
                 onSettings = { menuOpen = false; onOpenSettings() },
@@ -292,12 +291,15 @@ private fun EmptyHint(status: String) {
         modifier = Modifier.fillMaxWidth().padding(top = 32.dp),
         contentAlignment = Alignment.Center,
     ) {
+        val connectingText = stringResource(R.string.openclaw_status_connecting)
+        val liveText = stringResource(R.string.openclaw_empty_hint)
+        val idleText = stringResource(R.string.openclaw_not_approved)
         Text(
             text = when {
                 status.startsWith("error") -> status
-                status == "connecting" -> "connecting to gate…"
-                status == "live" -> "no messages yet — press wheel to record"
-                status == "idle" -> "device not approved yet —\nrun: openclaw devices approve <id>\non your gate, then reopen"
+                status == "connecting" -> connectingText
+                status == "live" -> liveText
+                status == "idle" -> idleText
                 else -> status
             },
             style = type.appCard.copy(textAlign = TextAlign.Center),
@@ -335,8 +337,6 @@ private fun MenuDot(onClick: () -> Unit) {
 private fun ChatDropdownMenu(
     expanded: Boolean,
     onDismiss: () -> Unit,
-    onTalk: () -> Unit,
-    onCanvas: () -> Unit,
     onCamera: () -> Unit,
     onSessions: () -> Unit,
     onSettings: () -> Unit,
@@ -370,11 +370,9 @@ private fun ChatDropdownMenu(
                     .border(1.dp, Color(0xFFFF4500).copy(alpha = 0.4f), RoundedCornerShape(10.dp))
                     .padding(vertical = 4.dp),
             ) {
-                MenuRow(label = "talk", onClick = onTalk)
-                MenuRow(label = "canvas", onClick = onCanvas)
-                MenuRow(label = "cam", onClick = onCamera)
-                MenuRow(label = "sessions", onClick = onSessions)
-                MenuRow(label = "settings", onClick = onSettings)
+                MenuRow(label = stringResource(R.string.openclaw_btn_cam), onClick = onCamera)
+                MenuRow(label = stringResource(R.string.openclaw_btn_sessions), onClick = onSessions)
+                MenuRow(label = stringResource(R.string.openclaw_btn_settings), onClick = onSettings)
             }
         }
     }
@@ -397,12 +395,39 @@ private fun MenuRow(label: String, onClick: () -> Unit) {
     }
 }
 
+private val CODE_BLOCK_RE = Regex("```([\\s\\S]*?)```")
+
+/** Pull every fenced code block's body out of a markdown string, stripping
+ *  an optional bare language tag on the first line so users get just the
+ *  code (no stray ```python at the top). Returns empty list for plain prose. */
+private fun extractCodeBlocks(text: String): List<String> =
+    CODE_BLOCK_RE.findAll(text).map { m ->
+        val inner = m.groupValues[1].trim('\n')
+        val nl = inner.indexOf('\n')
+        if (nl > 0 && inner.substring(0, nl).all {
+                it.isLetterOrDigit() || it == '+' || it == '-' || it == '_'
+            }) inner.substring(nl + 1).trimEnd('\n')
+        else inner
+    }.toList()
+
 @Composable
-private fun Bubble(msg: ChatMessage, fontSize: Int = 14) {
+private fun Bubble(
+    msg: ChatMessage,
+    fontSize: Int = 14,
+    onCopyCode: (String) -> Unit = {},
+    pending: Boolean = false,
+) {
     val colors = LocalR1Colors.current
     val type = LocalR1Type.current
     val isUser = msg.role == "user"
-    val bg = if (isUser) Color(0xFFFF4500) else colors.tile
+    // pending = STT partial transcript awaiting commit. Render as a user-side
+    // bubble in muted gray so it's visually distinct from the orange committed
+    // bubble that lands when the transcript finalizes.
+    val bg = when {
+        pending -> Color(0xFF555555)
+        isUser -> Color(0xFFFF4500)
+        else -> colors.tile
+    }
     val align = if (isUser) Alignment.End else Alignment.Start
     // Chat style driven by user-adjustable font size
     val chatStyle = type.appCard.copy(fontSize = fontSize.sp)
@@ -423,17 +448,18 @@ private fun Bubble(msg: ChatMessage, fontSize: Int = 14) {
                     msg.hasImage -> AttachedImageLabel(isUser = isUser)
                 }
                 Row(verticalAlignment = Alignment.Bottom) {
+                val streamingPlaceholder = stringResource(R.string.common_ellipsis)
                 if (isUser) {
                     Text(
-                        text = msg.text.ifEmpty { if (msg.streaming) "…" else "" },
+                        text = msg.text.ifEmpty { if (msg.streaming) streamingPlaceholder else "" },
                         style = chatStyle,
-                        color = Color.Black,
+                        color = if (pending) Color.White else Color.Black,
                     )
                 } else {
                     // Convert inline `code` → **code** so the library renders it
                     // as bold (Jersey 15) instead of monospace CODE_SPAN.
                     // Fenced code blocks are also stripped to plain text.
-                    val rawContent = msg.text.ifEmpty { if (msg.streaming) "…" else "" }
+                    val rawContent = msg.text.ifEmpty { if (msg.streaming) streamingPlaceholder else "" }
                     val cleaned = rawContent
                         .replace(Regex("```[\\s\\S]*?```")) { m ->
                             val inner = m.value.removeSurrounding("```")
@@ -447,6 +473,11 @@ private fun Bubble(msg: ChatMessage, fontSize: Int = 14) {
                             else inner.trim('\n')
                         }
                         .replace(Regex("`([^`\n]+)`"), "**$1**") // inline code → bold
+                        // Strip blockquote markers: the markdown library's
+                        // MarkdownBlockQuote calls a drawLine value-class
+                        // signature that doesn't exist in our pinned compose
+                        // and hard-crashes the launcher. Reduce to plain text.
+                        .replace(Regex("(?m)^[ \t]*>[ \t]?"), "")
                     Markdown(
                         content = cleaned,
                         colors = markdownColor(
@@ -496,6 +527,34 @@ private fun Bubble(msg: ChatMessage, fontSize: Int = 14) {
                         StreamingCaret()
                     }
                 }
+                // Copy-code affordance: assistant replies that contain fenced
+                // code blocks get a tappable pill that copies the code (all
+                // blocks joined by blank lines) to the system clipboard. Pill
+                // hidden during streaming so it doesn't flicker on partial
+                // ``` openings.
+                if (!isUser && !msg.streaming) {
+                    val codes = remember(msg.text) { extractCodeBlocks(msg.text) }
+                    if (codes.isNotEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .clickable {
+                                    onCopyCode(codes.joinToString("\n\n"))
+                                }
+                                .background(
+                                    Color(0xFF1F1F1F),
+                                    RoundedCornerShape(6.dp),
+                                )
+                                .padding(horizontal = 8.dp, vertical = 3.dp),
+                        ) {
+                            Text(
+                                text = if (codes.size == 1) stringResource(R.string.openclaw_copy_code)
+                                    else stringResource(R.string.openclaw_copy_code_n, codes.size),
+                                color = Color(0xFFFF4500),
+                                style = chatStyle.copy(fontSize = (fontSize - 2).coerceAtLeast(9).sp),
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -535,7 +594,7 @@ private fun AttachedImageLabel(isUser: Boolean) {
             .padding(horizontal = 8.dp, vertical = 5.dp),
     ) {
         Text(
-            text = "attached image",
+            text = stringResource(R.string.openclaw_attached_image),
             style = type.appCard.copy(fontSize = 16.sp),
             color = if (isUser) Color.Black else Color(0xFFFF4500),
         )

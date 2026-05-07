@@ -93,8 +93,9 @@ class R1WebServer(
                 uri == "/" || uri == "/index.html" -> serveAsset("web/index.html", "text/html")
                 uri.startsWith("/static/") -> serveAsset("web/" + uri.removePrefix("/static/"), guessMime(uri))
                 uri == "/app.js" -> serveAsset("web/app.js", "application/javascript")
+                uri == "/i18n.js" -> serveAsset("web/i18n.js", "application/javascript")
                 uri == "/style.css" -> serveAsset("web/style.css", "text/css")
-                uri == "/api/state" -> jsonResponse(WebRpc.buildSnapshot(state))
+                uri == "/api/state" -> jsonResponse(WebRpc.buildSnapshot(state, ctx))
                 uri == "/favicon.ico" -> notFound()
                 else -> notFound()
             }
@@ -132,6 +133,9 @@ class R1WebServer(
         uri.endsWith(".png") -> "image/png"
         uri.endsWith(".svg") -> "image/svg+xml"
         uri.endsWith(".json") -> "application/json"
+        uri.endsWith(".ttf") -> "font/ttf"
+        uri.endsWith(".woff") -> "font/woff"
+        uri.endsWith(".woff2") -> "font/woff2"
         else -> "application/octet-stream"
     }
 
@@ -150,7 +154,7 @@ class R1WebServer(
         override fun onOpen() {
             sockets.add(this)
             // Push the initial full snapshot so the client renders immediately.
-            sendEvent("state.snapshot", WebRpc.buildSnapshot(state))
+            sendEvent("state.snapshot", WebRpc.buildSnapshot(state, ctx))
         }
 
         override fun onClose(
@@ -248,7 +252,75 @@ class R1WebServer(
 
     private fun broadcastSnapshot() {
         if (sockets.isEmpty()) return
-        val payload = WebRpc.buildSnapshot(state)
+        val payload = WebRpc.buildSnapshot(state, ctx)
         sockets.toList().forEach { it.sendEvent("state.snapshot", payload) }
+    }
+
+    /** Stream a single line of terminal output to every connected client.
+     *  Called from [com.r1.launcher.LauncherActivity.terminalRun]'s onLine
+     *  callback so the web Terminal tab mirrors the on-device buffer in real
+     *  time. Skipped when no clients are connected to avoid pointless work. */
+    fun broadcastTerminalOutput(line: String, cwd: String) {
+        if (sockets.isEmpty()) return
+        val payload = buildJsonObject {
+            put("line", line)
+            put("cwd", cwd)
+        }
+        sockets.toList().forEach { it.sendEvent("terminal.output", payload) }
+    }
+
+    /** Push a freshly-committed Claude Code chat message to every connected
+     *  client so the web Claude tab mirrors the on-device bubble list. Both
+     *  user (echo) and assistant (reply) turns flow through here. */
+    fun broadcastClaudeMessage(role: String, text: String, error: Boolean) {
+        if (sockets.isEmpty()) return
+        val payload = buildJsonObject {
+            put("role", role)
+            put("text", text)
+            put("error", error)
+        }
+        sockets.toList().forEach { it.sendEvent("claude.message", payload) }
+    }
+
+    /** Live streaming preview (claude --print emits line-by-line; we render
+     *  the accumulated tail before commit). Empty `text` means "stream done,
+     *  preview gone" — the web client clears its live bubble. */
+    fun broadcastClaudeStreaming(text: String) {
+        if (sockets.isEmpty()) return
+        val payload = buildJsonObject { put("text", text) }
+        sockets.toList().forEach { it.sendEvent("claude.streaming", payload) }
+    }
+
+    /** Busy indicator transitions (true on send, false on completion) so
+     *  the web tab can flip its `...` indicator + disable the send button. */
+    fun broadcastClaudeBusy(busy: Boolean) {
+        if (sockets.isEmpty()) return
+        val payload = buildJsonObject { put("busy", busy) }
+        sockets.toList().forEach { it.sendEvent("claude.busy", payload) }
+    }
+
+    /** Wipe signal — fires when the on-device `clr` pill clears history so
+     *  web clients drop their bubble list too. */
+    fun broadcastClaudeCleared() {
+        if (sockets.isEmpty()) return
+        sockets.toList().forEach { it.sendEvent("claude.cleared", buildJsonObject {}) }
+    }
+
+    /** Single line of bootstrap stdout — pushed to the setup view's log pane
+     *  in real time so the user sees `apk add` / `tar -xz` / `[r1-claude]`
+     *  output instead of a 5-minute spinner with no feedback. */
+    fun broadcastClaudeSetupProgress(line: String) {
+        if (sockets.isEmpty()) return
+        val payload = buildJsonObject { put("line", line) }
+        sockets.toList().forEach { it.sendEvent("claude.setup.progress", payload) }
+    }
+
+    /** Terminal signal for the bootstrap chain — `ok=true` means the chroot
+     *  is now usable and the web UI should swap the setup pane for the
+     *  login pane. */
+    fun broadcastClaudeSetupDone(ok: Boolean) {
+        if (sockets.isEmpty()) return
+        val payload = buildJsonObject { put("ok", ok) }
+        sockets.toList().forEach { it.sendEvent("claude.setup.done", payload) }
     }
 }

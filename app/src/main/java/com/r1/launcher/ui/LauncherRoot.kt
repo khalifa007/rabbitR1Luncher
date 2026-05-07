@@ -11,13 +11,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import com.r1.launcher.LauncherHost
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
+import com.r1.launcher.locale.LocalePrefs
 
 /**
  * Root composable — FrameLayout-style z-stack:
@@ -31,6 +36,13 @@ fun LauncherRoot(
     host: LauncherHost,
 ) {
     val colors = LocalR1Colors.current
+    val ctx = LocalContext.current
+    val direction = if (LocalePrefs.isRtl(LocalePrefs.get(ctx).language)) {
+        LayoutDirection.Rtl
+    } else {
+        LayoutDirection.Ltr
+    }
+    CompositionLocalProvider(LocalLayoutDirection provides direction) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -38,6 +50,34 @@ fun LauncherRoot(
     ) {
         // Base: home screen. Visible whenever nothing else is stacked over it.
         HomeScreen(state = state)
+
+        OnboardingPanel(
+            state = state,
+            onRowClick = { idx ->
+                when (state.onboardingStep) {
+                    0 -> {
+                        // Language picker: idx is the index into LocalePrefs.SUPPORTED
+                        val lang = LocalePrefs.SUPPORTED.getOrNull(idx)
+                        if (lang != null) {
+                            host.setLanguage(lang.code) // recreates activity; onCreate jumps to step 1
+                            host.selectTone()
+                        }
+                    }
+                    1 -> { state.advanceOnboarding(); host.selectTone() }
+                    2 -> when (idx) {
+                        0 -> { host.startWifiScan(); state.openWifiScan(); host.selectTone() }
+                        1 -> if (state.simPresent) { state.advanceOnboarding(); host.selectTone() } else host.backTone()
+                        2 -> { state.advanceOnboarding(); host.selectTone() }
+                    }
+                    3 -> when (idx) {
+                        0 -> { host.checkForUpdate(); host.selectTone() }
+                        1 -> { state.advanceOnboarding(); host.selectTone() }
+                        2 -> { state.advanceOnboarding(); host.selectTone() }
+                    }
+                    else -> { host.onOnboardingDone(); host.selectTone() }
+                }
+            },
+        )
 
         AppsPanel(
             state = state,
@@ -48,13 +88,88 @@ fun LauncherRoot(
         SettingsPanel(
             state = state,
             onRowClick = { idx ->
+                // Order must match the rows list in SettingsPanel.kt:
+                //   network, display, sound, voice, device, about
+                // (language was promoted into device in v3.32)
+                // and the wheel-activate dispatcher in LauncherNav.kt.
                 when (idx) {
                     0 -> { state.back(); host.backTone() }
                     1 -> { state.openNetwork(); host.selectTone() }
-                    2 -> { state.openBrightness(); host.selectTone() }
-                    3 -> { state.openVolume(); host.selectTone() }
-                    4 -> { host.checkForUpdate(); host.selectTone() }
+                    2 -> { state.openSettingsDisplay(); host.selectTone() }
+                    3 -> { state.openSettingsSound(); host.selectTone() }
+                    4 -> { state.openSettingsVoice(); host.selectTone() }
+                    5 -> { state.openSettingsDevice(); host.selectTone() }
+                    6 -> { state.openSettingsAbout(); host.selectTone() }
+                }
+            },
+        )
+
+        SettingsDisplayPanel(
+            state = state,
+            onRowClick = { idx ->
+                when (idx) {
+                    0 -> { state.back(); host.backTone() }
+                    1 -> { state.openBrightness(); host.selectTone() }
+                }
+            },
+        )
+
+        SettingsSoundPanel(
+            state = state,
+            onRowClick = { idx ->
+                when (idx) {
+                    0 -> { state.back(); host.backTone() }
+                    1 -> { state.openUiVolume(); host.selectTone() }
+                    2 -> { state.openVolume(); host.selectTone() }
+                }
+            },
+        )
+
+        SettingsDevicePanel(
+            state = state,
+            onRowClick = { idx ->
+                // Order must match SettingsDevicePanel rows + LauncherNav dispatcher:
+                //   updates, language, restart, power off, factory reset
+                when (idx) {
+                    0 -> { state.back(); host.backTone() }
+                    1 -> { host.checkForUpdate(); host.selectTone() }
+                    2 -> { state.openSettingsLanguage(); host.selectTone() }
+                    3 -> { host.rebootDevice(); host.selectTone() }
+                    4 -> { host.powerOffDevice(); host.selectTone() }
                     5 -> { state.openFactoryConfirm(); host.selectTone() }
+                }
+            },
+        )
+
+        SettingsAboutPanel(
+            state = state,
+            onRowClick = { idx ->
+                when (idx) {
+                    0 -> { state.back(); host.backTone() }
+                }
+            },
+        )
+
+        SettingsVoicePanel(
+            state = state,
+            onBack = { state.back(); host.backTone() },
+            onSaveKey = { k -> host.voiceSaveKey(k) },
+            onPasteKey = { host.voicePasteKeyFromClipboard() },
+            onClear = { host.voiceClearKey() },
+            onRowClick = { idx -> host.voiceSettingsRowActivate(idx) },
+        )
+
+        SettingsLanguagePanel(
+            state = state,
+            onRowClick = { idx ->
+                if (idx == 0) {
+                    state.back(); host.backTone()
+                } else {
+                    val lang = LocalePrefs.SUPPORTED.getOrNull(idx - 1)
+                    if (lang != null) {
+                        host.setLanguage(lang.code) // recreates activity
+                        host.selectTone()
+                    }
                 }
             },
         )
@@ -69,7 +184,8 @@ fun LauncherRoot(
                     3 -> { host.toggleBluetooth(!state.btOn); host.popTone() }
                     4 -> { state.openWifiShare(); host.selectTone() }
                     5 -> { host.toggleWebServer(!state.webServerEnabled); host.popTone() }
-                    6 -> { host.startWifiScan(); state.openWifiScan(); host.selectTone() }
+                    6 -> { host.setWebTerminalEnabled(!state.webTerminalEnabled); host.popTone() }
+                    7 -> { host.startWifiScan(); state.openWifiScan(); host.selectTone() }
                 }
             },
         )
@@ -142,6 +258,11 @@ fun LauncherRoot(
             onScrimClick = { state.back(); host.backTone() },
         )
 
+        UiVolumePanel(
+            state = state,
+            onScrimClick = { state.back(); host.backTone() },
+        )
+
         OpenClawQrPanel(
             state = state,
             onScanned = { raw -> host.openClawScanned(raw) },
@@ -152,8 +273,6 @@ fun LauncherRoot(
             state = state,
             onBack = { host.openClawCloseSession(); state.back(); host.backTone() },
             onSend = { text -> host.openClawSendText(text) },
-            onPasteKey = { host.openClawPasteOpenaiKey() },
-            onClearKey = { host.openClawClearOpenaiKey() },
             onOpenSettings = { state.openOpenClawSettings(); host.selectTone() },
             onSwitchSession = { key -> host.openClawSwitchSession(key); host.selectTone() },
             onOpenSessions = {
@@ -165,26 +284,7 @@ fun LauncherRoot(
                 host.openClawOpenCameraAsk()
                 host.selectTone()
             },
-            onOpenTalk = {
-                host.openClawOpenTalk()
-                host.selectTone()
-            },
-            onOpenCanvas = {
-                state.openOpenClawCanvas()
-                host.selectTone()
-            },
-        )
-
-        OpenClawTalkPanel(
-            state = state,
-            onBack = { state.back(); host.backTone() },
-            onToggleRecord = { host.openClawToggleRecord() },
-            onSpeakerChange = { enabled -> host.openClawSetSpeaker(enabled) },
-        )
-
-        OpenClawCanvasPanel(
-            state = state,
-            onBack = { state.back(); host.backTone() },
+            onCopyCode = { code -> host.copyToClipboard(code, "openclaw-code"); host.popTone() },
         )
 
         OpenClawCameraPanel(
@@ -203,9 +303,6 @@ fun LauncherRoot(
         OpenClawSettingsPanel(
             state = state,
             onBack = { state.back(); host.backTone() },
-            onSave = { key -> host.openClawSaveOpenaiKey(key) },
-            onPasteFromClipboard = { host.openClawPasteOpenaiKey() },
-            onClear = { host.openClawClearOpenaiKey() },
             onRowClick = { idx -> host.openClawSettingsRowActivate(idx) },
             onFontSizeChange = { size -> host.openClawSetFontSize(size) },
         )
@@ -230,17 +327,55 @@ fun LauncherRoot(
             onBack = { state.back(); host.backTone() },
         )
 
+        TerminalPanel(
+            state = state,
+            onBack = { state.back(); host.backTone() },
+            onKeyPress = { ch -> state.terminalInput += ch },
+            onBackspace = {
+                if (state.terminalInput.isNotEmpty()) {
+                    state.terminalInput = state.terminalInput.dropLast(1)
+                }
+            },
+            onSubmit = {
+                val cmd = state.terminalInput.trim()
+                if (cmd.isNotEmpty()) {
+                    host.terminalRun(cmd)
+                    host.popTone()
+                }
+            },
+            onClear = { host.terminalClear(); host.popTone() },
+            onToggleKb = {
+                state.terminalKbVisible = !state.terminalKbVisible
+                host.popTone()
+            },
+            onPaste = { host.terminalPasteFromClipboard(); host.popTone() },
+        )
+
+        ClaudePanel(
+            state = state,
+            onBack = { state.back(); host.backTone() },
+            onSend = { text ->
+                if (text.isNotEmpty()) {
+                    host.claudeSend(text)
+                    host.popTone()
+                }
+            },
+            onClear = { host.claudeClear(); host.popTone() },
+            onPaste = { host.claudePasteFromClipboard(); host.popTone() },
+        )
+
         // Topbar overlay — only on the clock screen; every other panel
         // either draws its own header or is a full-screen takeover.
         val topbarVisible = state.panel == Panel.HOME
         AnimatedVisibility(
             visible = topbarVisible,
-            enter = fadeIn(tween(120)),
-            exit = fadeOut(tween(120)),
+            enter = fadeIn(tween(ANIM_OPEN_MS, easing = EnterEasing)),
+            exit = fadeOut(tween(ANIM_CLOSE_MS, easing = ExitEasing)),
             modifier = Modifier.align(Alignment.TopCenter),
         ) {
             Topbar(state = state)
         }
 
+    }
     }
 }

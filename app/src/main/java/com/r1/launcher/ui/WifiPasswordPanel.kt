@@ -20,6 +20,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -27,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
+import com.r1.launcher.R
 
 @Composable
 fun WifiPasswordPanel(
@@ -52,7 +54,7 @@ fun WifiPasswordPanel(
                 Spacer(modifier = Modifier.height(24.dp))
                 
                 Text(
-                    text = "< back",
+                    text = stringResource(R.string.back_short),
                     color = Color.White,
                     fontSize = 20.sp,
                     fontFamily = type.appCard.fontFamily,
@@ -61,7 +63,7 @@ fun WifiPasswordPanel(
                 )
 
                 Text(
-                    text = "Connect to:",
+                    text = stringResource(R.string.wifi_password_connect_to),
                     color = Color.Gray,
                     fontSize = 18.sp,
                     fontFamily = type.appCard.fontFamily
@@ -79,8 +81,9 @@ fun WifiPasswordPanel(
                 )
 
                 // Password display area
+                val passwordHint = stringResource(R.string.wifi_password_hint)
                 val displayPass = if (state.wifiPasswordInput.isEmpty()) {
-                    "Enter password..."
+                    passwordHint
                 } else {
                     "*".repeat(state.wifiPasswordInput.length)
                 }
@@ -98,7 +101,7 @@ fun WifiPasswordPanel(
 
                 // Connect button
                 Text(
-                    text = "[ CONNECT ]",
+                    text = stringResource(R.string.wifi_password_action),
                     color = if (state.wifiPasswordInput.isEmpty()) Color.DarkGray else Color.Black,
                     fontSize = 22.sp,
                     fontFamily = type.appCard.fontFamily,

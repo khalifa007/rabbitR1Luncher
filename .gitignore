@@ -14,9 +14,13 @@ build
 *.apk
 .kotlin/
 
-*.sh
-
 .bootstrap/
 *.zip
 *.mdl
 *.fst
+
+# signing keys — never commit
+*.keystore
+*.jks
+*.pk8
+*.pem

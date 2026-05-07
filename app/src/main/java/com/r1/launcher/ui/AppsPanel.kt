@@ -3,17 +3,21 @@ package com.r1.launcher.ui
 import android.util.LruCache
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.LocalOverscrollConfiguration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -34,6 +38,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -50,6 +55,7 @@ import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
@@ -74,10 +80,11 @@ private val APP_PALETTE = listOf(
     Color(0xFF2196F3), // Rabbit Blue
 )
 
-private val FOCUSED_HEIGHT = 120.dp
-private val COLLAPSED_HEIGHT = 64.dp
-private val CARD_SHAPE = RoundedCornerShape(12.dp)
+private val FOCUSED_HEIGHT = 108.dp
+private val COLLAPSED_HEIGHT = 60.dp
+private val CARD_SHAPE = RoundedCornerShape(14.dp)
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun AppsPanel(
     state: LauncherState,
@@ -86,10 +93,12 @@ fun AppsPanel(
 ) {
     AnimatedVisibility(
         visible = state.panel == Panel.APPS,
-        enter = fadeIn(tween(ANIM_OPEN_MS)) +
-            slideInVertically(tween(ANIM_OPEN_MS)) { it },
-        exit = fadeOut(tween(ANIM_CLOSE_MS)) +
-            slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
+        enter = fadeIn(tween(ANIM_OPEN_MS, easing = EnterEasing)) +
+            slideInVertically(tween(ANIM_OPEN_MS, easing = EnterEasing)) { it / 3 } +
+            scaleIn(tween(ANIM_OPEN_MS, easing = EnterEasing), initialScale = 0.96f),
+        exit = fadeOut(tween(ANIM_CLOSE_MS, easing = ExitEasing)) +
+            slideOutVertically(tween(ANIM_CLOSE_MS, easing = ExitEasing)) { it / 3 } +
+            scaleOut(tween(ANIM_CLOSE_MS, easing = ExitEasing), targetScale = 1.04f),
     ) {
         val listState = rememberLazyListState()
 
@@ -101,15 +110,16 @@ fun AppsPanel(
             }
         }
 
+        CompositionLocalProvider(LocalOverscrollConfiguration provides null) {
         LazyColumn(
             state = listState,
             contentPadding = PaddingValues(
-                start = 16.dp, end = 16.dp, top = 24.dp, bottom = 16.dp,
+                start = 28.dp, end = 28.dp, top = 24.dp, bottom = 16.dp,
             ),
-            verticalArrangement = Arrangement.spacedBy((-12).dp),
+            verticalArrangement = Arrangement.spacedBy((-20).dp),
             modifier = Modifier
                 .fillMaxSize()
-                .wallpaper(),
+                .background(Color.Black),
         ) {
             itemsIndexed(
                 items = state.apps,
@@ -124,6 +134,7 @@ fun AppsPanel(
                         entry = entry,
                         focused = idx == state.appsFocus,
                         background = APP_PALETTE[idx % APP_PALETTE.size],
+                        activateTick = state.appsPressTrigger,
                         onClick = { onAppClick(idx) },
                     )
                 }
@@ -134,10 +145,11 @@ fun AppsPanel(
                     modifier = Modifier
                         .zIndex((state.apps.size + 1).toFloat())
                         .fillMaxWidth()
-                        .height(120.dp)
-                        .offset(y = (-65).dp),
+                        .height(140.dp)
+                        .offset(y = (-28).dp),
                 )
             }
+        }
         }
     }
 }
@@ -147,6 +159,7 @@ private fun AppCard(
     entry: AppEntry,
     focused: Boolean,
     background: Color,
+    activateTick: Int,
     onClick: () -> Unit,
 ) {
     val ctx = LocalContext.current
@@ -156,25 +169,37 @@ private fun AppCard(
         AppEntry.Settings -> "_r1_settings"
         AppEntry.OpenClaw -> "_r1_openclaw"
         AppEntry.Messages -> "_r1_messages"
+        AppEntry.Terminal -> "_r1_terminal"
+        AppEntry.Claude -> "_r1_claude"
     }
     val isSettings = entry is AppEntry.Settings
     val isOpenClaw = entry is AppEntry.OpenClaw
     val isMessages = entry is AppEntry.Messages
+    val isTerminal = entry is AppEntry.Terminal
+    val isClaude = entry is AppEntry.Claude
     val settingsPainter = if (isSettings) painterResource(R.drawable.ic_settings) else null
     val openClawPainter = if (isOpenClaw) painterResource(R.drawable.ic_wifi_arc) else null
     val messagesPainter = if (isMessages) painterResource(R.drawable.ic_messages) else null
+    val terminalPainter = if (isTerminal) painterResource(R.drawable.ic_terminal) else null
+    val claudePainter = if (isClaude) painterResource(R.drawable.ic_claude) else null
 
     var iconPainter by remember(pkg) {
         val cached = iconCache.get(pkg)
         mutableStateOf<Painter?>(if (cached != null) BitmapPainter(cached) else null)
     }
-    var label by remember(pkg) {
+    val syntheticLabel = when (entry) {
+        is AppEntry.Real -> null
+        AppEntry.Settings -> stringResource(R.string.app_label_settings)
+        AppEntry.OpenClaw -> stringResource(R.string.app_label_openclaw)
+        AppEntry.Messages -> stringResource(R.string.app_label_messages)
+        AppEntry.Terminal -> stringResource(R.string.app_label_terminal)
+        AppEntry.Claude -> stringResource(R.string.app_label_claude)
+    }
+    var label by remember(pkg, syntheticLabel) {
         mutableStateOf(
             when (entry) {
                 is AppEntry.Real -> labelCache[pkg] ?: pkg.substringAfterLast('.').lowercase()
-                AppEntry.Settings -> "settings"
-                AppEntry.OpenClaw -> "openclaw"
-                AppEntry.Messages -> "messages"
+                else -> syntheticLabel ?: ""
             },
         )
     }
@@ -207,17 +232,34 @@ private fun AppCard(
         label = "cardFocusGlow",
     )
 
-    var shakeTrigger by remember { mutableStateOf(0) }
-    val offsetX = remember { Animatable(0f) }
+    var pressTrigger by remember { mutableStateOf(0) }
+    val pressScale = remember { Animatable(1f) }
 
-    LaunchedEffect(shakeTrigger) {
-        if (shakeTrigger > 0) {
-            val shakeDist = 15f
-            offsetX.animateTo(shakeDist, animationSpec = tween(40, easing = LinearEasing))
-            offsetX.animateTo(-shakeDist, animationSpec = tween(80, easing = LinearEasing))
-            offsetX.animateTo(shakeDist, animationSpec = tween(80, easing = LinearEasing))
-            offsetX.animateTo(-shakeDist, animationSpec = tween(80, easing = LinearEasing))
-            offsetX.animateTo(0f, animationSpec = tween(40, easing = LinearEasing))
+    // Side-button activate path: state.appsPressTrigger increments without going
+    // through the clickable. Mirror it into the local trigger so the same
+    // animation runs and the same launch tail fires.
+    var lastSeenActivate by remember { mutableStateOf(activateTick) }
+    LaunchedEffect(activateTick, focused) {
+        if (focused && activateTick > lastSeenActivate) {
+            lastSeenActivate = activateTick
+            if (pressTrigger == 0 || !pressScale.isRunning) {
+                pressTrigger++
+            }
+        } else if (!focused) {
+            lastSeenActivate = activateTick
+        }
+    }
+
+    LaunchedEffect(pressTrigger) {
+        if (pressTrigger > 0) {
+            pressScale.animateTo(0.92f, animationSpec = tween(80, easing = LinearOutSlowInEasing))
+            pressScale.animateTo(
+                targetValue = 1f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMedium,
+                ),
+            )
             onClick()
         }
     }
@@ -226,15 +268,16 @@ private fun AppCard(
         .fillMaxWidth()
         .height(height)
         .graphicsLayer {
-            translationX = offsetX.value
-            rotationZ = offsetX.value / 6f
+            scaleX = pressScale.value
+            scaleY = pressScale.value
+            rotationZ = (1f - pressScale.value) * 12f
         }
         .clip(CARD_SHAPE)
         .background(background)
         .border(2.dp, Color.Black, CARD_SHAPE)
         .clickable {
-            if (shakeTrigger == 0 || !offsetX.isRunning) {
-                shakeTrigger++
+            if (pressTrigger == 0 || !pressScale.isRunning) {
+                pressTrigger++
             }
         }
 
@@ -253,7 +296,7 @@ private fun AppCard(
                 .fillMaxWidth()
                 .padding(start = 16.dp, end = 16.dp, top = 16.dp),
         ) {
-            val effectivePainter = settingsPainter ?: openClawPainter ?: messagesPainter ?: iconPainter
+            val effectivePainter = settingsPainter ?: openClawPainter ?: messagesPainter ?: terminalPainter ?: claudePainter ?: iconPainter
             if (effectivePainter != null) {
                 Image(
                     painter = effectivePainter,
@@ -280,6 +323,8 @@ private fun appKey(entry: AppEntry): String = when (entry) {
     AppEntry.Settings -> "settings/settings"
     AppEntry.OpenClaw -> "openclaw/openclaw"
     AppEntry.Messages -> "messages/messages"
+    AppEntry.Terminal -> "terminal/terminal"
+    AppEntry.Claude -> "claude/claude"
 }
 
 private fun appContentType(entry: AppEntry): String = when (entry) {
@@ -287,6 +332,8 @@ private fun appContentType(entry: AppEntry): String = when (entry) {
     AppEntry.Settings -> "settings"
     AppEntry.OpenClaw -> "openclaw"
     AppEntry.Messages -> "messages"
+    AppEntry.Terminal -> "terminal"
+    AppEntry.Claude -> "claude"
 }
 
 class FolderShape : androidx.compose.ui.graphics.Shape {

@@ -7,53 +7,43 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.clickable
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.text.font.FontWeight
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
+import com.r1.launcher.R
 
+/**
+ * OpenClaw-scoped settings. Voice config (key, on/off, voice picker) lives in
+ * the global Settings → Voice subpanel — it's used by chat / terminal / claude
+ * and isn't OpenClaw-specific.
+ */
 @Composable
 fun OpenClawSettingsPanel(
     state: LauncherState,
     onBack: () -> Unit,
-    onSave: (String) -> Unit,
-    // Paste-from-clipboard is no longer surfaced as a UI button — paste flows
-    // come from the chat panel's `+key` pill, the SET_OPENAI_KEY broadcast,
-    // and the web companion. Kept as a parameter so the call site doesn't
-    // need to change; defaults to no-op.
-    @Suppress("UNUSED_PARAMETER") onPasteFromClipboard: () -> Unit = {},
-    onClear: () -> Unit,
     onRowClick: (Int) -> Unit = {},
     onFontSizeChange: (Int) -> Unit = {},
 ) {
@@ -64,28 +54,13 @@ fun OpenClawSettingsPanel(
         exit = fadeOut(tween(ANIM_CLOSE_MS)) +
             slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
     ) {
-        val type = LocalR1Type.current
-
-        // Local input buffer; persists across recompositions while panel open.
-        var input by remember { mutableStateOf("") }
-        var showKeyboard by remember { mutableStateOf(false) }
-
-        // When the panel opens, clear input.
-        LaunchedEffect(state.panel) {
-            if (state.panel == Panel.OPENCLAW_SETTINGS) {
-                input = ""
-                showKeyboard = false
-            }
-        }
-
         val items = listOf(
-            SettingsItem.Standard("< back"),
-            SettingsItem.Standard("whisper key"),
-            SettingsItem.Standard("scan key from qr"),
-            SettingsItem.Toggle("hide text input", state.openClawHideChat),
-            SettingsItem.Info("font size", "${state.chatFontSize} sp"),
-            SettingsItem.Standard("clear history"),
-            SettingsItem.Standard("disconnect gate"),
+            SettingsItem.Standard(stringResource(R.string.back_short)),
+            SettingsItem.Toggle(stringResource(R.string.openclaw_settings_speak), state.voiceEnabled),
+            SettingsItem.Toggle(stringResource(R.string.openclaw_settings_hide_input), state.openClawHideChat),
+            SettingsItem.Info(stringResource(R.string.openclaw_settings_font), "${state.chatFontSize} sp"),
+            SettingsItem.Standard(stringResource(R.string.openclaw_settings_clear)),
+            SettingsItem.Standard(stringResource(R.string.openclaw_settings_disconnect)),
         )
 
         val listState = rememberLazyListState()
@@ -96,7 +71,6 @@ fun OpenClawSettingsPanel(
         }
 
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-            // Main Settings List
             LazyColumn(
                 state = listState,
                 contentPadding = PaddingValues(
@@ -118,179 +92,12 @@ fun OpenClawSettingsPanel(
                             label = item.label,
                             focused = idx == state.openClawSettingsFocus,
                             toggleChecked = (item as? SettingsItem.Toggle)?.checked,
-                            onClick = {
-                                if (idx == 1) {
-                                    showKeyboard = true
-                                } else {
-                                    onRowClick(idx)
-                                }
-                            },
+                            onClick = { onRowClick(idx) },
                         )
                     }
-                }
-            }
-
-            // Keyboard overlay when whisper key is selected
-            AnimatedVisibility(
-                visible = showKeyboard,
-                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
-                modifier = Modifier.align(Alignment.BottomCenter)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color.Black)
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    val accent = Color(0xFFFF4500)
-                    val ok = Color(0xFF35D26F)
-                    val warn = Color(0xFFE53935)
-                    val saveEnabled = input.trim().isNotBlank()
-                    val clearEnabled = state.chatHasOpenaiKey || input.isNotEmpty()
-
-                    // Header row: title on the left, status pill on the right.
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = "whisper key",
-                            style = type.appCard.copy(fontSize = 16.sp),
-                            color = accent,
-                        )
-                        Spacer(Modifier.weight(1f))
-                        StatusPill(
-                            text = if (state.chatHasOpenaiKey)
-                                "set · …${state.chatOpenaiKeyTail}"
-                            else "not set",
-                            color = if (state.chatHasOpenaiKey) ok else Color.DarkGray,
-                        )
-                    }
-
-                    // Bordered input box. Tap anywhere on the box to ensure
-                    // the keyboard stays open even if the user dismissed it.
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .border(1.dp, accent.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
-                            .background(Color(0xFF101010))
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                    ) {
-                        val displayText = when {
-                            input.isNotEmpty() -> maskKey(input) + "_"
-                            else -> "type sk-…"
-                        }
-                        Text(
-                            text = displayText,
-                            style = type.appCard.copy(fontSize = 14.sp),
-                            color = if (input.isEmpty()) Color(0xFF707070) else Color.White,
-                        )
-                    }
-
-                    // Action row: equal-weight pill buttons, no overflow.
-                    // Removed [paste] — paste flows are clipboard-pill (chat),
-                    // SET_OPENAI_KEY broadcast, and web companion only.
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        ActionPill(
-                            label = "save",
-                            color = if (saveEnabled) ok else Color.DarkGray,
-                            enabled = saveEnabled,
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            onSave(input.trim())
-                            input = ""
-                            showKeyboard = false
-                        }
-                        ActionPill(
-                            label = "clear",
-                            color = if (clearEnabled) warn else Color.DarkGray,
-                            enabled = clearEnabled,
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            onClear()
-                            input = ""
-                        }
-                        ActionPill(
-                            label = "close",
-                            color = Color.White,
-                            enabled = true,
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            showKeyboard = false
-                        }
-                    }
-
-                    RetroKeyboard(
-                        onKeyPress = { ch -> input += ch },
-                        onBackspace = { if (input.isNotEmpty()) input = input.dropLast(1) },
-                        onDismiss = { showKeyboard = false },
-                    )
                 }
             }
         }
-    }
-}
-
-private fun maskKey(s: String): String {
-    if (s.length <= 8) return s
-    return s.take(3) + "…" + s.takeLast(4)
-}
-
-@Composable
-private fun StatusPill(text: String, color: Color) {
-    val type = LocalR1Type.current
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .clip(RoundedCornerShape(10.dp))
-            .border(1.dp, color.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
-            .background(color.copy(alpha = 0.12f))
-            .padding(horizontal = 8.dp, vertical = 3.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .background(color, RoundedCornerShape(50))
-                .padding(4.dp),
-        )
-        Spacer(Modifier.width(6.dp))
-        Text(
-            text = text,
-            style = type.appCard.copy(fontSize = 12.sp),
-            color = color,
-        )
-    }
-}
-
-@Composable
-private fun ActionPill(
-    label: String,
-    color: Color,
-    enabled: Boolean,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit,
-) {
-    val type = LocalR1Type.current
-    val borderColor = if (enabled) color else Color(0xFF333333)
-    Box(
-        modifier = modifier
-            .height(36.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .border(1.dp, borderColor, RoundedCornerShape(8.dp))
-            .background(if (enabled) color.copy(alpha = 0.10f) else Color.Transparent)
-            .clickable(enabled = enabled, onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            style = type.appCard.copy(fontSize = 14.sp),
-            color = borderColor,
-        )
     }
 }
 

@@ -18,9 +18,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
+import com.r1.launcher.R
 
 @Composable
 fun NetworkPanel(
@@ -35,21 +37,30 @@ fun NetworkPanel(
             slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
     ) {
         val items = listOf(
-            SettingsItem.Standard("< back"),
-            SettingsItem.Toggle("wifi", state.wifiEnabled, subtitle = if (state.wifiEnabled) state.wifiConnectedSsid else ""),
-            SettingsItem.Toggle("cellular data", state.cellularOn),
-            SettingsItem.Toggle("bluetooth", state.btOn),
+            SettingsItem.Standard(stringResource(R.string.back_short)),
+            SettingsItem.Toggle(stringResource(R.string.network_row_wifi), state.wifiEnabled, subtitle = if (state.wifiEnabled) state.wifiConnectedSsid else ""),
+            SettingsItem.Toggle(stringResource(R.string.network_row_cellular), state.cellularOn),
+            SettingsItem.Toggle(stringResource(R.string.network_row_bluetooth), state.btOn),
             SettingsItem.Toggle(
-                "wifi share",
+                stringResource(R.string.network_row_share),
                 state.wifiShareEnabled,
-                subtitle = if (state.wifiShareEnabled) "${state.wifiShareConnectedClients.size} connected" else "",
+                subtitle = if (state.wifiShareEnabled) stringResource(R.string.network_share_clients, state.wifiShareConnectedClients.size) else "",
             ),
             SettingsItem.Toggle(
-                "remote panel",
+                stringResource(R.string.network_row_remote),
                 state.webServerEnabled,
                 subtitle = if (state.webServerEnabled) "http://${state.webServerIp.ifEmpty { "?" }}:${state.webServerPort}" else "",
             ),
-            SettingsItem.Standard("scan wifi networks"),
+            SettingsItem.Toggle(
+                stringResource(R.string.network_row_terminal),
+                state.webTerminalEnabled,
+                subtitle = when {
+                    !state.webTerminalEnabled -> ""
+                    !state.webServerEnabled -> stringResource(R.string.network_terminal_needs_panel)
+                    else -> stringResource(R.string.network_terminal_warn_lan)
+                },
+            ),
+            SettingsItem.Standard(stringResource(R.string.network_row_scan)),
         )
 
         val listState = rememberLazyListState()

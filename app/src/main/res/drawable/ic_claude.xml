@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Claude Code app icon — 4-point sparkle in the same solid-fill style as
+    ic_terminal.xml + ic_messages.xml. Anthropic's Claude wordmark uses a
+    similar starburst motif; this is a simplified version that reads at 24dp.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,2 L13.5,9.5 L21,11 L13.5,12.5 L12,20 L10.5,12.5 L3,11 L10.5,9.5 Z" />
+    <!-- secondary diagonal sparkles for the AI "shine" feel -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M19,4 L19.6,5.4 L21,6 L19.6,6.6 L19,8 L18.4,6.6 L17,6 L18.4,5.4 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M5,17 L5.5,18.2 L6.7,18.7 L5.5,19.2 L5,20.4 L4.5,19.2 L3.3,18.7 L4.5,18.2 Z" />
+</vector>

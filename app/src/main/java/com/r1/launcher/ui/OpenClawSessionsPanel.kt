@@ -19,9 +19,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
+import com.r1.launcher.R
 import com.r1.launcher.openclaw.SessionEntry
 import com.r1.launcher.openclaw.friendlySessionName
 import com.r1.launcher.openclaw.resolveSessionChoices
@@ -60,10 +62,15 @@ fun OpenClawSessionsPanel(
         // multiple threads sharing the same displayName ("R1 Launcher" — our own
         // client name, echoed back by the gateway) stay distinguishable.
         data class Row(val label: String, val subtitle: String)
+        val backTxt = stringResource(R.string.back_short)
+        val loadingTxt = stringResource(R.string.common_loading)
+        val emptyTxt = stringResource(R.string.openclaw_sessions_empty)
+        val refreshingTxt = stringResource(R.string.openclaw_sessions_refreshing)
+        val refreshTxt = stringResource(R.string.openclaw_sessions_refresh)
         val items = buildList {
-            add(Row("< back", ""))
+            add(Row(backTxt, ""))
             if (choices.isEmpty()) {
-                add(Row(if (state.sessionsLoading) "loading…" else "no threads", ""))
+                add(Row(if (state.sessionsLoading) loadingTxt else emptyTxt, ""))
             } else {
                 for (entry in choices) {
                     val friendly = friendlySessionName(entry.key)
@@ -71,7 +78,7 @@ fun OpenClawSessionsPanel(
                     add(Row("$friendly$marker", entry.key))
                 }
             }
-            add(Row(if (state.sessionsLoading) "refresh…" else "refresh", ""))
+            add(Row(if (state.sessionsLoading) refreshingTxt else refreshTxt, ""))
         }
 
         val listState = rememberLazyListState()

@@ -9,6 +9,9 @@ import android.provider.Telephony
 import android.telephony.SmsManager
 import android.telephony.SmsMessage
 import android.telephony.SubscriptionManager
+import android.util.Log
+
+private const val TAG = "SmsLoader"
 
 /**
  * One thread = one sender, with the most-recent body and timestamp shown
@@ -35,8 +38,50 @@ data class SmsItem(
 
 object SmsLoader {
 
+    private val iccCacheLock = Any()
+    private var iccCache: List<SmsItem>? = null
+
     /** Group by address; one row per sender. Most-recent thread first. */
     fun loadConversations(ctx: Context): List<SmsConversation> {
+        return loadConversationsInternal(
+            ctx = ctx,
+            iccItems = refreshIccMessages(ctx),
+            logName = "loadConversations",
+        )
+    }
+
+    /** Fast path for panel-open: provider + local receiver cache only. */
+    fun loadConversationsFast(ctx: Context): List<SmsConversation> {
+        return loadConversationsInternal(
+            ctx = ctx,
+            iccItems = null,
+            logName = "loadConversationsFast",
+        )
+    }
+
+    /** Merge the last ICC scan without touching the slow radio/SIM API. */
+    fun loadConversationsWithCachedIcc(ctx: Context): List<SmsConversation> {
+        return loadConversationsInternal(
+            ctx = ctx,
+            iccItems = cachedIccMessages(),
+            logName = "loadConversationsCachedIcc",
+        )
+    }
+
+    fun refreshIccMessages(ctx: Context): List<SmsItem> {
+        val items = loadIccMessagesRaw(ctx)
+        synchronized(iccCacheLock) { iccCache = items }
+        return items
+    }
+
+    private fun cachedIccMessages(): List<SmsItem> =
+        synchronized(iccCacheLock) { iccCache.orEmpty() }
+
+    private fun loadConversationsInternal(
+        ctx: Context,
+        iccItems: List<SmsItem>?,
+        logName: String,
+    ): List<SmsConversation> {
         val cr = ctx.contentResolver
         val cols = arrayOf(
             Telephony.Sms._ID,
@@ -71,6 +116,7 @@ object SmsLoader {
             }
         }
 
+        var providerRows = 0
         runCatching {
             cr.query(
                 Telephony.Sms.CONTENT_URI,
@@ -84,6 +130,7 @@ object SmsLoader {
                 val dateIdx = c.getColumnIndexOrThrow(Telephony.Sms.DATE)
                 val readIdx = c.getColumnIndexOrThrow(Telephony.Sms.READ)
                 while (c.moveToNext()) {
+                    providerRows++
                     mergeRow(
                         rawAddr = c.getString(addrIdx),
                         body = c.getString(bodyIdx).orEmpty(),
@@ -92,12 +139,9 @@ object SmsLoader {
                     )
                 }
             }
-        }
+        }.onFailure { Log.w(TAG, "content://sms query failed", it) }
 
-        // Merge in ICC (SIM-card) SMS — most carriers no longer store messages
-        // there, but it's the only path that works when the device-side inbox
-        // is empty (e.g. fresh install, no default SMS app to receive writes).
-        loadIccMessagesRaw(ctx).forEach { item ->
+        iccItems.orEmpty().forEach { item ->
             mergeRow(
                 rawAddr = item.address,
                 body = item.body,
@@ -110,7 +154,8 @@ object SmsLoader {
         // there is no default SMS app, so incoming messages never reach the
         // system's content://sms provider. Captured directly from the legacy
         // SMS_RECEIVED broadcast and persisted in our own JSON file.
-        SmsCache.all(ctx).forEach { entry ->
+        val cacheEntries = SmsCache.all(ctx)
+        cacheEntries.forEach { entry ->
             mergeRow(
                 rawAddr = entry.address,
                 body = entry.body,
@@ -119,31 +164,50 @@ object SmsLoader {
             )
         }
 
+        Log.d(
+            TAG,
+            "$logName: provider=$providerRows icc=${iccItems?.size ?: 0} cache=${cacheEntries.size} threads=${grouped.size}",
+        )
         return grouped.values.sortedByDescending { it.latestTimestampMs }
     }
 
     private fun loadIccMessagesRaw(ctx: Context): List<SmsItem> {
+        // Dedup across SmsManagers: the default SmsManager and createForSubscriptionId(sub)
+        // return the same SIM records on a single-SIM device, so the same message appears
+        // twice without this. Key by (address, body, timestampMs) — the actual content of
+        // the message, since the SIM doesn't expose stable record IDs across managers.
+        val seen = HashSet<Triple<String, String, Long>>()
         val out = mutableListOf<SmsItem>()
-        runCatching {
-            iccSmsManagers(ctx).forEach { sm ->
-                val msgs: List<SmsMessage?> = invokeAllMessagesFromIcc(sm) ?: return@forEach
-                msgs.forEachIndexed { i, raw ->
-                    val m: SmsMessage = raw ?: return@forEachIndexed
-                    val body = (m.messageBody ?: m.displayMessageBody).orEmpty()
-                    if (body.isBlank()) return@forEachIndexed
-                    out.add(
-                        SmsItem(
-                            id = -(i + 1).toLong(), // negative IDs to avoid collision with provider rows
-                            address = (m.originatingAddress ?: m.displayOriginatingAddress).orEmpty(),
-                            body = body,
-                            timestampMs = m.timestampMillis,
-                            read = m.statusOnIcc == SmsManager.STATUS_ON_ICC_READ,
-                            incoming = true,
-                        ),
-                    )
-                }
+        val managers = iccSmsManagers(ctx)
+        Log.d(TAG, "loadIccMessagesRaw: ${managers.size} SmsManager(s)")
+        var nextId = -1L // monotonic across all managers; never collides
+        managers.forEachIndexed { idx, sm ->
+            val msgs = invokeAllMessagesFromIcc(sm, idx)
+            if (msgs == null) {
+                Log.w(TAG, "icc[$idx]: getAllMessagesFromIcc returned null")
+                return@forEachIndexed
+            }
+            Log.d(TAG, "icc[$idx]: ${msgs.size} raw record(s)")
+            msgs.forEach { raw ->
+                val m: SmsMessage = raw ?: return@forEach
+                val body = (m.messageBody ?: m.displayMessageBody).orEmpty()
+                if (body.isBlank()) return@forEach
+                val address = (m.originatingAddress ?: m.displayOriginatingAddress).orEmpty()
+                val ts = m.timestampMillis
+                if (!seen.add(Triple(address, body, ts))) return@forEach
+                out.add(
+                    SmsItem(
+                        id = nextId--,
+                        address = address,
+                        body = body,
+                        timestampMs = ts,
+                        read = m.statusOnIcc == SmsManager.STATUS_ON_ICC_READ,
+                        incoming = true,
+                    ),
+                )
             }
         }
+        Log.d(TAG, "loadIccMessagesRaw: emitted ${out.size} item(s) after dedup")
         return out
     }
 
@@ -154,28 +218,29 @@ object SmsLoader {
      * and the caller falls back to the empty list.
      */
     @Suppress("UNCHECKED_CAST")
-    private fun invokeAllMessagesFromIcc(sm: SmsManager): List<SmsMessage?>? {
+    private fun invokeAllMessagesFromIcc(sm: SmsManager, idx: Int): List<SmsMessage?>? {
         return runCatching {
             val method = SmsManager::class.java.getMethod("getAllMessagesFromIcc")
             method.invoke(sm) as? List<SmsMessage?>
+        }.onFailure { e ->
+            // Unwrap reflection's InvocationTargetException so the underlying
+            // SecurityException / NoSuchMethodError actually shows up.
+            val cause = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
+            Log.w(TAG, "icc[$idx]: getAllMessagesFromIcc threw ${cause.javaClass.simpleName}: ${cause.message}")
         }.getOrNull()
     }
 
     @Suppress("DEPRECATION")
     private fun iccSmsManagers(ctx: Context): List<SmsManager> {
         val list = mutableListOf<SmsManager>()
-        runCatching {
-            val sm = if (Build.VERSION.SDK_INT >= 31) {
-                ctx.getSystemService(SmsManager::class.java)
-            } else {
-                SmsManager.getDefault()
-            }
-            if (sm != null) list.add(sm)
-        }
-        // Multi-SIM: also pull each active subscription's manager.
+        // Prefer active subscription managers. On the R1, the default manager
+        // and the single active-sub manager hit the same SIM record, but each
+        // hidden API call costs several seconds.
         runCatching {
             val subs = ctx.getSystemService(SubscriptionManager::class.java)
-            subs?.activeSubscriptionInfoList?.forEach { info ->
+            val infos = subs?.activeSubscriptionInfoList
+            Log.d(TAG, "active subscriptions: ${infos?.size ?: -1}")
+            infos?.forEach { info ->
                 val sub = info.subscriptionId
                 val sm = if (Build.VERSION.SDK_INT >= 31) {
                     ctx.getSystemService(SmsManager::class.java)?.createForSubscriptionId(sub)
@@ -184,7 +249,17 @@ object SmsLoader {
                 }
                 if (sm != null) list.add(sm)
             }
-        }
+        }.onFailure { Log.w(TAG, "per-sub SmsManager lookup failed", it) }
+        if (list.isNotEmpty()) return list
+
+        runCatching {
+            val sm = if (Build.VERSION.SDK_INT >= 31) {
+                ctx.getSystemService(SmsManager::class.java)
+            } else {
+                SmsManager.getDefault()
+            }
+            if (sm != null) list.add(sm)
+        }.onFailure { Log.w(TAG, "default SmsManager lookup failed", it) }
         return list
     }
 
@@ -229,12 +304,16 @@ object SmsLoader {
                 }
             }
         }
-        // Append ICC entries for the same address (same loose match the
-        // conversation list uses — trim only).
+        // Append cached ICC entries for the same address. Do not touch the
+        // slow SIM API here; conversation refresh keeps the memory cache warm.
         val needle = address.trim()
-        loadIccMessagesRaw(ctx)
-            .filter { it.address.trim() == needle }
-            .forEach { out.add(it) }
+        val iccAll = cachedIccMessages()
+        val iccMatched = iccAll.filter { it.address.trim() == needle }
+        Log.d(
+            TAG,
+            "loadMessagesFor: needle=[$needle] (len=${needle.length}) icc.all=${iccAll.size} icc.cached=${iccAll.size} icc.matched=${iccMatched.size} icc.addrs=${iccAll.map { "[${it.address}](len=${it.address.length})" }}",
+        )
+        iccMatched.forEach { out.add(it) }
         // Local SMS_RECEIVED cache.
         SmsCache.all(ctx)
             .filter { it.address.trim() == needle }

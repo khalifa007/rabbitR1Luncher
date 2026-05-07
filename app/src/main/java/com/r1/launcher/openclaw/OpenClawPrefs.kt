@@ -48,10 +48,6 @@ class OpenClawPrefs private constructor(ctx: Context) {
         get() = secure.getString(KEY_SHARED_TOKEN, null)
         set(value) = secure.edit { if (value == null) remove(KEY_SHARED_TOKEN) else putString(KEY_SHARED_TOKEN, value) }
 
-    var openaiKey: String?
-        get() = secure.getString(KEY_OPENAI_KEY, null)
-        set(value) = secure.edit { if (value == null) remove(KEY_OPENAI_KEY) else putString(KEY_OPENAI_KEY, value) }
-
     val instanceId: String
         get() = plain.getString(KEY_INSTANCE_ID, null) ?: run {
             val fresh = UUID.randomUUID().toString()
@@ -66,12 +62,6 @@ class OpenClawPrefs private constructor(ctx: Context) {
     var chatFontSize: Int
         get() = plain.getInt(KEY_CHAT_FONT_SIZE, 14)
         set(value) = plain.edit { putInt(KEY_CHAT_FONT_SIZE, value) }
-
-    var ttsEnabled: Boolean
-        get() = plain.getBoolean(KEY_TTS_ENABLED, false)
-        set(value) = plain.edit { putBoolean(KEY_TTS_ENABLED, value) }
-
-
 
     var selectedSessionKey: String?
         get() = plain.getString(KEY_SELECTED_SESSION, null)
@@ -103,10 +93,8 @@ class OpenClawPrefs private constructor(ctx: Context) {
         private const val KEY_DEVICE_TOKEN = "gateway.deviceToken"
         private const val KEY_SHARED_TOKEN = "gateway.token"
         private const val KEY_INSTANCE_ID = "node.instanceId"
-        private const val KEY_OPENAI_KEY = "openai.key"
         private const val KEY_HIDE_CHAT = "chat.hide"
         private const val KEY_CHAT_FONT_SIZE = "chat.fontSize"
-        private const val KEY_TTS_ENABLED = "chat.ttsEnabled"
 
         private const val KEY_SELECTED_SESSION = "chat.selectedSessionKey"
         private const val KEY_LAST_MAIN_SESSION = "chat.lastMainSessionKey"

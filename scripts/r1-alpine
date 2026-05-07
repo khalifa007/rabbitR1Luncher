@@ -1,0 +1,80 @@
+#!/system/bin/sh
+# r1-alpine — run a single command inside the Alpine chroot.
+#
+# Bind mounts and DNS were set during bootstrap. They survive until reboot;
+# this wrapper restores them on demand if the device rebooted in between.
+#
+# Usage from the launcher terminal panel:
+#   sh /data/local/tmp/r1-alpine "node --version"
+#   sh /data/local/tmp/r1-alpine "npm install -g openclaw"
+#   sh /data/local/tmp/r1-alpine "cd /root && npm init -y && npm i express"
+ALPINE=/data/local/tmp/alpine
+
+if [ ! -d "$ALPINE/usr" ]; then
+    echo "alpine not bootstrapped. run: sh /data/local/tmp/bootstrap-alpine.sh"
+    exit 1
+fi
+
+# Re-bind mounts that don't survive a device reboot.
+for d in proc sys dev; do
+    if ! grep -q " $ALPINE/$d " /proc/mounts; then
+        mount --bind "/$d" "$ALPINE/$d" 2>/dev/null
+    fi
+done
+
+# Android's parent PATH (/system/bin etc.) is meaningless inside Alpine and
+# means commands like apk/node fall through to "not found". Force a sane PATH
+# that also includes ~/.local/bin so per-user installs (e.g. Claude Code's
+# native install at ~/.local/bin/claude) are on PATH out of the box.
+ALPINE_PATH="/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Auth env-var assembly. CRITICAL: don't export empty strings — Claude Code's
+# auth precedence treats `ANTHROPIC_API_KEY=""` as "key set but invalid",
+# which poisons the OAuth/subscription fallback (per
+# code.claude.com/docs/en/authentication#authentication-precedence). Build
+# the env list dynamically so unset surfaces stay unset. Subscription OAuth
+# is read straight from /home/claude/.claude/.credentials.json by the binary
+# itself — no extra env var needed for that path.
+AUTH_ENV=""
+if [ -r /data/local/tmp/.anthropic_key ]; then
+    KEY=$(cat /data/local/tmp/.anthropic_key | tr -d '\n\r ')
+    [ -n "$KEY" ] && AUTH_ENV="ANTHROPIC_API_KEY=$KEY"
+fi
+
+# Claude Code refuses --dangerously-skip-permissions (= bypassPermissions
+# mode in settings.json) when running as root, so any command starting with
+# `claude ` drops to the non-root `claude` user before invoking it. Other
+# commands (apk, node, npm, r1-root, …) stay root because they need it.
+case "$1" in
+    claude|claude\ *)
+        DROP_TO_CLAUDE_USER=1
+        ;;
+    *)
+        DROP_TO_CLAUDE_USER=0
+        ;;
+esac
+
+if [ -z "$1" ]; then
+    # No command supplied — drop into ash as root. Note: without a PTY this
+    # is one-shot only; you'll get no prompt and ^D to exit. Prefer passing
+    # a command string for actual work.
+    exec chroot "$ALPINE" /usr/bin/env -i \
+        HOME=/root TERM=xterm PATH="$ALPINE_PATH" \
+        $AUTH_ENV \
+        /bin/ash
+elif [ "$DROP_TO_CLAUDE_USER" = "1" ]; then
+    # Drop to the `claude` user (HOME=/home/claude where credentials live).
+    # `su -l` opens a login shell which loads the right env. The `--` lets
+    # us pass an arbitrary command string. We still cd $HOME first so claude
+    # creates project files under /home/claude.
+    exec chroot "$ALPINE" /usr/bin/env -i \
+        TERM=xterm PATH="$ALPINE_PATH" \
+        $AUTH_ENV \
+        /bin/su -l claude -s /bin/ash -c "cd \$HOME && $*"
+else
+    # Default: stay root, cd /root.
+    exec chroot "$ALPINE" /usr/bin/env -i \
+        HOME=/root TERM=xterm PATH="$ALPINE_PATH" \
+        $AUTH_ENV \
+        /bin/ash -c "cd \$HOME && $*"
+fi

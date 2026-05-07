@@ -6,17 +6,19 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -24,17 +26,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
+import com.r1.launcher.R
 
-/**
- * Two-row destructive confirmation. Default focus is "< back" so a stray
- * activate cancels rather than wipes — see LauncherState.openFactoryConfirm().
- */
+private val ACCENT = Color(0xFFFF6B00)
+private val DANGER = Color(0xFFCC1F00)
+
 @Composable
 fun FactoryConfirmPanel(
     state: LauncherState,
@@ -46,79 +50,76 @@ fun FactoryConfirmPanel(
         exit = fadeOut(tween(ANIM_CLOSE_MS)) + slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
     ) {
         val type = LocalR1Type.current
+        val backFocused = state.factoryConfirmFocus == 0
+        val confirmFocused = state.factoryConfirmFocus == 1
+
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(PaddingValues(start = 16.dp, end = 16.dp, top = 32.dp, bottom = 32.dp)),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                    .padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 18.dp),
             ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(if (backFocused) ACCENT else Color.Transparent)
+                        .clickable { onRowClick(0) }
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                ) {
+                    Text(
+                        text = stringResource(R.string.back),
+                        color = if (backFocused) Color.Black else ACCENT,
+                        fontSize = 24.sp,
+                        fontFamily = type.appCard.fontFamily,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Image(
+                        painter = painterResource(R.drawable.ic_settings),
+                        contentDescription = null,
+                        colorFilter = ColorFilter.tint(ACCENT),
+                        modifier = Modifier.size(28.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = stringResource(R.string.factory_confirm_title),
+                        color = ACCENT,
+                        fontSize = 28.sp,
+                        fontFamily = type.appCard.fontFamily,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                Spacer(Modifier.height(20.dp))
                 Text(
-                    text = "factory reset",
-                    color = Color(0xFFFF4500),
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold,
+                    text = stringResource(R.string.factory_confirm_warn),
+                    color = Color(0xFFCCCCCC),
+                    fontSize = 18.sp,
                     fontFamily = type.appCard.fontFamily,
-                )
-                Text(
-                    text = "this wipes all user data and resets the device. cannot be undone.",
-                    color = Color(0xFFAAAAAA),
-                    fontSize = 13.sp,
-                    fontFamily = type.appCard.fontFamily,
-                    textAlign = TextAlign.Start,
+                    fontWeight = FontWeight.Normal,
+                    lineHeight = 24.sp,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(Modifier.height(8.dp))
-                ConfirmRow(
-                    label = "< back",
-                    focused = state.factoryConfirmFocus == 0,
-                    danger = false,
-                    onClick = { onRowClick(0) },
-                )
-                ConfirmRow(
-                    label = "yes — wipe everything",
-                    focused = state.factoryConfirmFocus == 1,
-                    danger = true,
-                    onClick = { onRowClick(1) },
-                )
+                Spacer(Modifier.weight(1f))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(if (confirmFocused) DANGER else Color.Transparent)
+                        .clickable { onRowClick(1) }
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                ) {
+                    Text(
+                        text = stringResource(R.string.factory_confirm_action),
+                        color = if (confirmFocused) Color.White else Color.White,
+                        fontSize = 24.sp,
+                        fontFamily = type.appCard.fontFamily,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
             }
         }
-    }
-}
-
-@Composable
-private fun ConfirmRow(
-    label: String,
-    focused: Boolean,
-    danger: Boolean,
-    onClick: () -> Unit,
-) {
-    val type = LocalR1Type.current
-    val bg = when {
-        focused && danger -> Color(0xFFCC1F00) // hot red when about to fire
-        focused -> Color(0xFFFF4500)
-        else -> Color.Transparent
-    }
-    val fg = when {
-        focused -> Color.Black
-        danger -> Color(0xFFFF4500)
-        else -> Color.White
-    }
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .background(bg)
-            .clickable { onClick() }
-            .padding(horizontal = 12.dp, vertical = 12.dp),
-        contentAlignment = Alignment.CenterStart,
-    ) {
-        Text(
-            text = label,
-            color = fg,
-            fontSize = 22.sp,
-            fontFamily = type.appCard.fontFamily,
-            fontWeight = FontWeight.Medium,
-        )
     }
 }

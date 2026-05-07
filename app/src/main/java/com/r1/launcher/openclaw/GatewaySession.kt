@@ -50,6 +50,14 @@ class GatewaySession(
         data class Live(val sessionKey: String) : State()
         data class Switching(val sessionKey: String) : State()
         data class Error(val message: String) : State()
+        /**
+         * Emitted only when the connect RPC was rejected with a known
+         * auth/token error code. The activity wipes pairing and routes
+         * back to QR for this specific signal — generic Error events do
+         * not, since they cover send-rejected, switch-failed, and other
+         * recoverable runtime errors.
+         */
+        data class AuthExpired(val message: String) : State()
     }
 
     private val app = context.applicationContext
@@ -111,6 +119,7 @@ class GatewaySession(
         if (isClosed.compareAndSet(false, true)) failPending("session stopped")
         runCatching { socket?.close(1000, "panel closed") }
         socket = null
+        synchronized(mediaCache) { mediaCache.clear() }
         // Cancel in-flight launches but keep the SupervisorJob alive — calling
         // `scope.cancel()` would make any subsequent start() a silent no-op
         // because the scope itself would be dead.
@@ -132,6 +141,16 @@ class GatewaySession(
         }
     }
 
+    /**
+     * LRU cache for assistant image hydration. Without this, every
+     * `chat.history` refresh re-downloads every image; switching sessions
+     * back and forth re-fetches the same bytes from the gateway repeatedly.
+     */
+    private val mediaCache = object : LinkedHashMap<String, String>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean =
+            size > 32
+    }
+
     /** Drain pending JSON-RPC waiters with an error so callers don't hang until timeout. */
     private fun failPending(reason: String) {
         val snapshot = pending.toMap()
@@ -147,10 +166,14 @@ class GatewaySession(
         imageBase64: String? = null,
         onAck: (success: Boolean, runId: String?, error: String?) -> Unit = { _, _, _ -> },
     ) {
+        // Capture before launch — sessionKey is volatile and a concurrent
+        // switchSession() could otherwise route this message to the wrong
+        // thread between launch and the buildJsonObject below.
+        val targetKey = sessionKey
         scope.launch {
             try {
                 val params = buildJsonObject {
-                    put("sessionKey", JsonPrimitive(sessionKey))
+                    put("sessionKey", JsonPrimitive(targetKey))
                     put("message", JsonPrimitive(text))
                     put("thinking", JsonPrimitive("off"))
                     put("timeoutMs", JsonPrimitive(60_000L))
@@ -233,12 +256,20 @@ class GatewaySession(
         onState(State.Switching(trimmed))
         scope.launch {
             try {
-                request("node.event", buildJsonObject {
-                    put("event", JsonPrimitive("chat.subscribe"))
-                    put("payloadJSON", JsonPrimitive(buildJsonObject {
-                        put("sessionKey", JsonPrimitive(trimmed))
-                    }.toString()))
+                val direct = request("chat.subscribe", buildJsonObject {
+                    put("sessionKey", JsonPrimitive(trimmed))
                 }, timeoutMs = 10_000L)
+                val ok = direct["ok"]?.jsonPrimitive?.booleanOrNull ?: false
+                val errCode = (direct["error"] as? JsonObject)
+                    ?.get("code")?.jsonPrimitive?.contentOrNull
+                if (!ok && errCode == "METHOD_NOT_FOUND") {
+                    request("node.event", buildJsonObject {
+                        put("event", JsonPrimitive("chat.subscribe"))
+                        put("payloadJSON", JsonPrimitive(buildJsonObject {
+                            put("sessionKey", JsonPrimitive(trimmed))
+                        }.toString()))
+                    }, timeoutMs = 10_000L)
+                }
             } catch (t: Throwable) {
                 android.util.Log.w("OpenClaw", "switch subscribe threw", t)
             }
@@ -291,15 +322,34 @@ class GatewaySession(
                         }, timeoutMs = 10_000L)
                     }.getOrNull()
                 }
-                val arr = (res?.get("payload") as? JsonObject)?.get("sessions") as? JsonArray
+                // Gateway 2026.5.4 returns the array under `rows`; older
+                // builds used `sessions`. Probe both so the panel works
+                // across versions.
+                val payload = res?.get("payload") as? JsonObject
+                val arr = (payload?.get("rows") as? JsonArray)
+                    ?: (payload?.get("sessions") as? JsonArray)
+                    ?: (payload?.get("items") as? JsonArray)
                 val parsed = arr?.mapNotNull { el ->
                     val obj = el as? JsonObject ?: return@mapNotNull null
-                    val key = obj["key"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                    // 2026.5.4 emits `sessionKey`; pre-2026.5 used `key`.
+                    val key = (obj["sessionKey"]?.jsonPrimitive?.contentOrNull
+                        ?: obj["key"]?.jsonPrimitive?.contentOrNull)
+                        ?.trim().orEmpty()
                     if (key.isEmpty()) return@mapNotNull null
-                    val updatedAt = obj["updatedAt"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+                    val updatedAt = (obj["updatedAt"]?.jsonPrimitive?.contentOrNull
+                        ?: obj["updatedAtMs"]?.jsonPrimitive?.contentOrNull
+                        ?: obj["lastActivityAt"]?.jsonPrimitive?.contentOrNull)?.toLongOrNull()
                     val displayName = obj["displayName"]?.jsonPrimitive?.contentOrNull
+                        ?: obj["title"]?.jsonPrimitive?.contentOrNull
                     SessionEntry(key = key, updatedAtMs = updatedAt, displayName = displayName)
                 }.orEmpty()
+                android.util.Log.i("OpenClaw", "sessions.list parsed=${parsed.size} arrayKey=" +
+                    when {
+                        payload?.get("rows") is JsonArray -> "rows"
+                        payload?.get("sessions") is JsonArray -> "sessions"
+                        payload?.get("items") is JsonArray -> "items"
+                        else -> "none"
+                    })
                 onSessions(parsed)
             } catch (t: Throwable) {
                 android.util.Log.w("OpenClaw", "listSessions threw", t)
@@ -356,13 +406,26 @@ class GatewaySession(
             // Matches openclaw android ConnectionManager.kt:160. The pairing
             // setup bootstrap profile whitelists these operator.* scopes.
             val role = "operator"
+            // Connect as operator UI — `node` role can't subscribe/send chat.
+            // Matches openclaw android ConnectionManager.kt:160. The pairing
+            // setup bootstrap profile whitelists these operator.* scopes.
+            // Asking for scopes outside the bound profile (e.g. operator.admin,
+            // operator.pairing) fails with `bootstrap_token_invalid` because
+            // the gateway uses sameStringSet against the bound set since
+            // GHSA-gg9v-mgcp-v6m7 (commit a600c72).
             val scopes = listOf("operator.read", "operator.write", "operator.talk.secrets")
             val mode = "ui"
             val clientId = "openclaw-android"
             val platform = "android"
             val deviceFamily = "rabbit-r1"
 
-            val deviceTokenForSig = prefs.deviceToken ?: prefs.sharedToken ?: prefs.bootstrapToken
+            // Snapshot tokens once so the signed payload and the auth field
+            // can never disagree if prefs are mutated mid-handshake (e.g. a
+            // token rotation racing with the connect RPC).
+            val devToken = prefs.deviceToken
+            val shrToken = prefs.sharedToken
+            val bsToken = prefs.bootstrapToken
+            val deviceTokenForSig = devToken ?: shrToken ?: bsToken
             val payloadStr = DeviceIdentityStore.buildAuthPayloadV3(
                 deviceId = identity.deviceId,
                 clientId = clientId,
@@ -379,15 +442,15 @@ class GatewaySession(
             val publicKey = identityStore.publicKeyBase64Url(identity)
 
             val authObj = when {
-                prefs.deviceToken != null -> buildJsonObject {
-                    put("token", JsonPrimitive(prefs.deviceToken))
-                    put("deviceToken", JsonPrimitive(prefs.deviceToken))
+                devToken != null -> buildJsonObject {
+                    put("token", JsonPrimitive(devToken))
+                    put("deviceToken", JsonPrimitive(devToken))
                 }
-                prefs.sharedToken != null -> buildJsonObject {
-                    put("token", JsonPrimitive(prefs.sharedToken))
+                shrToken != null -> buildJsonObject {
+                    put("token", JsonPrimitive(shrToken))
                 }
-                prefs.bootstrapToken != null -> buildJsonObject {
-                    put("bootstrapToken", JsonPrimitive(prefs.bootstrapToken))
+                bsToken != null -> buildJsonObject {
+                    put("bootstrapToken", JsonPrimitive(bsToken))
                 }
                 else -> null
             }
@@ -425,8 +488,16 @@ class GatewaySession(
 
             val res = request("connect", params, timeoutMs = 15_000L)
             if (!(res["ok"]?.jsonPrimitive?.booleanOrNull ?: false)) {
-                val err = (res["error"] as? JsonObject)?.get("message")?.jsonPrimitive?.contentOrNull
-                onState(State.Error("connect rejected: ${err ?: "unknown"}"))
+                val errObj = res["error"] as? JsonObject
+                val errMsg = errObj?.get("message")?.jsonPrimitive?.contentOrNull
+                val details = errObj?.get("details") as? JsonObject
+                val authReason = details?.get("authReason")?.jsonPrimitive?.contentOrNull
+                val detailCode = details?.get("code")?.jsonPrimitive?.contentOrNull
+                val isAuthFailure = authReason != null ||
+                    (detailCode != null && detailCode.startsWith("AUTH_"))
+                val full = "connect rejected: ${errMsg ?: "unknown"}"
+                if (isAuthFailure) onState(State.AuthExpired(full))
+                else onState(State.Error(full))
                 return
             }
             val payload = res["payload"] as? JsonObject
@@ -447,30 +518,50 @@ class GatewaySession(
             }
             // Honor the persisted user pick over the snapshot main — otherwise
             // a returning user gets snapped back to "main" every connect.
+            // Exception: pre-2026.5 prefs hold the literal "main"; the new
+            // gateway emits keys like "agent:main:main". Migrate by adopting
+            // the snapshot main in that case.
             val persisted = prefs.selectedSessionKey?.takeUnless { it.isBlank() }
-            sessionKey = when {
-                !persisted.isNullOrBlank() -> persisted
+            val resolved = when {
+                !persisted.isNullOrBlank() && persisted != "main" -> persisted
                 !main.isNullOrBlank() -> main
+                !persisted.isNullOrBlank() -> persisted
                 else -> sessionKey
             }
+            if (persisted == "main" && !main.isNullOrBlank() && main != "main") {
+                prefs.selectedSessionKey = main
+            }
+            sessionKey = resolved
 
             // Reset backoff on successful connect
             reconnectDelayMs = 2_000L
             onState(State.Live(sessionKey))
 
-            // chat.subscribe is delivered via node.event (the openclaw client
-            // does the same in ChatController.kt:294). The direct RPC route
-            // requires operator.admin which the bootstrap profile doesn't grant.
+            // Direct `chat.subscribe` is the 2026.5.x path. The legacy
+            // `node.event` wrap is only useful when the gateway returns
+            // METHOD_NOT_FOUND (i.e. a pre-2026.5 build that doesn't expose
+            // the direct method). Any other error (missing scope,
+            // unauthorized role, etc.) tells us the wrap will fail too —
+            // skip it to cut wasted RPC + noisy logs.
             try {
-                val sub = request("node.event", buildJsonObject {
-                    put("event", JsonPrimitive("chat.subscribe"))
-                    put("payloadJSON", JsonPrimitive(buildJsonObject {
-                        put("sessionKey", JsonPrimitive(sessionKey))
-                    }.toString()))
+                val direct = request("chat.subscribe", buildJsonObject {
+                    put("sessionKey", JsonPrimitive(sessionKey))
                 }, timeoutMs = 10_000L)
-                android.util.Log.i("OpenClaw", "node.event(chat.subscribe) -> $sub")
+                val ok = direct["ok"]?.jsonPrimitive?.booleanOrNull ?: false
+                val errCode = (direct["error"] as? JsonObject)
+                    ?.get("code")?.jsonPrimitive?.contentOrNull
+                android.util.Log.i("OpenClaw", "chat.subscribe direct ok=$ok code=$errCode")
+                if (!ok && errCode == "METHOD_NOT_FOUND") {
+                    val sub = request("node.event", buildJsonObject {
+                        put("event", JsonPrimitive("chat.subscribe"))
+                        put("payloadJSON", JsonPrimitive(buildJsonObject {
+                            put("sessionKey", JsonPrimitive(sessionKey))
+                        }.toString()))
+                    }, timeoutMs = 10_000L)
+                    android.util.Log.i("OpenClaw", "node.event(chat.subscribe) fallback -> $sub")
+                }
             } catch (t: Throwable) {
-                android.util.Log.w("OpenClaw", "node.event(chat.subscribe) threw", t)
+                android.util.Log.w("OpenClaw", "chat.subscribe threw", t)
             }
             val initialToken = switchToken.get()
             try {
@@ -492,7 +583,7 @@ class GatewaySession(
     }
 
     private suspend fun handleFrame(text: String) {
-        android.util.Log.v("OpenClaw", "<- ${text.take(500)}")
+        android.util.Log.v("OpenClaw", "<- ${redactSensitive(text).take(2000)}")
         val obj = runCatching { json.parseToJsonElement(text) as? JsonObject }.getOrNull() ?: return
         when (obj["type"]?.jsonPrimitive?.contentOrNull) {
             "res" -> {
@@ -539,6 +630,9 @@ class GatewaySession(
     }
 
     private suspend fun request(method: String, params: JsonElement?, timeoutMs: Long): JsonObject {
+        // Validate the socket BEFORE inserting into pending — otherwise a
+        // throw here would leak the entry forever.
+        val ws = socket ?: throw IllegalStateException("not connected")
         val id = UUID.randomUUID().toString()
         val deferred = CompletableDeferred<JsonObject>()
         pending[id] = deferred
@@ -548,9 +642,8 @@ class GatewaySession(
             put("method", JsonPrimitive(method))
             if (params != null) put("params", params)
         }
-        val ws = socket ?: throw IllegalStateException("not connected")
         val frameStr = frame.toString()
-        android.util.Log.v("OpenClaw", "-> ${frameStr.take(500)}")
+        android.util.Log.v("OpenClaw", "-> ${redactSensitive(frameStr).take(2000)}")
         if (!ws.send(frameStr)) {
             pending.remove(id)
             throw IllegalStateException("ws send failed")
@@ -570,6 +663,7 @@ class GatewaySession(
     }
 
     private fun fetchAssistantImageBase64(source: String): String? {
+        synchronized(mediaCache) { mediaCache[source] }?.let { return it }
         val httpBase = toHttpUrl(prefs.gatewayUrl ?: return null) ?: return null
         val token = prefs.deviceToken ?: prefs.sharedToken ?: prefs.bootstrapToken
         val url = if (source.startsWith("/api/chat/media/outgoing/")) {
@@ -599,11 +693,27 @@ class GatewaySession(
                 }
                 val bytes = res.body?.bytes() ?: return null
                 if (bytes.isEmpty()) return null
-                android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                val encoded = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                synchronized(mediaCache) { mediaCache[source] = encoded }
+                encoded
             }
         }.onFailure {
             android.util.Log.w("OpenClaw", "assistant media fetch threw for $source", it)
         }.getOrNull()
+    }
+
+    /**
+     * Strip token/signature/auth values out of a WS frame before logging.
+     * Verbose-level frame logs are useful for protocol debugging but must
+     * never carry the device's bootstrap/device tokens, the Ed25519
+     * signature, or audio/image base64 payloads — those leak via logcat
+     * captures on userdebug builds.
+     */
+    private fun redactSensitive(frame: String): String {
+        var out = frame
+        out = REDACT_STRING.replace(out) { m -> "\"${m.groupValues[1]}\":\"***\"" }
+        out = REDACT_ATTACH_CONTENT.replace(out) { "\"content\":\"***\"" }
+        return out
     }
 
     private fun toWsUrl(raw: String): String? {
@@ -624,5 +734,12 @@ class GatewaySession(
             trimmed.startsWith("ws://") -> "http://" + trimmed.removePrefix("ws://")
             else -> "http://$trimmed"
         }
+    }
+
+    companion object {
+        private val REDACT_STRING = Regex(
+            "\"(token|deviceToken|bootstrapToken|sharedToken|signature|publicKey|nonce|Authorization)\"\\s*:\\s*\"[^\"]*\""
+        )
+        private val REDACT_ATTACH_CONTENT = Regex("\"content\"\\s*:\\s*\"[^\"]{40,}\"")
     }
 }

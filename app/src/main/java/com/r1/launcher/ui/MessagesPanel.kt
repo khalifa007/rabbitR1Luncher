@@ -21,11 +21,13 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
+import com.r1.launcher.R
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -65,7 +67,7 @@ fun MessagesPanel(
             ) {
                 item {
                     SettingsRow(
-                        label = "< back",
+                        label = stringResource(R.string.back_short),
                         focused = state.messagesFocus == 0,
                         toggleChecked = null,
                         onClick = { onRowClick(0) },
@@ -73,8 +75,10 @@ fun MessagesPanel(
                 }
                 if (total == 0) {
                     item {
-                        val msg = if (state.smsLoading) "loading…"
-                            else state.smsError ?: "no messages"
+                        val loadingTxt = stringResource(R.string.common_loading)
+                        val emptyTxt = stringResource(R.string.messages_empty)
+                        val msg = if (state.smsLoading) loadingTxt
+                            else state.smsError ?: emptyTxt
                         Box(
                             modifier = Modifier
                                 .padding(horizontal = 12.dp, vertical = 24.dp)
@@ -158,9 +162,12 @@ fun MessagesThreadPanel(
                 }
                 if (items.isEmpty()) {
                     item {
+                        val loadingTxt = stringResource(R.string.common_loading)
+                        val emptyTxt = stringResource(R.string.messages_empty)
+                        val msg = if (state.smsThreadLoading) loadingTxt else emptyTxt
                         Box(modifier = Modifier.padding(horizontal = 12.dp, vertical = 24.dp)) {
                             Text(
-                                text = "no messages",
+                                text = msg,
                                 color = Color(0xFFAAAAAA),
                                 fontSize = 14.sp,
                                 fontFamily = type.appCard.fontFamily,
@@ -202,6 +209,10 @@ fun MessagesThreadPanel(
     }
 }
 
-private val timeFmt = SimpleDateFormat("MMM d HH:mm", Locale.getDefault())
+// Lazy so Locale.getDefault() resolves AFTER attachBaseContext flips it; uses
+// digitFriendlyLocale() to pin Latin digits even in Arabic locale.
+private val timeFmt by lazy {
+    SimpleDateFormat("MMM d HH:mm", com.r1.launcher.locale.digitFriendlyLocale())
+}
 private fun formatDate(ms: Long): String =
     runCatching { timeFmt.format(Date(ms)) }.getOrDefault("")

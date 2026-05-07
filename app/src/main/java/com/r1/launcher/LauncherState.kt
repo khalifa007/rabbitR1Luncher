@@ -6,12 +6,13 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.r1.launcher.claude.ClaudeMessage
 import com.r1.launcher.messages.SmsConversation
 import com.r1.launcher.messages.SmsItem
 import com.r1.launcher.openclaw.ChatMessage
 import com.r1.launcher.openclaw.SessionEntry
 
-enum class Panel { HOME, APPS, SETTINGS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, BRIGHTNESS, VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_TALK, OPENCLAW_CANVAS, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD }
+enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_LANGUAGE, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, CLAUDE }
 
 enum class WifiShareEditTarget { SSID, PASSWORD }
 
@@ -35,8 +36,31 @@ class LauncherState {
 
     // --- per-panel focus indices ---
     var appsFocus by mutableIntStateOf(0)
-    /** Settings panel rows: 0=Brightness, 1=Volume, 2=Wi-Fi, 3=Airplane/Data. */
+    /**
+     * Bumped by [activate] when launching from the apps panel via wheel/side
+     * button. The focused AppCard observes this and runs the same press
+     * animation that the touch path already fires via its `clickable` lambda,
+     * so both entry points share one visual feedback.
+     */
+    var appsPressTrigger by mutableIntStateOf(0)
+    /** Onboarding wizard: 0=welcome, 1=network, 2=updates, 3=done. */
+    var onboardingStep by mutableIntStateOf(0)
+    /** Focus within the current onboarding step's row list. */
+    var onboardingFocus by mutableIntStateOf(0)
+    /** True while the wizard is active — gates back-routing detours from sub-flows like wifi scan. */
+    var isOnboarding by mutableStateOf(false)
+    /** Top settings: 0=back, 1=network, 2=display, 3=sound, 4=device, 5=about. */
     var settingsFocus by mutableIntStateOf(0)
+    /** Display category: 0=back, 1=brightness. */
+    var settingsDisplayFocus by mutableIntStateOf(0)
+    /** Sound category: 0=back, 1=ui sound, 2=speaker. */
+    var settingsSoundFocus by mutableIntStateOf(0)
+    /** Device category: 0=back, 1=updates, 2=factory reset. */
+    var settingsDeviceFocus by mutableIntStateOf(0)
+    /** About category: 0=back. (single info row). */
+    var settingsAboutFocus by mutableIntStateOf(0)
+    /** Language picker: 0=back, 1..N=LocalePrefs.SUPPORTED[N-1]. */
+    var settingsLanguageFocus by mutableIntStateOf(0)
     var networkFocus by mutableIntStateOf(0)
     /** Factory-reset confirmation: 0=back/cancel, 1=confirm wipe. Defaults to 0 so accidental activate is a cancel. */
     var factoryConfirmFocus by mutableIntStateOf(0)
@@ -66,6 +90,10 @@ class LauncherState {
     /** Live STREAM_MUSIC volume 0..volumeMax. */
     var volumeLevel by mutableIntStateOf(0)
     var volumeMax by mutableIntStateOf(15)
+    /** UI-click feedback volume 0..uiVolumeMax. Drives SoundPool gain in
+     *  playMovingSound / playUiClickSound; persisted via SoundPrefs. */
+    var uiVolumeLevel by mutableIntStateOf(5)
+    var uiVolumeMax by mutableIntStateOf(15)
 
     // --- clock / date ---
     var clockText by mutableStateOf("00:00")
@@ -105,7 +133,6 @@ class LauncherState {
     var chatRecording by mutableStateOf(false)
     var chatBusy by mutableStateOf(false)
     var chatScrollIndex by mutableIntStateOf(0)
-    var canvasScrollIndex by mutableIntStateOf(0)
     /** Live mic peak 0..100, used by the talk-mode input ring. */
     var chatInputLevel by mutableIntStateOf(0)
     /** Running speech-to-text transcript while recording. Cleared on stop. */
@@ -114,22 +141,29 @@ class LauncherState {
     var qrError by mutableStateOf<String?>(null)
     /** Drives the QR scanner's behaviour on a successful decode. */
     var qrScanMode by mutableStateOf(QrScanMode.GATEWAY_PAIRING)
-    /** OpenAI Whisper key state — true if a key is saved. Header pill reads this. */
-    var chatHasOpenaiKey by mutableStateOf(false)
-    /** Last 4 chars of saved Whisper key for visual confirmation. Empty if unset. */
-    var chatOpenaiKeyTail by mutableStateOf("")
     /** True between "stop recording" and either transcript-back or error. */
     var chatTranscribing by mutableStateOf(false)
-    /** Buffer for the openclaw settings input field. */
-    var chatSettingsKeyInput by mutableStateOf("")
+    /** Buffer for the Settings → Voice keyboard input field (key entry). */
+    var voiceKeyInput by mutableStateOf("")
     /** Focus index for the openclaw settings menu. */
     var openClawSettingsFocus by mutableIntStateOf(0)
     /** Toggle to hide chat messages in the chat panel. */
     var openClawHideChat by mutableStateOf(false)
     /** Chat font size in sp. Adjustable from OpenClaw settings. */
     var chatFontSize by mutableIntStateOf(14)
-    /** Auto-speak assistant replies via Android TextToSpeech when terminal events fire. */
-    var chatTtsEnabled by mutableStateOf(false)
+    // Voice config now lives globally in Settings → Voice (see VoicePrefs).
+    // The fields below are populated from VoicePrefs at activity start and on
+    // setting changes, so the UI can read them reactively.
+    var voiceEnabled by mutableStateOf(false)
+    var voiceId by mutableStateOf("21m00Tcm4TlvDq8ikWAM") // Rachel
+    var hasVoiceKey by mutableStateOf(false)
+    var voiceKeyTail by mutableStateOf("")
+    var voiceFocus by mutableIntStateOf(0)
+    // Live partial transcripts during STT recording. chatPartialText already
+    // existed (line 126) and is reused for OpenClaw chat. The two below are
+    // new for terminal/claude panels which gain dictation via ElevenLabs.
+    var terminalPartial by mutableStateOf("")
+    var claudePartial by mutableStateOf("")
     /** Available threads from sessions.list. Driven by GatewaySession.onSessions. */
     val chatSessions = mutableStateListOf<SessionEntry>()
     /** Currently active thread key. Persisted across launches via OpenClawPrefs. */
@@ -159,6 +193,72 @@ class LauncherState {
     var webServerPort by mutableIntStateOf(8080)
     /** Best-effort local IP of the interface the panel is reachable on. */
     var webServerIp by mutableStateOf("")
+    /** When false, web RPC `terminal.*` methods refuse with a "disabled" error.
+     *  Off by default — the launcher's root shell over LAN is a real risk and
+     *  the user must explicitly opt in via Settings → Network → "remote terminal". */
+    var webTerminalEnabled by mutableStateOf(false)
+
+    // --- terminal panel ---
+    /** Current input buffer; submitted on wheel-press, edited via RetroKeyboard. */
+    var terminalInput by mutableStateOf("")
+    /** Working directory tracked client-side (parsed from `cd ...`); prepended
+     *  to every command since each carroot connection gets a fresh shell. */
+    var terminalCwd by mutableStateOf("/sdcard")
+    /** Output scrollback. Capped at 500 lines (FIFO) to bound memory. */
+    val terminalOutput = mutableStateListOf<String>()
+    val terminalOutputMax = 500
+    /** True between submit and command exit. Blocks concurrent submissions. */
+    var terminalBusy by mutableStateOf(false)
+    var terminalRecording by mutableStateOf(false)
+    var terminalTranscribing by mutableStateOf(false)
+    /** Wheel-driven scroll offset for the output area (0 = bottom/latest). */
+    var terminalScrollIndex by mutableIntStateOf(0)
+    /** When false, the on-screen RetroKeyboard collapses so the output area
+     *  fills the screen — useful for reading long `npm install` logs. Toggled
+     *  by the "kbd" header pill or the keyboard's own "hide" key. */
+    var terminalKbVisible by mutableStateOf(true)
+
+    // --- claude code app (Panel.CLAUDE) ---
+    /** Chat scrollback for the Claude Code app — alternating user/assistant
+     *  bubbles. Each turn is a single committed message (no streaming inside
+     *  a bubble; live streaming text lives in [claudeStreamingText]). */
+    val claudeMessages = mutableStateListOf<ClaudeMessage>()
+    /** Cap so very long chats don't degrade UI responsiveness. FIFO drop. */
+    val claudeMessagesMax = 200
+    /** Current input buffer; submitted on wheel-press / send pill. */
+    var claudeInput by mutableStateOf("")
+    /** True from "send" until the claude --print invocation returns. Blocks
+     *  concurrent submissions and drives the `...` status indicator. */
+    var claudeBusy by mutableStateOf(false)
+    /** Live partial assistant reply being streamed from claude --print's
+     *  stdout. Rendered as a "live" bubble at the bottom of the scrollback;
+     *  committed to [claudeMessages] when the invocation completes. */
+    var claudeStreamingText by mutableStateOf("")
+    /** Wheel-driven scroll offset (0 = bottom/latest). */
+    var claudeScrollIndex by mutableIntStateOf(0)
+    /** True between mic-press and transcript-back. */
+    var claudeRecording by mutableStateOf(false)
+    var claudeTranscribing by mutableStateOf(false)
+    /** False on the very first send of a session (no `-c` flag — start fresh).
+     *  Flips to true after first reply so subsequent sends use `--continue`
+     *  to maintain context. Reset on "clear chat" pill. */
+    var claudeFirstTurn by mutableStateOf(true)
+    /** True until the user dismisses the "use the web companion" hint screen
+     *  (the QR + IP redirect). Defaults true so first-time users land on the
+     *  hint; "open anyway" flips it false for the rest of the session. The
+     *  on-device chat is still functional — this just defers users to the
+     *  bigger-screen experience by default since the R1 keyboard is rough.
+     *  NOTE: this flag is only consulted when [claudeAuthed] is false — once
+     *  the user is logged in, the redirect is skipped entirely (the QR's
+     *  primary purpose is the OAuth flow, which is hard to do on-device). */
+    var claudeShowWebHint by mutableStateOf(true)
+    /** Set true once the launcher has confirmed Claude has working creds
+     *  (subscription OAuth via .credentials.json OR an Anthropic API key).
+     *  Updated from [claudeAuthStatus]'s background check on activity
+     *  startup, after bootstrap completion, and after each auth action.
+     *  When true, opening the Claude tile drops straight into chat — the
+     *  QR redirect was a setup affordance, not a recurring detour. */
+    var claudeAuthed by mutableStateOf(false)
 
     // --- messages (SMS) ---
     val smsConversations = mutableStateListOf<SmsConversation>()
@@ -171,6 +271,7 @@ class LauncherState {
     var smsThreadAddress by mutableStateOf("")
     var smsThreadName by mutableStateOf("")
     val smsThreadMessages = mutableStateListOf<SmsItem>()
+    var smsThreadLoading by mutableStateOf(false)
     var smsThreadFocus by mutableIntStateOf(0)
 
     // --- state transitions ---
@@ -180,9 +281,42 @@ class LauncherState {
         panel = Panel.APPS
     }
 
+    fun openOnboarding() {
+        onboardingStep = 0
+        onboardingFocus = 0
+        isOnboarding = true
+        panel = Panel.ONBOARDING
+    }
+
+    fun advanceOnboarding() {
+        onboardingStep++
+        onboardingFocus = 0
+        panel = Panel.ONBOARDING
+    }
+
     fun openSettings() {
         settingsFocus = 0
         panel = Panel.SETTINGS
+    }
+
+    fun openSettingsDisplay() {
+        settingsDisplayFocus = 0
+        panel = Panel.SETTINGS_DISPLAY
+    }
+
+    fun openSettingsSound() {
+        settingsSoundFocus = 0
+        panel = Panel.SETTINGS_SOUND
+    }
+
+    fun openSettingsDevice() {
+        settingsDeviceFocus = 0
+        panel = Panel.SETTINGS_DEVICE
+    }
+
+    fun openSettingsAbout() {
+        settingsAboutFocus = 0
+        panel = Panel.SETTINGS_ABOUT
     }
 
     fun openNetwork() {
@@ -224,6 +358,10 @@ class LauncherState {
         panel = Panel.VOLUME
     }
 
+    fun openUiVolume() {
+        panel = Panel.UI_VOLUME
+    }
+
     fun openFactoryConfirm() {
         factoryConfirmFocus = 0
         panel = Panel.FACTORY_CONFIRM
@@ -251,14 +389,14 @@ class LauncherState {
         panel = Panel.OPENCLAW_CHAT
     }
 
-    fun openOpenClawTalk() {
-        chatScrollIndex = 0
-        panel = Panel.OPENCLAW_TALK
+    fun openSettingsVoice() {
+        voiceFocus = 0
+        panel = Panel.SETTINGS_VOICE
     }
 
-    fun openOpenClawCanvas() {
-        canvasScrollIndex = 0
-        panel = Panel.OPENCLAW_CANVAS
+    fun openSettingsLanguage() {
+        settingsLanguageFocus = 0
+        panel = Panel.SETTINGS_LANGUAGE
     }
 
     fun openOpenClawCamera() {
@@ -280,18 +418,41 @@ class LauncherState {
         panel = Panel.MESSAGES
     }
 
+    fun openTerminal() {
+        // Preserve scrollback and cwd so reopening feels session-like.
+        terminalInput = ""
+        terminalScrollIndex = 0
+        terminalRecording = false
+        terminalTranscribing = false
+        panel = Panel.TERMINAL
+    }
+
+    fun openClaude() {
+        // Preserve message history + first-turn flag so reopening continues
+        // the same conversation. Only the input buffer + ephemeral indicators
+        // get reset.
+        claudeInput = ""
+        claudeScrollIndex = 0
+        claudeRecording = false
+        claudeTranscribing = false
+        // Show the web-companion redirect on every fresh entry. Once they hit
+        // "open anyway" we don't keep nagging within the same session, but
+        // navigating away and back resets it because that's almost always
+        // someone showing the QR to a new collaborator.
+        claudeShowWebHint = true
+        panel = Panel.CLAUDE
+    }
+
     fun openMessagesThread(address: String, displayName: String) {
         smsThreadAddress = address
         smsThreadName = displayName
         smsThreadFocus = 0
         smsThreadMessages.clear()
+        smsThreadLoading = true
         panel = Panel.MESSAGES_THREAD
     }
 
     fun openOpenClawSettings() {
-        // Pre-fill input with the current key (masked rendering happens in UI).
-        // Empty string when no key is set.
-        chatSettingsKeyInput = ""
         openClawSettingsFocus = 0
         panel = Panel.OPENCLAW_SETTINGS
     }
@@ -302,21 +463,31 @@ class LauncherState {
 
     fun back() {
         panel = when (panel) {
-            Panel.NETWORK, Panel.BRIGHTNESS, Panel.VOLUME, Panel.FACTORY_CONFIRM -> Panel.SETTINGS
-            Panel.WIFI_SCAN -> Panel.NETWORK
+            Panel.BRIGHTNESS -> Panel.SETTINGS_DISPLAY
+            Panel.VOLUME -> Panel.SETTINGS_SOUND
+            Panel.UI_VOLUME -> Panel.SETTINGS_SOUND
+            Panel.NETWORK -> if (isOnboarding) Panel.ONBOARDING else Panel.SETTINGS
+            Panel.FACTORY_CONFIRM -> Panel.SETTINGS_DEVICE
+            // Language was promoted out of the root in v3.32 — it now lives
+            // under Device alongside reboot/power off/factory reset, so the
+            // back arrow needs to drop back into SETTINGS_DEVICE.
+            Panel.SETTINGS_LANGUAGE -> Panel.SETTINGS_DEVICE
+            Panel.SETTINGS_DISPLAY, Panel.SETTINGS_SOUND, Panel.SETTINGS_DEVICE, Panel.SETTINGS_ABOUT, Panel.SETTINGS_VOICE -> Panel.SETTINGS
+            Panel.WIFI_SCAN -> if (isOnboarding) Panel.ONBOARDING else Panel.NETWORK
             Panel.WIFI_PASSWORD -> Panel.WIFI_SCAN
             Panel.WIFI_SHARE -> Panel.NETWORK
             Panel.WIFI_SHARE_EDIT -> Panel.WIFI_SHARE
+            Panel.ONBOARDING -> Panel.ONBOARDING
             Panel.SETTINGS -> Panel.APPS
             Panel.APPS -> Panel.HOME
             Panel.OPENCLAW_QR -> if (qrScanMode == QrScanMode.OPENAI_KEY) Panel.OPENCLAW_SETTINGS else Panel.APPS
             Panel.OPENCLAW_CHAT -> Panel.APPS
-            Panel.OPENCLAW_TALK -> Panel.OPENCLAW_CHAT
-            Panel.OPENCLAW_CANVAS -> Panel.OPENCLAW_CHAT
             Panel.OPENCLAW_CAMERA -> Panel.OPENCLAW_CHAT
             Panel.OPENCLAW_SETTINGS, Panel.OPENCLAW_SESSIONS -> Panel.OPENCLAW_CHAT
             Panel.MESSAGES -> Panel.APPS
             Panel.MESSAGES_THREAD -> Panel.MESSAGES
+            Panel.TERMINAL -> Panel.APPS
+            Panel.CLAUDE -> Panel.APPS
             Panel.HOME -> Panel.HOME
         }
     }
