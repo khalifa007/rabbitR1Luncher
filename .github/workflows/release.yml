@@ -27,19 +27,28 @@ jobs:
       # (LOCAL_CERTIFICATE := platform). The keystore is .gitignored — CI
       # gets it by base64-decoding the PLATFORM_KEYSTORE_B64 repo secret.
       - name: Restore platform.keystore from secret
+        env:
+          # Pulling the secret in via env (instead of `${{ }}` substitution
+          # inside the script) avoids shell-interpolation issues with newlines
+          # and keeps GitHub's secret redaction working on every line.
+          KEYSTORE_B64: ${{ secrets.PLATFORM_KEYSTORE_B64 }}
         run: |
-          if [ -z "${{ secrets.PLATFORM_KEYSTORE_B64 }}" ]; then
+          if [ -z "$KEYSTORE_B64" ]; then
             echo "::error::PLATFORM_KEYSTORE_B64 secret is not set."
             echo "::error::Add it under Settings → Secrets and variables → Actions."
             exit 1
           fi
+          # Diagnostic — char count is not sensitive (GH redacts the value).
+          echo "secret length: $(printf '%s' "$KEYSTORE_B64" | wc -c)"
           # Tolerate line-wrapped output (`base64` without -w 0) and any pasted
           # whitespace by stripping non-base64 chars before decoding.
-          printf '%s' "${{ secrets.PLATFORM_KEYSTORE_B64 }}" | tr -d '[:space:]' \
+          printf '%s' "$KEYSTORE_B64" | tr -d '[:space:]' \
             | base64 -d --ignore-garbage > platform.keystore
+          echo "decoded size: $(wc -c < platform.keystore) bytes"
           # Sanity check: PKCS12 magic bytes are 30 82, refuse to proceed otherwise.
           if ! head -c 2 platform.keystore | xxd -p | grep -q "^3082"; then
             echo "::error::Decoded keystore is not a valid PKCS12 file."
+            echo "::error::First 8 bytes: $(head -c 8 platform.keystore | xxd -p)"
             exit 1
           fi
 
