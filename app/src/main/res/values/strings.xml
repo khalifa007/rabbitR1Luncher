@@ -205,6 +205,9 @@
     <string name="openclaw_sessions_empty">no threads</string>
     <string name="openclaw_sessions_refreshing">refresh…</string>
     <string name="openclaw_sessions_refresh">refresh</string>
+    <string name="openclaw_sessions_new">+ new thread</string>
+    <string name="openclaw_btn_compact">compact</string>
+    <string name="openclaw_btn_clear_context">clear context</string>
 
     <!-- OpenClaw QR -->
     <string name="openclaw_qr_back_home">home</string>

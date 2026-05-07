@@ -285,6 +285,8 @@ fun LauncherRoot(
                 host.selectTone()
             },
             onCopyCode = { code -> host.copyToClipboard(code, "openclaw-code"); host.popTone() },
+            onCompactContext = { host.openClawCompactSession(); host.popTone() },
+            onClearContext = { host.openClawClearContext(); host.popTone() },
         )
 
         OpenClawCameraPanel(
@@ -375,6 +377,10 @@ fun LauncherRoot(
         ) {
             Topbar(state = state)
         }
+
+        // Toast overlay — top of the z-stack so it floats above every panel
+        // and the topbar. Self-dismissing; see ToastOverlay.kt.
+        ToastOverlay(state = state)
 
     }
     }

@@ -196,6 +196,9 @@
     <string name="openclaw_sessions_empty">لا توجد جلسات</string>
     <string name="openclaw_sessions_refreshing">تحديث…</string>
     <string name="openclaw_sessions_refresh">تحديث</string>
+    <string name="openclaw_sessions_new">+ جلسة جديدة</string>
+    <string name="openclaw_btn_compact">ضغط السياق</string>
+    <string name="openclaw_btn_clear_context">مسح السياق</string>
 
     <!-- OpenClaw QR -->
     <string name="openclaw_qr_back_home">الرئيسية</string>

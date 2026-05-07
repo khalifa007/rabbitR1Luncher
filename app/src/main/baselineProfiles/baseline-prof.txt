@@ -1,0 +1,14 @@
+HSPLcom/r1/launcher/**;->**(**)**
+HSPLandroidx/compose/runtime/**;->**(**)**
+HSPLandroidx/compose/ui/**;->**(**)**
+HSPLandroidx/compose/foundation/**;->**(**)**
+HSPLandroidx/compose/animation/**;->**(**)**
+HSPLandroidx/compose/material3/**;->**(**)**
+HSPLandroidx/activity/**;->**(**)**
+HSPLandroidx/lifecycle/**;->**(**)**
+HSPLkotlinx/coroutines/**;->**(**)**
+HSPLkotlin/coroutines/**;->**(**)**
+HSPLkotlin/collections/**;->**(**)**
+HSPLkotlin/sequences/**;->**(**)**
+HSPLkotlin/jvm/internal/**;->**(**)**
+HSPLkotlin/text/**;->**(**)**

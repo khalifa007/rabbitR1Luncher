@@ -26,7 +26,6 @@ import android.telephony.SignalStrength
 import android.telephony.TelephonyManager
 import android.view.KeyEvent
 import android.view.WindowManager
-import android.widget.Toast
 import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.ComponentActivity
@@ -128,6 +127,24 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private var openClawSpeakNextAssistant = false
     private var openClawLastSpokenKey = ""
 
+    // Streaming-TTS pipeline: chunk the assistant reply by sentence as
+    // onChatDelta ticks arrive, fire ElevenLabs synth per chunk in parallel,
+    // play MP3s sequentially in issuance order. Cuts perceived first-audio
+    // latency from "stream end + history round-trip" to "first sentence
+    // boundary in streaming text".
+    private var openClawStreamingSpokenOffset: Int = 0
+    private var openClawStreamingTtsActive: Boolean = false
+    private var openClawStreamingTtsTurnId: Long = 0L
+    private var openClawSpeechIssuedSeq: Int = 0
+    private var openClawSpeechNextToPlay: Int = 1
+    private var openClawSpeechPlaying: Boolean = false
+    // seq -> File (success) or null (errored/canceled, skip in playback)
+    private val openClawSpeechSlots: java.util.TreeMap<Int, File?> = java.util.TreeMap()
+    private val openClawTtsChunkCalls: MutableList<okhttp3.Call> = mutableListOf()
+    // The file currently feeding openClawSpeechPlayer — tracked so cancel
+    // can delete it (it's no longer in the slots map once playback starts).
+    private var openClawSpeechCurrentFile: File? = null
+
     // Voice/STT state — shared across chat / terminal / claude.
     private val voicePrefs by lazy { com.r1.launcher.voice.VoicePrefs.get(this) }
     private var voiceCapture: com.r1.launcher.voice.StreamingAudioCapture? = null
@@ -201,12 +218,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         override fun onReceive(c: Context, i: Intent?) {
             val k = i?.getStringExtra("key")?.trim().orEmpty()
             when {
-                k.isEmpty() -> toast("--es key missing")
-                !isValidElevenKey(k) -> toast("not an elevenlabs key")
+                k.isEmpty() -> toastFail("--es key missing")
+                !isValidElevenKey(k) -> toastFail("not an elevenlabs key")
                 else -> {
                     voicePrefs.elevenlabsKey = k
                     refreshVoiceKeyState()
-                    toast("voice key saved")
+                    toastSuccess("voice key saved")
                 }
             }
         }
@@ -250,6 +267,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
         )
+        // Kill the Android system "click" beep that View.playSoundEffect(CLICK)
+        // fires on every Compose Modifier.clickable activation. We ship our own
+        // UI click cue (SoundPrefs / playUiClickSound) and it stacks on top of
+        // the system one, producing a double-tick. Disable on the decor view —
+        // propagates to the AndroidComposeView and every clickable inside.
+        window.decorView.isSoundEffectsEnabled = false
 
         telephony = getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
         audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
@@ -613,10 +636,11 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             AppEntry.Claude -> {
                 selectTone()
                 state.openClaude()
-                // Auto-start the web companion so the QR redirect screen
-                // points at a URL that actually serves. No-op if it's
-                // already running.
-                if (!state.webServerEnabled) toggleWebServer(true)
+                // Don't auto-start the remote panel — that's the user's
+                // explicit choice via Settings → Network → "remote panel".
+                // The Claude redirect-to-web-companion screen now only
+                // shows when the user has already turned remote panel on,
+                // so we never present a dead QR.
                 // Re-probe auth on every entry — the user may have just
                 // logged in from the web companion in another tab without
                 // hitting any of the auth-action callbacks. Cheap; runs on
@@ -693,6 +717,11 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 // local UI (matches official client ChatController.kt:347).
                 if (runId == null || state.chatPendingRunIds.contains(runId)) {
                     state.chatStreamingText = text
+                    // Slice off any newly-completed sentences and start TTS
+                    // before the gateway is done writing — first-audio latency
+                    // drops from "stream end + history round-trip" to "first
+                    // sentence boundary".
+                    maybeEmitStreamingTtsChunk()
                 }
             }
         }
@@ -706,6 +735,9 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 // copy lands. applyOpenClawHistory() clears it once the new
                 // messages are in chatMessages, in the same frame.
                 state.chatBusy = false
+                // Speak any residue past the last sentence boundary — covers
+                // one-line replies, code-blocks, lists with no terminator.
+                flushStreamingTtsTail()
                 openClawSession?.refreshHistory()
             }
         }
@@ -780,7 +812,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         if (key == openClawLastSpokenKey) return
         val apiKey = voicePrefs.elevenlabsKey
         if (apiKey.isNullOrBlank()) {
-            toast("voice: set elevenlabs key in settings → voice")
+            toastFail("voice: set elevenlabs key in settings → voice")
             openClawSpeakNextAssistant = false
             return
         }
@@ -789,9 +821,11 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         // Cancel any prior in-flight TTS download / playback before starting a
         // new one — back-to-back assistant messages shouldn't stack audio.
         cancelOpenClawSpeech()
+        val cleanText = stripMarkdownForTts(msg.text)
+        if (cleanText.isBlank()) return
         val outFile = File(File(cacheDir, "openclaw-voice").apply { mkdirs() }, "assistant.mp3")
         openClawTtsCall = com.r1.launcher.voice.ElevenLabsTtsClient.synthesize(
-            text = msg.text,
+            text = cleanText,
             apiKey = apiKey,
             voiceId = state.voiceId,
             outFile = outFile,
@@ -799,7 +833,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             openClawTtsCall = null
             if (err == "canceled") return@synthesize  // user-initiated, silent
             if (err != null || mp3Bytes == null) {
-                toast("voice: ${err ?: "no audio"}")
+                toastFail("voice: ${err ?: "no audio"}")
                 return@synthesize
             }
             playOpenClawSpeech(mp3Bytes)
@@ -810,13 +844,287 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
      *  call when nothing is happening. Used for: back-to-back assistant
      *  messages (stack-prevent), session close, and the interrupt-on-record
      *  path in startVoiceCapture (so press-to-talk over a playing reply
-     *  immediately silences it instead of waiting for the audio to finish). */
+     *  immediately silences it instead of waiting for the audio to finish).
+     *  Also tears down the streaming-TTS pipeline (chunk calls + slot map +
+     *  per-turn offsets) so a new turn can start clean. */
     private fun cancelOpenClawSpeech() {
         runCatching { openClawTtsCall?.cancel() }
         openClawTtsCall = null
         runCatching { openClawSpeechPlayer?.stop() }
         runCatching { openClawSpeechPlayer?.release() }
         openClawSpeechPlayer = null
+        runCatching { openClawSpeechCurrentFile?.delete() }
+        openClawSpeechCurrentFile = null
+
+        // Streaming-TTS teardown: bumping turnId invalidates any in-flight
+        // chunk callbacks that race past the cancel(). Cancel HTTP, drop
+        // queued slots, delete leftover chunk MP3s.
+        openClawStreamingTtsTurnId++
+        openClawTtsChunkCalls.forEach { runCatching { it.cancel() } }
+        openClawTtsChunkCalls.clear()
+        openClawSpeechSlots.values.forEach { f -> f?.let { runCatching { it.delete() } } }
+        openClawSpeechSlots.clear()
+        // Belt-and-suspenders: any stream-*.mp3 still in cache (e.g., from a
+        // prior process kill where onDestroy didn't run) gets reaped here.
+        runCatching {
+            File(cacheDir, "openclaw-voice")
+                .listFiles { f -> f.name.startsWith("stream-") }
+                ?.forEach { runCatching { it.delete() } }
+        }
+        openClawSpeechIssuedSeq = 0
+        openClawSpeechNextToPlay = 1
+        openClawSpeechPlaying = false
+        openClawStreamingSpokenOffset = 0
+        openClawStreamingTtsActive = false
+    }
+
+    /** Strip Markdown markers so ElevenLabs reads natural prose, not
+     *  "asterisk asterisk bold". Conservative — keeps content, drops
+     *  formatting glyphs. Order matters: more specific patterns first. */
+    private fun stripMarkdownForTts(input: String): String {
+        var s = input
+        // Code fences ```lang ... ``` — keep contents, drop fences.
+        s = s.replace(Regex("```[a-zA-Z0-9_+-]*\\n?"), "")
+        s = s.replace("```", "")
+        // Inline code `foo` → foo
+        s = s.replace(Regex("`([^`\\n]+)`"), "$1")
+        // Image ![alt](url) → alt
+        s = s.replace(Regex("!\\[([^\\]]*)\\]\\([^)]*\\)"), "$1")
+        // Link [text](url) → text
+        s = s.replace(Regex("\\[([^\\]]+)\\]\\([^)]*\\)"), "$1")
+        // Bold **foo** / __foo__ → foo
+        s = s.replace(Regex("\\*\\*([^*\\n]+?)\\*\\*"), "$1")
+        s = s.replace(Regex("__([^_\\n]+?)__"), "$1")
+        // Italic *foo* / _foo_ — guarded so bullet "* item" at line start is left
+        // alone; the bullet rule below removes the marker.
+        s = s.replace(Regex("(?<![*\\s])\\*([^*\\n]+?)\\*(?!\\*)"), "$1")
+        s = s.replace(Regex("(?<![_\\w])_([^_\\n]+?)_(?!\\w)"), "$1")
+        // Strikethrough ~~foo~~ → foo
+        s = s.replace(Regex("~~([^~\\n]+)~~"), "$1")
+        // ATX headings "# Foo" → "Foo"
+        s = s.replace(Regex("(?m)^\\s*#{1,6}\\s+"), "")
+        // Blockquote "> foo" → "foo"
+        s = s.replace(Regex("(?m)^\\s*>\\s?"), "")
+        // List bullets "- foo" / "* foo" / "+ foo" → "foo"
+        s = s.replace(Regex("(?m)^\\s*[-*+]\\s+"), "")
+        // Collapse runaway whitespace introduced by stripped markers.
+        s = s.replace(Regex("\\n{3,}"), "\n\n")
+        s = s.replace(Regex(" {2,}"), " ")
+        return s.trim()
+    }
+
+    /** Find a sentence-boundary split point in `tail`. Returns the index
+     *  AFTER the boundary (so substring(0, idx) is ready to speak), or 0
+     *  if nothing is ready.
+     *
+     *  When `firstChunk == true` (no chunks emitted for this run yet),
+     *  return the FIRST qualifying boundary with a lower minChunk — gets
+     *  audio playing sooner. Otherwise return the LAST qualifying boundary
+     *  with a higher minChunk — maximizes prosody quality on subsequent
+     *  chunks.
+     *
+     *  Boundaries: `.`, `!`, `?` followed by whitespace AND preceded by a
+     *  letter (skips numbered-list markers `1.`, `2.`, decimals `3.14`);
+     *  any `\n\n`. Force-flush at MAX_TAIL on last whitespace if no
+     *  qualifying boundary exists yet (code, lists, abbrev-heavy prose). */
+    private fun findStreamingSplitPoint(tail: String, firstChunk: Boolean): Int {
+        if (tail.isEmpty()) return 0
+        val minChunk = if (firstChunk) 16 else 32
+        val maxTail = if (firstChunk) 160 else 240
+        var firstBoundary = 0
+        var lastBoundary = 0
+        var i = 0
+        while (i < tail.length) {
+            val c = tail[i]
+            var here = 0
+            if ((c == '.' || c == '!' || c == '?') && i + 1 < tail.length) {
+                val prev = if (i > 0) tail[i - 1] else ' '
+                if (tail[i + 1].isWhitespace() && prev.isLetter() && i + 1 >= minChunk) {
+                    here = i + 1
+                }
+            } else if (c == '\n' && i + 1 < tail.length && tail[i + 1] == '\n' && i + 2 >= minChunk) {
+                here = i + 2
+            }
+            if (here > 0) {
+                if (firstBoundary == 0) firstBoundary = here
+                lastBoundary = here
+                if (firstChunk) return here  // emit ASAP for the opening
+            }
+            i++
+        }
+        if (lastBoundary > 0) return lastBoundary
+        if (tail.length >= maxTail) {
+            val cap = minOf(tail.length, maxTail)
+            val ws = tail.substring(0, cap).lastIndexOfAny(charArrayOf(' ', '\n', '\t'))
+            if (ws >= minChunk) return ws + 1
+        }
+        return 0
+    }
+
+    /** Look at the cumulative `chatStreamingText`, slice off any newly-
+     *  completed sentences past `openClawStreamingSpokenOffset`, and
+     *  enqueue them for ElevenLabs synth. Idempotent and turn-scoped.
+     *  Stays a no-op when ElevenLabs key is missing — the post-stream
+     *  fallback then surfaces the toast (don't double-error). */
+    private fun maybeEmitStreamingTtsChunk() {
+        if (!openClawStreamingTtsActive && !openClawSpeakNextAssistant) {
+            android.util.Log.d("StreamingTts", "skip: active=$openClawStreamingTtsActive arm=$openClawSpeakNextAssistant")
+            return
+        }
+        if (state.panel != Panel.OPENCLAW_CHAT || !state.voiceEnabled) {
+            android.util.Log.d("StreamingTts", "skip: panel=${state.panel} voiceEnabled=${state.voiceEnabled}")
+            return
+        }
+        if (voicePrefs.elevenlabsKey.isNullOrBlank()) {
+            android.util.Log.d("StreamingTts", "skip: elevenlabs key missing")
+            return
+        }
+        val full = state.chatStreamingText
+        if (full.length <= openClawStreamingSpokenOffset) return
+        val tail = full.substring(openClawStreamingSpokenOffset)
+        // First chunk uses a faster, more permissive splitter so audio
+        // starts as soon as possible. Subsequent chunks pick the last
+        // boundary in the tail for smoother prosody.
+        val firstChunk = openClawSpeechIssuedSeq == 0
+        val split = findStreamingSplitPoint(tail, firstChunk)
+        if (split <= 0) {
+            android.util.Log.d("StreamingTts", "no boundary in tail (len=${tail.length}, first=$firstChunk)")
+            return
+        }
+        val chunk = tail.substring(0, split).trim()
+        openClawStreamingSpokenOffset += split
+        if (chunk.isEmpty()) return
+        openClawStreamingTtsActive = true
+        openClawSpeakNextAssistant = false
+        android.util.Log.i("StreamingTts", "emit chunk: '${chunk.take(60)}...' (len=${chunk.length})")
+        enqueueStreamingTtsChunk(chunk)
+    }
+
+    /** Flush any non-empty residue past `openClawStreamingSpokenOffset` —
+     *  for replies that ended without a sentence terminator (one-line
+     *  numeric answers, raw lists, model truncation). Called from
+     *  onChatTerminal, after the last delta has landed. Only runs if
+     *  streaming TTS already claimed this run (otherwise the post-stream
+     *  one-shot will speak the full message). */
+    private fun flushStreamingTtsTail() {
+        if (state.panel != Panel.OPENCLAW_CHAT || !state.voiceEnabled) return
+        if (!openClawStreamingTtsActive) return  // streaming never started for this run
+        if (voicePrefs.elevenlabsKey.isNullOrBlank()) return
+        val full = state.chatStreamingText
+        if (full.length <= openClawStreamingSpokenOffset) return
+        val tail = full.substring(openClawStreamingSpokenOffset).trim()
+        openClawStreamingSpokenOffset = full.length
+        if (tail.isEmpty()) return
+        enqueueStreamingTtsChunk(tail)
+    }
+
+    private fun enqueueStreamingTtsChunk(chunk: String) {
+        val apiKey = voicePrefs.elevenlabsKey
+        if (apiKey.isNullOrBlank()) return
+        val cleanChunk = stripMarkdownForTts(chunk)
+        if (cleanChunk.isBlank()) return  // chunk was pure markdown decoration
+        val turnId = openClawStreamingTtsTurnId
+        val seq = ++openClawSpeechIssuedSeq
+        val outFile = File(
+            File(cacheDir, "openclaw-voice").apply { mkdirs() },
+            "stream-$turnId-$seq.mp3",
+        )
+        val call = com.r1.launcher.voice.ElevenLabsTtsClient.synthesize(
+            text = cleanChunk,
+            apiKey = apiKey,
+            voiceId = state.voiceId,
+            outFile = outFile,
+        ) { _, err ->
+            // synthesize callbacks come back on main via its internal Handler.
+            if (turnId != openClawStreamingTtsTurnId) {
+                android.util.Log.d("StreamingTts", "stale chunk seq=$seq (turn $turnId vs ${openClawStreamingTtsTurnId})")
+                runCatching { outFile.delete() }
+                return@synthesize
+            }
+            if (err != null) {
+                android.util.Log.w("StreamingTts", "chunk seq=$seq err=$err")
+                openClawSpeechSlots[seq] = null
+                runCatching { outFile.delete() }
+            } else {
+                android.util.Log.i("StreamingTts", "chunk seq=$seq ready (${outFile.length()} bytes)")
+                openClawSpeechSlots[seq] = outFile
+            }
+            drainStreamingSpeechQueue()
+        }
+        if (call != null) {
+            if (turnId != openClawStreamingTtsTurnId) {
+                runCatching { call.cancel() }
+            } else {
+                openClawTtsChunkCalls.add(call)
+            }
+        }
+    }
+
+    /** If the next-to-play slot is filled and nothing is currently playing,
+     *  start playback. Skips errored slots. Re-fires from each MediaPlayer's
+     *  onCompletion to chain the queue. Main thread only. */
+    private fun drainStreamingSpeechQueue() {
+        while (true) {
+            if (openClawSpeechPlaying) return
+            val next = openClawSpeechNextToPlay
+            if (!openClawSpeechSlots.containsKey(next)) return
+            val file = openClawSpeechSlots.remove(next)
+            openClawSpeechNextToPlay = next + 1
+            if (file == null) continue  // errored slot — skip
+            playStreamingSpeechFile(file)
+            return  // playStreamingSpeechFile sets playing = true
+        }
+    }
+
+    private fun playStreamingSpeechFile(file: File) {
+        android.util.Log.i("StreamingTts", "play ${file.name} (${file.length()} bytes)")
+        runCatching { openClawSpeechPlayer?.stop() }
+        runCatching { openClawSpeechPlayer?.release() }
+        openClawSpeechPlayer = null
+        // If cancel runs mid-playback, this file isn't in the slots map
+        // anymore — track it so cancelOpenClawSpeech can delete it.
+        runCatching { openClawSpeechCurrentFile?.delete() }
+        openClawSpeechCurrentFile = file
+        val turnId = openClawStreamingTtsTurnId
+        runCatching {
+            openClawSpeechPlayer = MediaPlayer().apply {
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                setDataSource(file.absolutePath)
+                setOnCompletionListener { mp ->
+                    runCatching { mp.release() }
+                    if (openClawSpeechPlayer === mp) openClawSpeechPlayer = null
+                    runCatching { file.delete() }
+                    if (openClawSpeechCurrentFile === file) openClawSpeechCurrentFile = null
+                    if (turnId != openClawStreamingTtsTurnId) {
+                        openClawSpeechPlaying = false
+                        return@setOnCompletionListener
+                    }
+                    openClawSpeechPlaying = false
+                    drainStreamingSpeechQueue()
+                }
+                setOnErrorListener { mp, _, _ ->
+                    runCatching { mp.release() }
+                    if (openClawSpeechPlayer === mp) openClawSpeechPlayer = null
+                    runCatching { file.delete() }
+                    if (openClawSpeechCurrentFile === file) openClawSpeechCurrentFile = null
+                    openClawSpeechPlaying = false
+                    if (turnId == openClawStreamingTtsTurnId) drainStreamingSpeechQueue()
+                    true
+                }
+                prepare()
+                start()
+            }
+            openClawSpeechPlaying = true
+        }.onFailure {
+            openClawSpeechPlaying = false
+            runCatching { file.delete() }
+            if (openClawSpeechCurrentFile === file) openClawSpeechCurrentFile = null
+        }
     }
 
     /** Play TTS audio bytes (MP3 from ElevenLabs Flash v2.5) via MediaPlayer.
@@ -848,14 +1156,14 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 setOnErrorListener { mp, _, _ ->
                     runCatching { mp.release() }
                     if (openClawSpeechPlayer === mp) openClawSpeechPlayer = null
-                    toast("voice playback failed")
+                    toastFail("voice playback failed")
                     true
                 }
                 prepare()
                 start()
             }
         }.onFailure {
-            toast("voice playback: ${it.message ?: it.javaClass.simpleName}")
+            toastFail("voice playback: ${it.message ?: it.javaClass.simpleName}")
         }
     }
 
@@ -865,11 +1173,9 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         runCatching { voiceSession?.cancel() }
         voiceSession = null
         voiceSink = null
-        runCatching { openClawTtsCall?.cancel() }
-        openClawTtsCall = null
-        runCatching { openClawSpeechPlayer?.stop() }
-        runCatching { openClawSpeechPlayer?.release() }
-        openClawSpeechPlayer = null
+        // Tears down both the legacy one-shot TTS and the streaming-TTS
+        // pipeline (chunk HTTP calls + queued MP3 files + per-turn offsets).
+        cancelOpenClawSpeech()
         runCatching { openClawSession?.stop() }
         openClawSession = null
 
@@ -989,7 +1295,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 }
             }
         }
-        toast("Settings UI unavailable")
+        toastFail("Settings UI unavailable")
         state.back()
     }
 
@@ -1002,7 +1308,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 return
             }
         }
-        toast("Date settings unavailable")
+        toastFail("Date settings unavailable")
         state.back()
     }
 
@@ -1023,7 +1329,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             android.util.Log.d("LauncherActivity", "toggleWifi($enable) ok=$ok (applied=$applied)")
             if (!ok) {
                 ui.post {
-                    toast("Wi-Fi toggle failed")
+                    toastFail("Wi-Fi toggle failed")
                     refreshNetwork()
                 }
                 return@Thread
@@ -1053,7 +1359,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             android.util.Log.d("LauncherActivity", "toggleCellular($enable) ok=$ok (applied=$applied)")
             if (!ok) {
                 ui.post {
-                    toast("Cellular toggle failed")
+                    toastFail("Cellular toggle failed")
                     refreshSim()
                 }
                 return@Thread
@@ -1166,7 +1472,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     ?: "no response"
                 ui.post {
                     state.wifiShareEnabled = !enable
-                    toast((if (enable) "Hotspot failed: " else "Stop failed: ") + reason.take(80))
+                    toastFail((if (enable) "Hotspot failed: " else "Stop failed: ") + reason.take(80))
                 }
                 return@Thread
             }
@@ -1251,11 +1557,11 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         val target = state.wifiShareEditTarget
         val input = state.wifiShareEditInput.trim()
         if (target == WifiShareEditTarget.SSID && input.isEmpty()) {
-            toast("name can't be empty")
+            toastFail("name can't be empty")
             return
         }
         if (target == WifiShareEditTarget.PASSWORD && input.length < 8) {
-            toast("password needs 8+ chars")
+            toastFail("password needs 8+ chars")
             return
         }
         when (target) {
@@ -2394,10 +2700,22 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         if (!trimmed.startsWith("/")) {
             state.chatBusy = true
             // Arm the auto-speak gate when the user has voice enabled and is
-            // sitting in the chat panel; the response will go through
-            // ElevenLabs TTS as soon as the assistant text lands.
+            // sitting in the chat panel; streaming TTS will start mid-reply
+            // as sentence boundaries arrive in chatStreamingText.
             if (state.voiceEnabled && state.panel == Panel.OPENCLAW_CHAT) {
+                // cancelOpenClawSpeech() bumps turnId, drops slots, stops any
+                // prior playback, and resets spokenOffset — so a fresh turn
+                // starts clean even if the prior reply was still speaking.
+                cancelOpenClawSpeech()
                 openClawSpeakNextAssistant = true
+                // Pre-warm api.elevenlabs.io: fires a tiny GET /v1/voices in
+                // parallel with session.send. By the time the model finishes
+                // its ~2s warm-up and the first chunk's POST /stream goes
+                // out, OkHttp's pool already has a live TLS socket — saves
+                // ~150ms on first audio. Rate-limited internally to ≤1/min.
+                voicePrefs.elevenlabsKey?.takeIf { it.isNotBlank() }?.let { key ->
+                    com.r1.launcher.voice.ElevenLabsTtsClient.warmConnection(key)
+                }
             }
         }
         session.send(text = trimmed, audioBase64 = null) { ok, runId, err ->
@@ -2562,26 +2880,70 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         session.listSessions()
     }
 
+    override fun openClawCompactSession() {
+        val session = openClawSession ?: run { toastFail("not connected"); return
+        }
+        val key = state.selectedSessionKey
+        if (key.isBlank()) { toastFail("no session"); return }
+        toast("compacting…")
+        session.compactSession(key) { ok, err ->
+            ui.post {
+                if (ok) toastSuccess("compacted")
+                else toastFail(err ?: "compact failed")
+            }
+        }
+    }
+
+    override fun openClawClearContext() {
+        val session = openClawSession ?: run { toastFail("not connected"); return }
+        val key = state.selectedSessionKey
+        if (key.isBlank()) { toastFail("no session"); return }
+        // Optimistic local clear so the UI flips empty immediately. The
+        // gateway round-trip refreshes via onHistory if it succeeds, or
+        // we'll see a toast if it fails (server still has the messages).
+        state.chatMessages.clear()
+        state.chatStreamingText = ""
+        state.chatScrollIndex = 0
+        toast("clearing context…")
+        session.resetSession(key) { ok, err ->
+            ui.post {
+                if (ok) toastSuccess("context cleared")
+                else toastFail(err ?: "clear failed")
+            }
+        }
+    }
+
     override fun openClawSessionsRowActivate(idx: Int) {
         // Mirrors OpenClawSessionsPanel row order:
-        //   0           "< back"
-        //   1..choices  switch to that thread
-        //   choices+1   "refresh"
+        //   0             "< back"
+        //   1             "+ new thread"
+        //   2..choices+1  switch to that thread
+        //   choices+2     "refresh"
         if (idx == 0) {
             state.back(); backTone(); return
+        }
+        if (idx == 1) {
+            // Fresh thread — pick a key the gateway hasn't seen before.
+            // chat.subscribe lazy-creates server-side, so a unique timestamp
+            // key is enough. Drop back to chat after dispatch.
+            val newKey = "thread-${System.currentTimeMillis()}"
+            openClawSwitchSession(newKey)
+            popTone()
+            state.back()
+            return
         }
         val choices = com.r1.launcher.openclaw.resolveSessionChoices(
             currentSessionKey = state.selectedSessionKey,
             sessions = state.chatSessions.toList(),
             mainSessionKey = state.mainSessionKey,
         )
-        val refreshIdx = 1 + choices.size.coerceAtLeast(1)
+        val refreshIdx = 2 + choices.size.coerceAtLeast(1)
         if (idx == refreshIdx) {
             openClawRefreshSessions()
             popTone()
             return
         }
-        val choice = choices.getOrNull(idx - 1) ?: return
+        val choice = choices.getOrNull(idx - 2) ?: return
         if (choice.key != state.selectedSessionKey) {
             openClawSwitchSession(choice.key)
         }
@@ -2837,9 +3199,28 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         runCatching { tone?.startTone(ToneGenerator.TONE_PROP_PROMPT, 60) }
     }
     
-    override fun backTone() = playTone(ToneGenerator.TONE_PROP_PROMPT, 35)
+    override fun backTone() {
+        // Was a hardcoded ToneGenerator DTMF beep — that's the synthesized
+        // "Android system" tick you hear when wheel-scrolling past the top of
+        // a list. Mirror the navTone/selectTone fallback chain so back uses a
+        // real mp3; pick the subtle button so back still sounds distinct from
+        // forward nav (wooden). DTMF only as last resort.
+        when {
+            selectSoundId != 0 -> playSelectSound()
+            movingSoundId != 0 -> playMovingSound()
+            else               -> playTone(ToneGenerator.TONE_PROP_PROMPT, 35)
+        }
+    }
     
-    private fun launchTone() = playTone(ToneGenerator.TONE_PROP_BEEP2, 80)
+    private fun launchTone() {
+        // Same fix as backTone: prefer a real mp3 over the DTMF "system" beep
+        // that fires on every wheel-press app launch.
+        when {
+            uiClickSoundId != 0 -> playUiClickSound()
+            movingSoundId != 0  -> playMovingSound()
+            else                -> playTone(ToneGenerator.TONE_PROP_BEEP2, 80)
+        }
+    }
 
     private fun uiSoundGain(): Float {
         val max = state.uiVolumeMax.coerceAtLeast(1).toFloat()
@@ -3048,7 +3429,18 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
     // --- misc helpers ---
 
+    /** Generic toast — gray edge. Use [toastSuccess] / [toastFail] for outcomes. */
     private fun toast(msg: String) {
-        ui.post { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
+        ui.post { state.showToast(msg, ToastKind.INFO) }
+    }
+
+    /** Outcome toast — orange edge. */
+    private fun toastSuccess(msg: String) {
+        ui.post { state.showToast(msg, ToastKind.SUCCESS) }
+    }
+
+    /** Outcome toast — red edge. */
+    private fun toastFail(msg: String) {
+        ui.post { state.showToast(msg, ToastKind.FAIL) }
     }
 }

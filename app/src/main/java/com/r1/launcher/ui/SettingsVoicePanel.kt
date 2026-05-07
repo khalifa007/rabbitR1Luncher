@@ -120,7 +120,10 @@ fun SettingsVoicePanel(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
-                itemsIndexed(items) { idx, item ->
+                itemsIndexed(
+                    items = items,
+                    key = { _, item -> item.label },
+                ) { idx, item ->
                     val subtitle = if (idx == 2) keyStatus else ""
                     val subtitleColor = if (idx == 2 && state.hasVoiceKey)
                         Color(0xFF35D26F) else Color(0xFFFF4500)

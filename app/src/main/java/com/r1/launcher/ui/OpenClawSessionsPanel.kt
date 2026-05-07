@@ -67,8 +67,12 @@ fun OpenClawSessionsPanel(
         val emptyTxt = stringResource(R.string.openclaw_sessions_empty)
         val refreshingTxt = stringResource(R.string.openclaw_sessions_refreshing)
         val refreshTxt = stringResource(R.string.openclaw_sessions_refresh)
+        val newTxt = stringResource(R.string.openclaw_sessions_new)
         val items = buildList {
             add(Row(backTxt, ""))
+            // Index 1 = create a fresh thread. Dispatch handled by
+            // LauncherActivity.openClawSessionsRowActivate.
+            add(Row(newTxt, ""))
             if (choices.isEmpty()) {
                 add(Row(if (state.sessionsLoading) loadingTxt else emptyTxt, ""))
             } else {
@@ -95,7 +99,15 @@ fun OpenClawSessionsPanel(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
-                itemsIndexed(items) { idx, row ->
+                itemsIndexed(
+                    items = items,
+                    // Composite key: label alone can collide because multiple
+                    // gateway sessions share the same friendlySessionName
+                    // ("R1 Launcher", per the comment above). subtitle is the
+                    // raw session key — unique per session, empty for back/new/
+                    // refresh which all have unique labels.
+                    key = { _, row -> "${row.label}|${row.subtitle}" },
+                ) { idx, row ->
                     SettingsRow(
                         label = row.label,
                         focused = idx == state.openClawSessionsFocus,

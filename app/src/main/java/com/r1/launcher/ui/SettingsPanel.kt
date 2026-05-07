@@ -239,7 +239,10 @@ private fun SettingsCategoryBody(
                         onBackClick = onBackClick,
                     )
                 }
-                itemsIndexed(rows) { listIdx, row ->
+                itemsIndexed(
+                    items = rows,
+                    key = { _, row -> row.first },
+                ) { listIdx, row ->
                     val (label, rowIcon) = row
                     val realIdx = listIdx + 1
                     SettingsRow(

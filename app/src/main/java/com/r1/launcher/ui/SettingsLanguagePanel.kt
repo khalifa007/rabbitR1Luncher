@@ -113,7 +113,10 @@ fun SettingsLanguagePanel(state: LauncherState, onRowClick: (Int) -> Unit) {
                             }
                         }
                     }
-                    itemsIndexed(languages) { listIdx, lang ->
+                    itemsIndexed(
+                        items = languages,
+                        key = { _, lang -> lang.code },
+                    ) { listIdx, lang ->
                         val realIdx = listIdx + 1
                         val active = LocalePrefs.get(androidx.compose.ui.platform.LocalContext.current).language == lang.code
                         LanguageRow(

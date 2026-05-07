@@ -13,8 +13,8 @@ android {
         applicationId = "com.r1.launcher"
         minSdk = 23
         targetSdk = 33
-        versionCode = 263
-        versionName = "3.40.1"
+        versionCode = 278
+        versionName = "3.45.0"
 
         // R1 is single-ABI (arm64-v8a). Restricting filter avoids accidentally
         // pulling in armeabi-v7a / x86_64 / x86 from any future native deps.
@@ -52,7 +52,8 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -98,6 +99,12 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+
+    // Triggers baseline-profile install on first launch via a ContentProvider.
+    // AGP merges the Compose AAR-bundled profiles + any app/src/main/baselineProfiles/
+    // entries into assets/dexopt/baseline.prof at release-build time, rewritten
+    // through R8's mapping so obfuscated names resolve.
+    implementation("androidx.profileinstaller:profileinstaller:1.3.1")
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")

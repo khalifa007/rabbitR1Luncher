@@ -43,7 +43,14 @@ class ElevenLabsRealtimeClient private constructor(
 ) {
 
     private val main = Handler(Looper.getMainLooper())
-    private val sendExecutor = Executors.newSingleThreadExecutor()
+    // Daemon thread factory: matches R1WebServer.sendExecutor (line ~54) so the
+    // worker doesn't keep the JVM alive if shutdown is missed. Per-instance —
+    // the executor is also explicitly shutdown() on cancel/finish/onClosed/
+    // onFailure below so each PTT session releases its thread immediately
+    // instead of accumulating one per voice turn over a 24/7 launcher's life.
+    private val sendExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "elevenlabs-stt-send").apply { isDaemon = true }
+    }
     @Volatile private var ws: WebSocket? = null
     @Volatile private var closed = false
     // Latched once the first committed/final frame is delivered. Any further
@@ -103,6 +110,9 @@ class ElevenLabsRealtimeClient private constructor(
                 socket.send(msg.toString())
             }
         }
+        // Stop accepting new chunks; the queued commit above still runs because
+        // shutdown() drains existing tasks (unlike shutdownNow which interrupts).
+        runCatching { sendExecutor.shutdown() }
     }
 
     /** Abort without committing. Discards any in-flight audio. */
@@ -110,6 +120,7 @@ class ElevenLabsRealtimeClient private constructor(
         closed = true
         runCatching { ws?.close(1000, "cancel") }
         ws = null
+        runCatching { sendExecutor.shutdownNow() }
     }
 
     private inner class Listener : WebSocketListener() {
@@ -185,11 +196,13 @@ class ElevenLabsRealtimeClient private constructor(
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             closed = true
             ws = null
+            runCatching { sendExecutor.shutdownNow() }
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             closed = true
             ws = null
+            runCatching { sendExecutor.shutdownNow() }
             val code = response?.code ?: 0
             val msg = if (code == 401 || code == 403) "elevenlabs: auth failed (key invalid?)"
                       else (t.message ?: "ws failure")

@@ -43,6 +43,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -76,6 +77,8 @@ fun OpenClawChatPanel(
     onOpenSessions: () -> Unit = {},
     onOpenCamera: () -> Unit = {},
     onCopyCode: (String) -> Unit = {},
+    onCompactContext: () -> Unit = {},
+    onClearContext: () -> Unit = {},
 ) {
     AnimatedVisibility(
         visible = state.panel == Panel.OPENCLAW_CHAT,
@@ -90,34 +93,6 @@ fun OpenClawChatPanel(
 
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
             Column(modifier = Modifier.fillMaxSize()) {
-
-                // header
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 4.dp),
-                ) {
-                    BackPill(label = stringResource(R.string.openclaw_back_home), onClick = onBack)
-                    Spacer(Modifier.weight(1f))
-                    StatusDot(state.chatStatus)
-                    when {
-                        state.chatRecording -> {
-                            Spacer(Modifier.width(6.dp))
-                            Text(stringResource(R.string.terminal_status_rec), style = type.appCard, color = Color(0xFFFF4500))
-                        }
-                        state.chatTranscribing -> {
-                            Spacer(Modifier.width(6.dp))
-                            Text(stringResource(R.string.terminal_status_stt), style = type.appCard, color = Color(0xFFFFC107))
-                        }
-                        state.chatBusy -> {
-                            Spacer(Modifier.width(6.dp))
-                            Text(stringResource(R.string.common_thinking_dots), style = type.appCard, color = Color.White)
-                        }
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    MenuDot(onClick = { menuOpen = !menuOpen })
-                }
 
                 val listState = rememberLazyListState()
                 var lastTick by remember { mutableStateOf(state.chatScrollIndex) }
@@ -140,7 +115,10 @@ fun OpenClawChatPanel(
                 LazyColumn(
                     state = listState,
                     reverseLayout = true,
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                    // top padding clears the floating header (~46dp) so messages
+                    // don't read as cropped while still scrolling under the
+                    // gradient.
+                    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 50.dp, bottom = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier
                         .weight(1f)
@@ -200,7 +178,10 @@ fun OpenClawChatPanel(
                         }
                     } else {
                         val reversed = state.chatMessages.asReversed()
-                        itemsIndexed(reversed) { _, msg ->
+                        itemsIndexed(
+                            items = reversed,
+                            key = { _, msg -> msg.id },
+                        ) { _, msg ->
                             Bubble(msg, fontSize = state.chatFontSize, onCopyCode = onCopyCode)
                         }
                     }
@@ -257,6 +238,55 @@ fun OpenClawChatPanel(
                 }
             }
 
+            // Gradient backdrop behind the floating header — fades from
+            // mostly-opaque black at the very top to transparent below so
+            // messages are still readable while scrolling under the header.
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .height(70.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color(0xCC000000),
+                                Color(0x66000000),
+                                Color.Transparent,
+                            ),
+                        ),
+                    ),
+            )
+
+            // Floating header — same row content as before, now overlaid
+            // on top of the chat list instead of pushing it down.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 4.dp),
+            ) {
+                BackPill(label = stringResource(R.string.openclaw_back_home), onClick = onBack)
+                Spacer(Modifier.weight(1f))
+                StatusDot(state.chatStatus)
+                when {
+                    state.chatRecording -> {
+                        Spacer(Modifier.width(6.dp))
+                        Text(stringResource(R.string.terminal_status_rec), style = type.appCard, color = Color(0xFFFF4500))
+                    }
+                    state.chatTranscribing -> {
+                        Spacer(Modifier.width(6.dp))
+                        Text(stringResource(R.string.terminal_status_stt), style = type.appCard, color = Color(0xFFFFC107))
+                    }
+                    state.chatBusy -> {
+                        Spacer(Modifier.width(6.dp))
+                        Text(stringResource(R.string.common_thinking_dots), style = type.appCard, color = Color.White)
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
+                MenuDot(onClick = { menuOpen = !menuOpen })
+            }
+
             // Dropdown menu overlay — rendered on top of the Column z-stack
             ChatDropdownMenu(
                 expanded = menuOpen,
@@ -264,6 +294,8 @@ fun OpenClawChatPanel(
                 onCamera = { menuOpen = false; onOpenCamera() },
                 onSessions = { menuOpen = false; onOpenSessions() },
                 onSettings = { menuOpen = false; onOpenSettings() },
+                onCompactContext = { menuOpen = false; onCompactContext() },
+                onClearContext = { menuOpen = false; onClearContext() },
             )
         }
     }
@@ -340,6 +372,8 @@ private fun ChatDropdownMenu(
     onCamera: () -> Unit,
     onSessions: () -> Unit,
     onSettings: () -> Unit,
+    onCompactContext: () -> Unit,
+    onClearContext: () -> Unit,
 ) {
     val type = LocalR1Type.current
     if (expanded) {
@@ -373,13 +407,24 @@ private fun ChatDropdownMenu(
                 MenuRow(label = stringResource(R.string.openclaw_btn_cam), onClick = onCamera)
                 MenuRow(label = stringResource(R.string.openclaw_btn_sessions), onClick = onSessions)
                 MenuRow(label = stringResource(R.string.openclaw_btn_settings), onClick = onSettings)
+                MenuRow(label = stringResource(R.string.openclaw_btn_compact), onClick = onCompactContext)
+                // Destructive — red text signals it wipes server-side context.
+                MenuRow(
+                    label = stringResource(R.string.openclaw_btn_clear_context),
+                    onClick = onClearContext,
+                    color = Color(0xFFE53935),
+                )
             }
         }
     }
 }
 
 @Composable
-private fun MenuRow(label: String, onClick: () -> Unit) {
+private fun MenuRow(
+    label: String,
+    onClick: () -> Unit,
+    color: Color = Color(0xFFFF4500),
+) {
     val type = LocalR1Type.current
     Box(
         modifier = Modifier
@@ -390,12 +435,17 @@ private fun MenuRow(label: String, onClick: () -> Unit) {
         Text(
             text = label,
             style = type.appCard.copy(fontSize = 18.sp),
-            color = Color(0xFFFF4500),
+            color = color,
         )
     }
 }
 
 private val CODE_BLOCK_RE = Regex("```([\\s\\S]*?)```")
+// Hot-path regexes used in Bubble's per-recompose markdown cleanup.
+// Hoisting these to file-level vals avoids re-compiling on every assistant
+// streaming token (the Bubble for the in-flight reply recomposes per delta).
+private val INLINE_CODE_RE = Regex("`([^`\n]+)`")
+private val BLOCKQUOTE_RE = Regex("(?m)^[ \t]*>[ \t]?")
 
 /** Pull every fenced code block's body out of a markdown string, stripping
  *  an optional bare language tag on the first line so users get just the
@@ -461,7 +511,7 @@ private fun Bubble(
                     // Fenced code blocks are also stripped to plain text.
                     val rawContent = msg.text.ifEmpty { if (msg.streaming) streamingPlaceholder else "" }
                     val cleaned = rawContent
-                        .replace(Regex("```[\\s\\S]*?```")) { m ->
+                        .replace(CODE_BLOCK_RE) { m ->
                             val inner = m.value.removeSurrounding("```")
                             val nl = inner.indexOf('\n')
                             // Strip the first line only if it looks like a bare
@@ -472,12 +522,12 @@ private fun Bubble(
                                 }) inner.substring(nl + 1).trim('\n')
                             else inner.trim('\n')
                         }
-                        .replace(Regex("`([^`\n]+)`"), "**$1**") // inline code → bold
+                        .replace(INLINE_CODE_RE, "**$1**") // inline code → bold
                         // Strip blockquote markers: the markdown library's
                         // MarkdownBlockQuote calls a drawLine value-class
                         // signature that doesn't exist in our pinned compose
                         // and hard-crashes the launcher. Reduce to plain text.
-                        .replace(Regex("(?m)^[ \t]*>[ \t]?"), "")
+                        .replace(BLOCKQUOTE_RE, "")
                     Markdown(
                         content = cleaned,
                         colors = markdownColor(

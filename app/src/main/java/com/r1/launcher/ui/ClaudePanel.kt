@@ -78,11 +78,12 @@ fun ClaudePanel(
             // First-entry redirect screen: nudge the user toward the bigger-
             // screen web companion for the OAuth flow (a 480x480 round
             // display + RetroKeyboard is rough for pasting an OAuth URL +
-            // 60-char code). Only shown when the user isn't logged in yet
-            // — once auth works, the QR's primary purpose is gone and we
-            // drop straight into chat. "open anyway" still escapes for
-            // pre-login users who want to use the API-key path.
-            if (!state.claudeAuthed && state.claudeShowWebHint) {
+            // 60-char code). Only shown when:
+            //  - the user isn't logged in yet (post-login the QR's purpose is gone)
+            //  - remote panel is already on (otherwise the QR would be dead;
+            //    opening Claude no longer auto-enables it — user opt-in only)
+            //  - they haven't dismissed it this session via "open anyway"
+            if (!state.claudeAuthed && state.claudeShowWebHint && state.webServerEnabled) {
                 ClaudeWebHint(
                     state = state,
                     onBack = onBack,
@@ -171,7 +172,15 @@ fun ClaudePanel(
                         item("empty") { ClaudeEmpty() }
                     } else {
                         val reversed = state.claudeMessages.asReversed()
-                        itemsIndexed(reversed) { _, msg ->
+                        // Key by original-list index (claudeMessages is append-only,
+                        // so the original index is stable across appends; reversed
+                        // index is not — the streaming-bubble item would lose its
+                        // identity on every new message otherwise).
+                        val originalLast = state.claudeMessages.size - 1
+                        itemsIndexed(
+                            items = reversed,
+                            key = { reversedIdx, _ -> originalLast - reversedIdx },
+                        ) { _, msg ->
                             ClaudeBubble(msg)
                         }
                     }

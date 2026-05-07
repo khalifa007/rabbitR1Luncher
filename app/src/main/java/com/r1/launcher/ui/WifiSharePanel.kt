@@ -84,7 +84,10 @@ fun WifiSharePanel(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
-                itemsIndexed(items) { idx, item ->
+                itemsIndexed(
+                    items = items,
+                    key = { _, item -> item.label },
+                ) { idx, item ->
                     when (item) {
                         is ShareRow.Toggle -> SettingsRow(
                             label = item.label,

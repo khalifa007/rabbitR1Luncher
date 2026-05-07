@@ -54,6 +54,8 @@ interface LauncherHost {
     fun openClawSwitchSession(key: String)
     fun openClawRefreshSessions()
     fun openClawSessionsRowActivate(idx: Int)
+    fun openClawCompactSession()
+    fun openClawClearContext()
     fun openClawOpenCameraAsk()
     fun openClawCameraCaptured(jpegBytes: ByteArray)
     fun openClawCameraRetake()
@@ -382,16 +384,17 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.OPENCLAW_SESSIONS -> {
             // Row layout matches OpenClawSessionsPanel:
-            //   0           "< back"
-            //   1..choices  one row per resolveSessionChoices entry
-            //              (or a single placeholder row when choices is empty)
-            //   choices+1   "refresh"
+            //   0             "< back"
+            //   1             "+ new thread"
+            //   2..choices+1  one row per resolveSessionChoices entry
+            //                (or a single placeholder row when choices is empty)
+            //   choices+2     "refresh"
             val choiceCount = com.r1.launcher.openclaw.resolveSessionChoices(
                 currentSessionKey = selectedSessionKey,
                 sessions = chatSessions.toList(),
                 mainSessionKey = mainSessionKey,
             ).size.coerceAtLeast(1)
-            val max = 1 + choiceCount // back + choices + refresh = 2+choices, last index = 1+choices
+            val max = 2 + choiceCount // back + new + choices + refresh; last index = 2+choices
             val prev = openClawSessionsFocus
             openClawSessionsFocus = (openClawSessionsFocus + 1).coerceAtMost(max)
             if (prev != openClawSessionsFocus) host.navTone()

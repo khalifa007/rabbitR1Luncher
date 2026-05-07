@@ -42,6 +42,37 @@ object ElevenLabsTtsClient {
 
     private val main = Handler(Looper.getMainLooper())
     private val jsonType = "application/json".toMediaType()
+    @Volatile private var lastWarmAtMs: Long = 0L
+
+    /**
+     * Open a TCP+TLS connection to api.elevenlabs.io ahead of time so the
+     * first /stream call doesn't pay the handshake (~150ms on R1 LTE).
+     * The response (a tiny voices list) is discarded; OkHttp's connection
+     * pool retains the live socket for ~5 minutes for any later request to
+     * the same host. Idempotent and rate-limited to once per ~60s; safe to
+     * call from the chat send path even if the user spams sends.
+     */
+    fun warmConnection(apiKey: String) {
+        if (apiKey.isBlank()) return
+        val now = System.currentTimeMillis()
+        if (now - lastWarmAtMs < 60_000) return
+        lastWarmAtMs = now
+        val req = Request.Builder()
+            .url("https://api.elevenlabs.io/v1/voices")
+            .header("xi-api-key", apiKey)
+            .header("Accept", "application/json")
+            .get()
+            .build()
+        client.newCall(req).enqueue(object : okhttp3.Callback {
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                response.close()  // drop body, keep socket in pool
+                Log.d(TAG, "warmConnection: ok ${response.code}")
+            }
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                Log.d(TAG, "warmConnection: fail ${e.message}")
+            }
+        })
+    }
 
     /**
      * Stream synthesis to a file, then deliver the complete bytes via [onResult].

@@ -92,7 +92,10 @@ fun MessagesPanel(
                         }
                     }
                 } else {
-                    itemsIndexed(state.smsConversations) { idx, conv ->
+                    itemsIndexed(
+                        items = state.smsConversations,
+                        key = { _, conv -> conv.address },
+                    ) { idx, conv ->
                         val rowIdx = idx + 1
                         val title = conv.displayName.ifBlank { conv.address }
                         val labelText = if (conv.unreadCount > 0)
@@ -175,7 +178,10 @@ fun MessagesThreadPanel(
                         }
                     }
                 } else {
-                    itemsIndexed(items) { idx, item ->
+                    itemsIndexed(
+                        items = items,
+                        key = { _, item -> item.id },
+                    ) { idx, item ->
                         val align = if (item.incoming) Alignment.Start else Alignment.End
                         val bubbleBg = if (item.incoming) Color(0xFF1F1F1F) else Color(0xFFFF4500)
                         val textColor = if (item.incoming) Color.White else Color.Black

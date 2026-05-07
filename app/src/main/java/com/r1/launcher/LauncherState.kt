@@ -19,6 +19,21 @@ enum class WifiShareEditTarget { SSID, PASSWORD }
 /** What the OPENCLAW_QR scanner is currently looking for. */
 enum class QrScanMode { GATEWAY_PAIRING, OPENAI_KEY }
 
+/** Kind of toast — drives the edge color in [com.r1.launcher.ui.ToastOverlay]. */
+enum class ToastKind { INFO, SUCCESS, FAIL }
+
+/**
+ * Single in-flight toast. [id] makes consecutive identical messages distinct
+ * for `LaunchedEffect` re-keying; [expiresAtMs] is the wall-clock dismiss time
+ * so the overlay can self-clear via `delay`.
+ */
+data class ToastEntry(
+    val id: Long,
+    val text: String,
+    val kind: ToastKind,
+    val expiresAtMs: Long,
+)
+
 /**
  * Single container for all UI state. Activity mutates; Compose reads.
  *
@@ -259,6 +274,32 @@ class LauncherState {
      *  When true, opening the Claude tile drops straight into chat — the
      *  QR redirect was a setup affordance, not a recurring detour. */
     var claudeAuthed by mutableStateOf(false)
+
+    // --- toast overlay ---
+    /** Currently visible toast, or null when hidden. Set via [showToast];
+     *  cleared either by the overlay's auto-dismiss timer or by [showToast]
+     *  replacing it with a newer entry. */
+    var toast by mutableStateOf<ToastEntry?>(null)
+    private var toastSeq = 0L
+
+    /**
+     * Push a toast onto the overlay. New calls preempt any in-flight toast
+     * (we never queue — the latest message wins, matching how stock Android
+     * Toast behaves with `LENGTH_SHORT`).
+     */
+    fun showToast(
+        text: String,
+        kind: ToastKind = ToastKind.INFO,
+        durationMs: Long = 3000L,
+    ) {
+        toastSeq++
+        toast = ToastEntry(
+            id = toastSeq,
+            text = text,
+            kind = kind,
+            expiresAtMs = System.currentTimeMillis() + durationMs,
+        )
+    }
 
     // --- messages (SMS) ---
     val smsConversations = mutableStateListOf<SmsConversation>()

@@ -79,7 +79,10 @@ fun NetworkPanel(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
-                itemsIndexed(items) { idx, item ->
+                itemsIndexed(
+                    items = items,
+                    key = { _, item -> item.label },
+                ) { idx, item ->
                     SettingsRow(
                         label = item.label,
                         focused = idx == state.networkFocus,

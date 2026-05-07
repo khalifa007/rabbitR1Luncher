@@ -358,6 +358,100 @@ class GatewaySession(
         }
     }
 
+    /**
+     * Compact a thread's history server-side — gateway summarizes old messages
+     * into a single synthetic block, freeing context tokens while keeping the
+     * thread alive. SDK signature is `session.compact({ maxLines })`. Refreshes
+     * `chat.history` on success so the panel shows the post-compaction state.
+     *
+     * Falls back to `node.event(sessions.compact)` on permission errors,
+     * mirroring the listSessions / chat.subscribe pattern.
+     */
+    fun compactSession(targetKey: String = sessionKey, maxLines: Int = 200, onDone: (Boolean, String?) -> Unit = { _, _ -> }) {
+        scope.launch {
+            try {
+                val params = buildJsonObject {
+                    put("sessionKey", JsonPrimitive(targetKey))
+                    put("maxLines", JsonPrimitive(maxLines))
+                }
+                var res = runCatching { request("sessions.compact", params, timeoutMs = 30_000L) }.getOrNull()
+                var ok = res?.get("ok")?.jsonPrimitive?.booleanOrNull ?: false
+                if (!ok) {
+                    res = runCatching {
+                        request("node.event", buildJsonObject {
+                            put("event", JsonPrimitive("sessions.compact"))
+                            put("payloadJSON", JsonPrimitive(params.toString()))
+                        }, timeoutMs = 30_000L)
+                    }.getOrNull()
+                    ok = res?.get("ok")?.jsonPrimitive?.booleanOrNull ?: false
+                }
+                val errMsg = (res?.get("error") as? JsonObject)
+                    ?.get("message")?.jsonPrimitive?.contentOrNull
+                if (ok) {
+                    runCatching {
+                        val hist = request("chat.history", buildJsonObject {
+                            put("sessionKey", JsonPrimitive(targetKey))
+                        }, timeoutMs = 15_000L)
+                        val msgs = ((hist["payload"] as? JsonObject)?.get("messages") as? JsonArray)
+                            ?.mapNotNull { (it as? JsonObject)?.let(::parseHistoryMessage) }
+                            ?.map { hydrateAssistantMedia(it) }
+                            .orEmpty()
+                        onHistory(msgs)
+                    }
+                }
+                onDone(ok, errMsg)
+            } catch (t: Throwable) {
+                android.util.Log.w("OpenClaw", "compactSession threw", t)
+                onDone(false, t.message)
+            }
+        }
+    }
+
+    /**
+     * Reset a thread's context server-side — wipes the transcript entirely
+     * (the gateway's `sessions.reset` maintenance op). Destructive: the
+     * conversation is gone after this. Refreshes `chat.history` so the
+     * panel reflects the empty state.
+     */
+    fun resetSession(targetKey: String = sessionKey, onDone: (Boolean, String?) -> Unit = { _, _ -> }) {
+        scope.launch {
+            try {
+                val params = buildJsonObject {
+                    put("sessionKey", JsonPrimitive(targetKey))
+                }
+                var res = runCatching { request("sessions.reset", params, timeoutMs = 15_000L) }.getOrNull()
+                var ok = res?.get("ok")?.jsonPrimitive?.booleanOrNull ?: false
+                if (!ok) {
+                    res = runCatching {
+                        request("node.event", buildJsonObject {
+                            put("event", JsonPrimitive("sessions.reset"))
+                            put("payloadJSON", JsonPrimitive(params.toString()))
+                        }, timeoutMs = 15_000L)
+                    }.getOrNull()
+                    ok = res?.get("ok")?.jsonPrimitive?.booleanOrNull ?: false
+                }
+                val errMsg = (res?.get("error") as? JsonObject)
+                    ?.get("message")?.jsonPrimitive?.contentOrNull
+                if (ok) {
+                    runCatching {
+                        val hist = request("chat.history", buildJsonObject {
+                            put("sessionKey", JsonPrimitive(targetKey))
+                        }, timeoutMs = 15_000L)
+                        val msgs = ((hist["payload"] as? JsonObject)?.get("messages") as? JsonArray)
+                            ?.mapNotNull { (it as? JsonObject)?.let(::parseHistoryMessage) }
+                            ?.map { hydrateAssistantMedia(it) }
+                            .orEmpty()
+                        onHistory(msgs)
+                    }
+                }
+                onDone(ok, errMsg)
+            } catch (t: Throwable) {
+                android.util.Log.w("OpenClaw", "resetSession threw", t)
+                onDone(false, t.message)
+            }
+        }
+    }
+
     private inner class Listener : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             // Don't send connect yet — gateway sends `connect.challenge` event
