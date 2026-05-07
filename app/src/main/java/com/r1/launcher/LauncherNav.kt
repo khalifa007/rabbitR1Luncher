@@ -44,6 +44,24 @@ interface LauncherHost {
     fun voiceClearKey()
     fun voicePasteKeyFromClipboard()
     fun voiceSettingsRowActivate(idx: Int)
+    /** Custom voice id (cloned / professional / shared). Save validates non-blank. */
+    fun voiceSaveCustomVoiceId(id: String)
+    fun voiceClearCustomVoiceId()
+    fun voicePasteCustomVoiceIdFromClipboard()
+    /** Cycle TTS model: flash → turbo → multilingual → flash. */
+    fun voiceCycleModel()
+    /** Tuning sliders (clamped to 0..1, speed clamped to 0.7..1.2). */
+    fun voiceSetStability(value: Float)
+    fun voiceSetSimilarity(value: Float)
+    fun voiceSetStyle(value: Float)
+    fun voiceSetSpeed(value: Float)
+    fun voiceToggleSpeakerBoost()
+    /** Reset model + all tuning knobs to factory defaults. */
+    fun voiceResetTuning()
+    /** Synthesize a fixed sample with the current settings and play it. */
+    fun voiceTestSynthesize()
+    /** Activate handler for SETTINGS_VOICE_TUNING rows. */
+    fun voiceTuningRowActivate(idx: Int)
     fun openClawScrollUp()
     fun openClawScrollDown()
     fun openClawCloseSession()
@@ -170,6 +188,13 @@ fun LauncherState.wheelUp(host: LauncherHost) {
                 back(); host.backTone()
             } else {
                 voiceFocus--; host.navTone()
+            }
+        }
+        Panel.SETTINGS_VOICE_TUNING -> {
+            if (voiceTuningFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                voiceTuningFocus--; host.navTone()
             }
         }
         Panel.SETTINGS_LANGUAGE -> {
@@ -317,8 +342,15 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.SETTINGS_VOICE -> {
             val prev = voiceFocus
-            voiceFocus = (voiceFocus + 1).coerceAtMost(5) // back, on/off, key, scan-qr, voice picker, clear
+            // back, on/off, key, scan-qr, voice picker, custom-id, test, tuning, clear
+            voiceFocus = (voiceFocus + 1).coerceAtMost(8)
             if (prev != voiceFocus) host.navTone()
+        }
+        Panel.SETTINGS_VOICE_TUNING -> {
+            val prev = voiceTuningFocus
+            // back, model, stability, similarity, style, speed, speaker-boost, test, reset
+            voiceTuningFocus = (voiceTuningFocus + 1).coerceAtMost(8)
+            if (prev != voiceTuningFocus) host.navTone()
         }
         Panel.SETTINGS_LANGUAGE -> {
             // back + N supported languages → max idx = N
@@ -482,6 +514,7 @@ fun LauncherState.activate(host: LauncherHost) {
             }
         }
         Panel.SETTINGS_VOICE -> { host.voiceSettingsRowActivate(voiceFocus); host.selectTone() }
+        Panel.SETTINGS_VOICE_TUNING -> { host.voiceTuningRowActivate(voiceTuningFocus); host.selectTone() }
         Panel.SETTINGS_DISPLAY -> when (settingsDisplayFocus) {
             0 -> { back(); host.backTone() }
             1 -> { openBrightness(); host.selectTone() }

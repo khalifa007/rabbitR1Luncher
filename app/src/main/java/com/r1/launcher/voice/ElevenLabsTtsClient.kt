@@ -27,7 +27,7 @@ import java.util.concurrent.TimeUnit
  *   ?output_format=mp3_22050_32
  *   &optimize_streaming_latency=4
  * Header: xi-api-key
- * Body:   {"text": "...", "model_id": "eleven_flash_v2_5"}
+ * Body:   {"text": "...", "model_id": "...", "voice_settings": {...}}
  * Returns: chunked audio/mpeg
  */
 object ElevenLabsTtsClient {
@@ -82,6 +82,8 @@ object ElevenLabsTtsClient {
         text: String,
         apiKey: String,
         voiceId: String = VoicePrefs.DEFAULT_VOICE_ID,
+        model: String = VoicePrefs.DEFAULT_MODEL,
+        tuning: VoiceTuning? = null,
         outFile: File,
         onResult: (mp3Bytes: ByteArray?, errorMsg: String?) -> Unit,
     ): Call? {
@@ -92,7 +94,18 @@ object ElevenLabsTtsClient {
         }
         val payload = JSONObject()
             .put("text", clean)
-            .put("model_id", "eleven_flash_v2_5")
+            .put("model_id", model)
+            .also { obj ->
+                if (tuning != null) {
+                    val vs = JSONObject()
+                        .put("stability", tuning.stability.toDouble())
+                        .put("similarity_boost", tuning.similarity.toDouble())
+                        .put("style", tuning.style.toDouble())
+                        .put("use_speaker_boost", tuning.speakerBoost)
+                        .put("speed", tuning.speed.toDouble())
+                    obj.put("voice_settings", vs)
+                }
+            }
             .toString()
         val req = Request.Builder()
             .url("https://api.elevenlabs.io/v1/text-to-speech/$voiceId/stream" +

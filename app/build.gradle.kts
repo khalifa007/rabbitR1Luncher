@@ -13,8 +13,8 @@ android {
         applicationId = "com.r1.launcher"
         minSdk = 23
         targetSdk = 33
-        versionCode = 278
-        versionName = "3.45.0"
+        versionCode = 279
+        versionName = "3.46.0"
 
         // R1 is single-ABI (arm64-v8a). Restricting filter avoids accidentally
         // pulling in armeabi-v7a / x86_64 / x86 from any future native deps.

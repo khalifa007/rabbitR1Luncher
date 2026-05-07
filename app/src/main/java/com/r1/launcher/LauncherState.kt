@@ -12,7 +12,7 @@ import com.r1.launcher.messages.SmsItem
 import com.r1.launcher.openclaw.ChatMessage
 import com.r1.launcher.openclaw.SessionEntry
 
-enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_LANGUAGE, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, CLAUDE }
+enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_LANGUAGE, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, CLAUDE }
 
 enum class WifiShareEditTarget { SSID, PASSWORD }
 
@@ -174,6 +174,21 @@ class LauncherState {
     var hasVoiceKey by mutableStateOf(false)
     var voiceKeyTail by mutableStateOf("")
     var voiceFocus by mutableIntStateOf(0)
+    /** Optional user-supplied voice id (cloned, professional, shared) overriding
+     *  the catalog [voiceId] for synthesis. Empty string = unset. */
+    var voiceCustomId by mutableStateOf("")
+    /** TTS model id (Flash / Turbo / Multilingual). Hydrated from VoicePrefs. */
+    var voiceModel by mutableStateOf(com.r1.launcher.voice.VoicePrefs.DEFAULT_MODEL)
+    /** voice_settings.stability — 0..1, hydrated from prefs. */
+    var voiceStability by mutableStateOf(com.r1.launcher.voice.VoicePrefs.DEFAULT_STABILITY)
+    var voiceSimilarity by mutableStateOf(com.r1.launcher.voice.VoicePrefs.DEFAULT_SIMILARITY)
+    var voiceStyle by mutableStateOf(com.r1.launcher.voice.VoicePrefs.DEFAULT_STYLE)
+    var voiceSpeed by mutableStateOf(com.r1.launcher.voice.VoicePrefs.DEFAULT_SPEED)
+    var voiceSpeakerBoost by mutableStateOf(com.r1.launcher.voice.VoicePrefs.DEFAULT_SPEAKER_BOOST)
+    /** Focus index for SETTINGS_VOICE_TUNING rows. */
+    var voiceTuningFocus by mutableIntStateOf(0)
+    /** True while a "test voice" synthesis is in flight (button stays warm). */
+    var voiceTestBusy by mutableStateOf(false)
     // Live partial transcripts during STT recording. chatPartialText already
     // existed (line 126) and is reused for OpenClaw chat. The two below are
     // new for terminal/claude panels which gain dictation via ElevenLabs.
@@ -435,6 +450,11 @@ class LauncherState {
         panel = Panel.SETTINGS_VOICE
     }
 
+    fun openSettingsVoiceTuning() {
+        voiceTuningFocus = 0
+        panel = Panel.SETTINGS_VOICE_TUNING
+    }
+
     fun openSettingsLanguage() {
         settingsLanguageFocus = 0
         panel = Panel.SETTINGS_LANGUAGE
@@ -514,6 +534,7 @@ class LauncherState {
             // back arrow needs to drop back into SETTINGS_DEVICE.
             Panel.SETTINGS_LANGUAGE -> Panel.SETTINGS_DEVICE
             Panel.SETTINGS_DISPLAY, Panel.SETTINGS_SOUND, Panel.SETTINGS_DEVICE, Panel.SETTINGS_ABOUT, Panel.SETTINGS_VOICE -> Panel.SETTINGS
+            Panel.SETTINGS_VOICE_TUNING -> Panel.SETTINGS_VOICE
             Panel.WIFI_SCAN -> if (isOnboarding) Panel.ONBOARDING else Panel.NETWORK
             Panel.WIFI_PASSWORD -> Panel.WIFI_SCAN
             Panel.WIFI_SHARE -> Panel.NETWORK

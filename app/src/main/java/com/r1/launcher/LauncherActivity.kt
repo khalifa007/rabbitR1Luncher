@@ -329,6 +329,13 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         // Hydrate global voice state from prefs.
         state.voiceEnabled = voicePrefs.enabled
         state.voiceId = voicePrefs.voiceId
+        state.voiceCustomId = voicePrefs.customVoiceId.orEmpty()
+        state.voiceModel = voicePrefs.model
+        state.voiceStability = voicePrefs.stability
+        state.voiceSimilarity = voicePrefs.similarity
+        state.voiceStyle = voicePrefs.style
+        state.voiceSpeed = voicePrefs.speed
+        state.voiceSpeakerBoost = voicePrefs.speakerBoost
         refreshVoiceKeyState()
         state.wifiShareSsid = wifiSharePrefs.ssid
         state.wifiSharePassword = wifiSharePrefs.password
@@ -827,7 +834,9 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         openClawTtsCall = com.r1.launcher.voice.ElevenLabsTtsClient.synthesize(
             text = cleanText,
             apiKey = apiKey,
-            voiceId = state.voiceId,
+            voiceId = voicePrefs.effectiveVoiceId(),
+            model = voicePrefs.model,
+            tuning = voicePrefs.tuning(),
             outFile = outFile,
         ) { mp3Bytes, err ->
             openClawTtsCall = null
@@ -1032,7 +1041,9 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         val call = com.r1.launcher.voice.ElevenLabsTtsClient.synthesize(
             text = cleanChunk,
             apiKey = apiKey,
-            voiceId = state.voiceId,
+            voiceId = voicePrefs.effectiveVoiceId(),
+            model = voicePrefs.model,
+            tuning = voicePrefs.tuning(),
             outFile = outFile,
         ) { _, err ->
             // synthesize callbacks come back on main via its internal Handler.
@@ -2808,17 +2819,160 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     override fun voiceSettingsRowActivate(idx: Int) {
+        // Row layout matches SettingsVoicePanel:
+        //   0  back
+        //   1  voice on/off
+        //   2  elevenlabs key  (handled inline by the panel's keyboard overlay)
+        //   3  scan key from qr
+        //   4  voice picker (cycle catalog)
+        //   5  custom voice id (handled inline by the panel's keyboard overlay)
+        //   6  test voice
+        //   7  tuning (opens SETTINGS_VOICE_TUNING)
+        //   8  clear key
         when (idx) {
             0 -> { state.back(); backTone() }
             1 -> voiceToggleEnabled()
-            // 2 (key) is handled entirely by the voice settings panel UI keyboard
+            // 2 handled by the panel's keyboard overlay
             3 -> {
                 ensureCameraPerm()
                 state.openOpenAiKeyQr() // QR scan path is reused — see openClawScanned
                 selectTone()
             }
             4 -> voiceCycleVoiceId()
-            5 -> voiceClearKey()
+            // 5 handled by the panel's keyboard overlay
+            6 -> voiceTestSynthesize()
+            7 -> { state.openSettingsVoiceTuning(); selectTone() }
+            8 -> voiceClearKey()
+        }
+    }
+
+    override fun voiceSaveCustomVoiceId(id: String) {
+        val v = id.trim()
+        if (v.isEmpty()) { toast("voice id is empty"); return }
+        voicePrefs.customVoiceId = v
+        state.voiceCustomId = v
+        toast("custom voice id saved")
+        popTone()
+    }
+
+    override fun voiceClearCustomVoiceId() {
+        voicePrefs.customVoiceId = null
+        state.voiceCustomId = ""
+        toast("custom voice id cleared")
+        popTone()
+    }
+
+    override fun voicePasteCustomVoiceIdFromClipboard() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val raw = cm?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()?.trim().orEmpty()
+        if (raw.isEmpty()) { toast("clipboard empty"); return }
+        voicePrefs.customVoiceId = raw
+        state.voiceCustomId = raw
+        toast("custom voice id saved")
+    }
+
+    override fun voiceCycleModel() {
+        val models = com.r1.launcher.voice.VoicePrefs.MODELS
+        val curIdx = models.indexOfFirst { it.second == state.voiceModel }
+        val next = models[(curIdx + 1).coerceAtLeast(0) % models.size]
+        state.voiceModel = next.second
+        voicePrefs.model = next.second
+        toast("model: ${next.first}")
+        popTone()
+    }
+
+    override fun voiceSetStability(value: Float) {
+        val v = value.coerceIn(0f, 1f)
+        state.voiceStability = v
+        voicePrefs.stability = v
+    }
+
+    override fun voiceSetSimilarity(value: Float) {
+        val v = value.coerceIn(0f, 1f)
+        state.voiceSimilarity = v
+        voicePrefs.similarity = v
+    }
+
+    override fun voiceSetStyle(value: Float) {
+        val v = value.coerceIn(0f, 1f)
+        state.voiceStyle = v
+        voicePrefs.style = v
+    }
+
+    override fun voiceSetSpeed(value: Float) {
+        val v = value.coerceIn(
+            com.r1.launcher.voice.VoicePrefs.MIN_SPEED,
+            com.r1.launcher.voice.VoicePrefs.MAX_SPEED,
+        )
+        state.voiceSpeed = v
+        voicePrefs.speed = v
+    }
+
+    override fun voiceToggleSpeakerBoost() {
+        val next = !state.voiceSpeakerBoost
+        state.voiceSpeakerBoost = next
+        voicePrefs.speakerBoost = next
+        popTone()
+    }
+
+    override fun voiceResetTuning() {
+        voicePrefs.resetTuning()
+        state.voiceModel = voicePrefs.model
+        state.voiceStability = voicePrefs.stability
+        state.voiceSimilarity = voicePrefs.similarity
+        state.voiceStyle = voicePrefs.style
+        state.voiceSpeed = voicePrefs.speed
+        state.voiceSpeakerBoost = voicePrefs.speakerBoost
+        toast("tuning reset")
+        popTone()
+    }
+
+    override fun voiceTestSynthesize() {
+        val apiKey = voicePrefs.elevenlabsKey
+        if (apiKey.isNullOrBlank()) {
+            toast("voice: set elevenlabs key first")
+            return
+        }
+        if (state.voiceTestBusy) return
+        state.voiceTestBusy = true
+        // Stop any in-flight TTS (chat readback, prior test) before starting.
+        cancelOpenClawSpeech()
+        val sample = getString(R.string.voice_test_phrase)
+        val outFile = File(File(cacheDir, "openclaw-voice").apply { mkdirs() }, "test.mp3")
+        openClawTtsCall = com.r1.launcher.voice.ElevenLabsTtsClient.synthesize(
+            text = sample,
+            apiKey = apiKey,
+            voiceId = voicePrefs.effectiveVoiceId(),
+            model = voicePrefs.model,
+            tuning = voicePrefs.tuning(),
+            outFile = outFile,
+        ) { mp3Bytes, err ->
+            openClawTtsCall = null
+            state.voiceTestBusy = false
+            if (err == "canceled") return@synthesize
+            if (err != null || mp3Bytes == null) {
+                toastFail("voice: ${err ?: "no audio"}")
+                return@synthesize
+            }
+            playOpenClawSpeech(mp3Bytes)
+        }
+    }
+
+    override fun voiceTuningRowActivate(idx: Int) {
+        // Row layout matches SettingsVoiceTuningPanel:
+        //   0 back
+        //   1 model picker (cycle)
+        //   2..5 sliders (handled inline by the panel's +/- pills)
+        //   6 speaker boost toggle
+        //   7 test voice
+        //   8 reset to defaults
+        when (idx) {
+            0 -> { state.back(); backTone() }
+            1 -> voiceCycleModel()
+            // 2..5 handled inline by the panel's slider pills
+            6 -> voiceToggleSpeakerBoost()
+            7 -> voiceTestSynthesize()
+            8 -> voiceResetTuning()
         }
     }
 

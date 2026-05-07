@@ -142,6 +142,24 @@
     <string name="voice_row_scan_qr">scan key from qr</string>
     <string name="voice_row_clear_key">clear key</string>
     <string name="voice_kb_hint">type sk_… or paste</string>
+    <string name="voice_row_custom_id">custom voice id</string>
+    <string name="voice_custom_id_set_short">set · …</string>
+    <string name="voice_custom_id_not_set">using catalog voice</string>
+    <string name="voice_custom_id_kb_hint">paste voice_id from elevenlabs.io</string>
+    <string name="voice_row_test">test voice</string>
+    <string name="voice_row_tuning">tuning</string>
+    <string name="voice_test_phrase">this is a voice test on r1.</string>
+
+    <!-- Settings → Voice → Tuning -->
+    <string name="voice_tuning_row_model">model: %1$s</string>
+    <string name="voice_tuning_row_stability">stability</string>
+    <string name="voice_tuning_row_similarity">similarity</string>
+    <string name="voice_tuning_row_style">style</string>
+    <string name="voice_tuning_row_speed">speed</string>
+    <string name="voice_tuning_row_speaker_boost">speaker boost</string>
+    <string name="voice_tuning_row_test">test voice</string>
+    <string name="voice_tuning_row_test_busy">testing…</string>
+    <string name="voice_tuning_row_reset">reset to defaults</string>
 
     <!-- Messages -->
     <string name="messages_empty">no messages</string>

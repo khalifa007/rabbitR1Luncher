@@ -46,17 +46,21 @@ import com.r1.launcher.voice.VoicePrefs
 
 /**
  * Settings → Voice subpanel. Single source of truth for the ElevenLabs key,
- * voice picker, and the auto-speak toggle. Used by:
+ * voice picker, custom voice id, and the auto-speak toggle. Used by:
  *   - OpenClaw chat / Terminal / Claude STT (ElevenLabs Realtime, key only)
- *   - OpenClaw assistant TTS readback (ElevenLabs Flash v2.5, key + voiceId)
+ *   - OpenClaw assistant TTS readback (ElevenLabs Flash v2.5, key + voice id +
+ *     model + voice_settings)
  *
- * Rows:
+ * Row layout — kept in lockstep with [com.r1.launcher.LauncherActivity.voiceSettingsRowActivate]:
  *   0  < back
  *   1  voice: on/off    (toggles auto-speak of assistant replies)
  *   2  elevenlabs key   (status pill; on click opens RetroKeyboard overlay)
  *   3  scan key from qr (jumps to the QR scan panel with mode = OPENAI_KEY)
  *   4  voice: <name>    (cycles through 4 hardcoded ElevenLabs voices)
- *   5  clear key
+ *   5  custom voice id  (status pill; on click opens RetroKeyboard overlay)
+ *   6  test voice       (synthesize a short sample with current settings)
+ *   7  tuning           (opens SETTINGS_VOICE_TUNING)
+ *   8  clear key
  */
 @Composable
 fun SettingsVoicePanel(
@@ -65,6 +69,9 @@ fun SettingsVoicePanel(
     onSaveKey: (String) -> Unit,
     onPasteKey: () -> Unit,
     onClear: () -> Unit,
+    onSaveCustomVoiceId: (String) -> Unit,
+    onPasteCustomVoiceId: () -> Unit,
+    onClearCustomVoiceId: () -> Unit,
     onRowClick: (Int) -> Unit = {},
 ) {
     AnimatedVisibility(
@@ -76,13 +83,16 @@ fun SettingsVoicePanel(
     ) {
         val type = LocalR1Type.current
         var input by remember { mutableStateOf("") }
-        var showKeyboard by remember { mutableStateOf(false) }
+        // Which keyboard overlay is open: null = none; KEY = elevenlabs key;
+        // CUSTOM_VOICE = custom voice id. Keeping a single overlay surface
+        // avoids stacking two keyboards on a 480x480 screen.
+        var kbTarget by remember { mutableStateOf<KeyboardTarget?>(null) }
 
         // Reset keyboard state when panel opens.
         LaunchedEffect(state.panel) {
             if (state.panel == Panel.SETTINGS_VOICE) {
                 input = ""
-                showKeyboard = false
+                kbTarget = null
             }
         }
 
@@ -93,9 +103,19 @@ fun SettingsVoicePanel(
         } else {
             stringResource(R.string.voice_key_not_set)
         }
+        val customStatus = if (state.voiceCustomId.isNotBlank()) {
+            stringResource(R.string.voice_custom_id_set_short) +
+                state.voiceCustomId.takeLast(6)
+        } else {
+            stringResource(R.string.voice_custom_id_not_set)
+        }
         val toggleLabel = stringResource(
             if (state.voiceEnabled) R.string.voice_row_toggle_on else R.string.voice_row_toggle_off
         )
+        val testLabel = if (state.voiceTestBusy)
+            stringResource(R.string.voice_tuning_row_test_busy)
+        else
+            stringResource(R.string.voice_row_test)
 
         val items = listOf(
             SettingsItem.Standard(stringResource(R.string.back_short)),
@@ -103,6 +123,9 @@ fun SettingsVoicePanel(
             SettingsItem.Standard(stringResource(R.string.voice_row_key)),  // subtitle injected below
             SettingsItem.Standard(stringResource(R.string.voice_row_scan_qr)),
             SettingsItem.Standard("voice: $voiceLabel"),
+            SettingsItem.Standard(stringResource(R.string.voice_row_custom_id)),
+            SettingsItem.Standard(testLabel),
+            SettingsItem.Standard(stringResource(R.string.voice_row_tuning)),
             SettingsItem.Standard(stringResource(R.string.voice_row_clear_key)),
         )
 
@@ -124,8 +147,12 @@ fun SettingsVoicePanel(
                     items = items,
                     key = { _, item -> item.label },
                 ) { idx, item ->
-                    val subtitle = if (idx == 2) keyStatus else ""
-                    val subtitleColor = if (idx == 2 && state.hasVoiceKey)
+                    val (subtitle, subtitleOk) = when (idx) {
+                        2 -> keyStatus to state.hasVoiceKey
+                        5 -> customStatus to state.voiceCustomId.isNotBlank()
+                        else -> "" to false
+                    }
+                    val subtitleColor = if (subtitleOk)
                         Color(0xFF35D26F) else Color(0xFFFF4500)
                     SettingsRow(
                         label = item.label,
@@ -134,26 +161,45 @@ fun SettingsVoicePanel(
                         subtitle = subtitle,
                         subtitleColor = subtitleColor,
                         onClick = {
-                            if (idx == 2) {
-                                showKeyboard = true
-                            } else {
-                                onRowClick(idx)
+                            when (idx) {
+                                2 -> { input = ""; kbTarget = KeyboardTarget.KEY }
+                                5 -> { input = ""; kbTarget = KeyboardTarget.CUSTOM_VOICE }
+                                else -> onRowClick(idx)
                             }
                         },
                     )
                 }
             }
 
-            // Keyboard overlay for entering the ElevenLabs key. Mirrors the
-            // pattern used previously for whisper-key entry, but validates
-            // ElevenLabs format (sk_… or 32-char hex) at save time via
-            // onSaveKey → host.voiceSaveKey.
+            // Single keyboard overlay shared between "elevenlabs key" and
+            // "custom voice id" inputs. The label, hint, validation, and the
+            // pill actions are switched on `kbTarget`.
             AnimatedVisibility(
-                visible = showKeyboard,
+                visible = kbTarget != null,
                 enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
                 exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
                 modifier = Modifier.align(Alignment.BottomCenter)
             ) {
+                val target = kbTarget ?: KeyboardTarget.KEY
+                val accent = Color(0xFFFF4500)
+                val ok = Color(0xFF35D26F)
+                val warn = Color(0xFFE53935)
+                val saveEnabled = input.trim().isNotBlank()
+                val isKey = target == KeyboardTarget.KEY
+                val clearEnabled = if (isKey) {
+                    state.hasVoiceKey || input.isNotEmpty()
+                } else {
+                    state.voiceCustomId.isNotBlank() || input.isNotEmpty()
+                }
+                val title = stringResource(
+                    if (isKey) R.string.voice_row_key else R.string.voice_row_custom_id
+                )
+                val hint = stringResource(
+                    if (isKey) R.string.voice_kb_hint else R.string.voice_custom_id_kb_hint
+                )
+                val statusText = if (isKey) keyStatus else customStatus
+                val statusOk = if (isKey) state.hasVoiceKey else state.voiceCustomId.isNotBlank()
+
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -161,32 +207,22 @@ fun SettingsVoicePanel(
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    val accent = Color(0xFFFF4500)
-                    val ok = Color(0xFF35D26F)
-                    val warn = Color(0xFFE53935)
-                    val saveEnabled = input.trim().isNotBlank()
-                    val clearEnabled = state.hasVoiceKey || input.isNotEmpty()
-
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            text = stringResource(R.string.voice_row_key),
+                            text = title,
                             style = type.appCard.copy(fontSize = 16.sp),
                             color = accent,
                         )
                         Spacer(Modifier.weight(1f))
-                        StatusDot(color = if (state.hasVoiceKey) ok else Color.DarkGray)
+                        StatusDot(color = if (statusOk) ok else Color.DarkGray)
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            text = if (state.hasVoiceKey) {
-                                stringResource(R.string.voice_key_set_short) + state.voiceKeyTail
-                            } else {
-                                stringResource(R.string.voice_key_not_set)
-                            },
+                            text = statusText,
                             style = type.appCard.copy(fontSize = 12.sp),
-                            color = if (state.hasVoiceKey) ok else Color.DarkGray,
+                            color = if (statusOk) ok else Color.DarkGray,
                         )
                     }
 
@@ -198,10 +234,14 @@ fun SettingsVoicePanel(
                             .background(Color(0xFF101010))
                             .padding(horizontal = 10.dp, vertical = 8.dp),
                     ) {
-                        val voiceKbHint = stringResource(R.string.voice_kb_hint)
                         val displayText = when {
-                            input.isNotEmpty() -> mask(input) + "_"
-                            else -> voiceKbHint
+                            input.isNotEmpty() -> {
+                                // Mask the API key (sensitive) but show the
+                                // custom voice id in clear — voice ids aren't
+                                // secrets and users need to spot typos.
+                                if (isKey) mask(input) + "_" else input + "_"
+                            }
+                            else -> hint
                         }
                         Text(
                             text = displayText,
@@ -215,33 +255,36 @@ fun SettingsVoicePanel(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         VoicePill(stringResource(R.string.common_save), if (saveEnabled) ok else Color.DarkGray, saveEnabled, Modifier.weight(1f)) {
-                            onSaveKey(input.trim())
+                            val v = input.trim()
+                            if (isKey) onSaveKey(v) else onSaveCustomVoiceId(v)
                             input = ""
-                            showKeyboard = false
+                            kbTarget = null
                         }
                         VoicePill(stringResource(R.string.common_paste), accent, true, Modifier.weight(1f)) {
-                            onPasteKey()
-                            showKeyboard = false
+                            if (isKey) onPasteKey() else onPasteCustomVoiceId()
+                            kbTarget = null
                         }
                         VoicePill(stringResource(R.string.common_clear), if (clearEnabled) warn else Color.DarkGray, clearEnabled, Modifier.weight(1f)) {
-                            onClear()
+                            if (isKey) onClear() else onClearCustomVoiceId()
                             input = ""
                         }
                         VoicePill(stringResource(R.string.common_close), Color.White, true, Modifier.weight(1f)) {
-                            showKeyboard = false
+                            kbTarget = null
                         }
                     }
 
                     RetroKeyboard(
                         onKeyPress = { ch -> input += ch },
                         onBackspace = { if (input.isNotEmpty()) input = input.dropLast(1) },
-                        onDismiss = { showKeyboard = false },
+                        onDismiss = { kbTarget = null },
                     )
                 }
             }
         }
     }
 }
+
+private enum class KeyboardTarget { KEY, CUSTOM_VOICE }
 
 private fun mask(s: String): String {
     if (s.length <= 8) return s

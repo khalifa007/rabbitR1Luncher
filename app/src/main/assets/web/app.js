@@ -326,6 +326,13 @@ function updateSendHint() {
         else if (v.startsWith('sk_') && v.length >= 32) sendHint.textContent = t('send.hintValid');
         else if (/^[0-9a-fA-F]{32}$/.test(v)) sendHint.textContent = t('send.hintValid');
         else sendHint.textContent = t('send.hintInvalid');
+    } else if (sendTarget.value === 'voice_custom_id') {
+        const v = text.trim();
+        if (!v) sendHint.textContent = t('send.hintCustomIdEmpty');
+        // ElevenLabs voice_id is a 20-char alphanumeric token. Accept anything
+        // close to that shape; let the server reject the rest at synth time.
+        else if (/^[A-Za-z0-9]{16,32}$/.test(v)) sendHint.textContent = t('send.hintValid');
+        else sendHint.textContent = t('send.hintCustomIdInvalid');
     } else {
         sendHint.textContent = text ? t('send.hintChars', text.length) : t('send.hintTypeMsg');
     }

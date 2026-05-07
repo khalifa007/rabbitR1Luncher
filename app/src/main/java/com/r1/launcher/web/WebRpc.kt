@@ -66,6 +66,16 @@ object WebRpc {
         "voice.set_key" -> {
             host.voiceSaveKey(params.requireString("key")); JsonNull
         }
+        "voice.set_custom_id" -> {
+            // Empty string = clear the override (fall back to catalog voice).
+            val v = params.requireString("id").trim()
+            if (v.isEmpty()) host.voiceClearCustomVoiceId()
+            else host.voiceSaveCustomVoiceId(v)
+            JsonNull
+        }
+        "voice.clear_custom_id" -> {
+            host.voiceClearCustomVoiceId(); JsonNull
+        }
 
         "terminal.run" -> {
             requireWebTerminal(state)
@@ -209,6 +219,8 @@ object WebRpc {
             put("voiceKeyTail", state.voiceKeyTail)
             put("voiceEnabled", state.voiceEnabled)
             put("voiceId", state.voiceId)
+            // Empty when no override is set; UI shows "using catalog voice".
+            put("voiceCustomId", state.voiceCustomId)
         })
         put("terminal", buildJsonObject {
             put("enabled", state.webTerminalEnabled)
@@ -256,8 +268,10 @@ object WebRpc {
      * keyboard into one of the launcher's input sinks.
      *
      * targets:
-     *   - "voice_key"     → save as ElevenLabs API key (sk_* or 32-char hex)
-     *   - "openclaw_chat" → send as a chat message (only when a session is live)
+     *   - "voice_key"       → save as ElevenLabs API key (sk_* or 32-char hex)
+     *   - "voice_custom_id" → save as ElevenLabs voice id (clones / pro voices);
+     *                         empty string clears the override
+     *   - "openclaw_chat"   → send as a chat message (only when a session is live)
      */
     private fun handleTextSend(
         host: LauncherHost,
@@ -269,6 +283,12 @@ object WebRpc {
         return when (target) {
             "voice_key" -> {
                 host.voiceSaveKey(text.trim())
+                JsonNull
+            }
+            "voice_custom_id" -> {
+                val v = text.trim()
+                if (v.isEmpty()) host.voiceClearCustomVoiceId()
+                else host.voiceSaveCustomVoiceId(v)
                 JsonNull
             }
             "openclaw_chat" -> {

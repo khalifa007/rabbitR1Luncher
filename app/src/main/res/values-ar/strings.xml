@@ -133,6 +133,24 @@
     <string name="voice_row_scan_qr">مسح المفتاح من QR</string>
     <string name="voice_row_clear_key">مسح المفتاح</string>
     <string name="voice_kb_hint">اكتب sk_… أو الصق</string>
+    <string name="voice_row_custom_id">معرّف صوت مخصص</string>
+    <string name="voice_custom_id_set_short">محدد · …</string>
+    <string name="voice_custom_id_not_set">يستخدم صوت القائمة</string>
+    <string name="voice_custom_id_kb_hint">الصق voice_id من elevenlabs.io</string>
+    <string name="voice_row_test">اختبار الصوت</string>
+    <string name="voice_row_tuning">الضبط</string>
+    <string name="voice_test_phrase">هذا اختبار للصوت على R1.</string>
+
+    <!-- Settings → Voice → Tuning -->
+    <string name="voice_tuning_row_model">النموذج: %1$s</string>
+    <string name="voice_tuning_row_stability">الاستقرار</string>
+    <string name="voice_tuning_row_similarity">التشابه</string>
+    <string name="voice_tuning_row_style">الأسلوب</string>
+    <string name="voice_tuning_row_speed">السرعة</string>
+    <string name="voice_tuning_row_speaker_boost">تعزيز السماعة</string>
+    <string name="voice_tuning_row_test">اختبار الصوت</string>
+    <string name="voice_tuning_row_test_busy">جارٍ الاختبار…</string>
+    <string name="voice_tuning_row_reset">إعادة الضبط</string>
 
     <!-- Messages -->
     <string name="messages_empty">لا توجد رسائل</string>

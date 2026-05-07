@@ -156,7 +156,19 @@ fun LauncherRoot(
             onSaveKey = { k -> host.voiceSaveKey(k) },
             onPasteKey = { host.voicePasteKeyFromClipboard() },
             onClear = { host.voiceClearKey() },
+            onSaveCustomVoiceId = { id -> host.voiceSaveCustomVoiceId(id) },
+            onPasteCustomVoiceId = { host.voicePasteCustomVoiceIdFromClipboard() },
+            onClearCustomVoiceId = { host.voiceClearCustomVoiceId() },
             onRowClick = { idx -> host.voiceSettingsRowActivate(idx) },
+        )
+
+        SettingsVoiceTuningPanel(
+            state = state,
+            onRowClick = { idx -> host.voiceTuningRowActivate(idx) },
+            onSetStability = { v -> host.voiceSetStability(v) },
+            onSetSimilarity = { v -> host.voiceSetSimilarity(v) },
+            onSetStyle = { v -> host.voiceSetStyle(v) },
+            onSetSpeed = { v -> host.voiceSetSpeed(v) },
         )
 
         SettingsLanguagePanel(
