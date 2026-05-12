@@ -13,8 +13,8 @@ android {
         applicationId = "com.r1.launcher"
         minSdk = 23
         targetSdk = 33
-        versionCode = 279
-        versionName = "3.46.0"
+        versionCode = 293
+        versionName = "3.53.1"
 
         // R1 is single-ABI (arm64-v8a). Restricting filter avoids accidentally
         // pulling in armeabi-v7a / x86_64 / x86 from any future native deps.
@@ -85,6 +85,15 @@ android {
                 "org/bouncycastle/pqc/crypto/picnic/lowmcL3.bin.properties",
                 "org/bouncycastle/pqc/crypto/picnic/lowmcL5.bin.properties",
                 "org/bouncycastle/x509/CertPathReviewerMessages*.properties",
+                // jakarta.mail (com.sun.mail:android-mail) ships these resource
+                // files that conflict with android-activation when both are
+                // packaged together. Last-wins semantics are fine for us.
+                "META-INF/mailcap.default",
+                "META-INF/mimetypes.default",
+                "META-INF/NOTICE.md",
+                "META-INF/LICENSE.md",
+                "META-INF/NOTICE",
+                "META-INF/LICENSE",
             )
         }
     }
@@ -134,4 +143,10 @@ dependencies {
     // Embedded HTTP + WebSocket server for the companion web panel.
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     implementation("org.nanohttpd:nanohttpd-websocket:2.3.1")
+
+    // Meetings app: SMTP send via JavaMail. The android-mail fork is the only
+    // one that links cleanly on AOSP — the upstream jakarta.mail-api JARs
+    // reference desktop-only packages (java.beans, JAXB) and won't dex.
+    implementation("com.sun.mail:android-mail:1.6.7")
+    implementation("com.sun.mail:android-activation:1.6.7")
 }

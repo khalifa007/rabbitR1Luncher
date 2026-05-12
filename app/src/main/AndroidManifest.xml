@@ -22,6 +22,13 @@
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
+    <!-- Meetings app records long-form audio inside a microphone-typed
+         foreground service so recording survives screen-off and keeps the mic
+         source held across configChanges. POST_NOTIFICATIONS is the API 33+
+         runtime grant for the persistent recording cue. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <queries>
@@ -80,5 +87,10 @@
                 <action android:name="android.provider.Telephony.SMS_RECEIVED" />
             </intent-filter>
         </receiver>
+
+        <service
+            android:name=".transcriber.TranscriberRecordingService"
+            android:foregroundServiceType="microphone"
+            android:exported="false" />
     </application>
 </manifest>

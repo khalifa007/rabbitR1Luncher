@@ -11,8 +11,13 @@ import com.r1.launcher.messages.SmsConversation
 import com.r1.launcher.messages.SmsItem
 import com.r1.launcher.openclaw.ChatMessage
 import com.r1.launcher.openclaw.SessionEntry
+import com.r1.launcher.survey.CallRecordIndexEntry
+import com.r1.launcher.survey.CampaignIndexEntry
+import com.r1.launcher.survey.SurveyIndexEntry
+import com.r1.launcher.transcriber.MeetingIndexEntry
+import com.r1.launcher.transcriber.TranscriberDetailAction
 
-enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_LANGUAGE, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, CLAUDE }
+enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, CLAUDE, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS, SURVEY_LIST, SURVEY_CAMPAIGN, SURVEY_CONSENT, SURVEY_LIVE, SURVEY_DETAIL, SURVEY_SETTINGS }
 
 enum class WifiShareEditTarget { SSID, PASSWORD }
 
@@ -189,6 +194,20 @@ class LauncherState {
     var voiceTuningFocus by mutableIntStateOf(0)
     /** True while a "test voice" synthesis is in flight (button stays warm). */
     var voiceTestBusy by mutableStateOf(false)
+    // ElevenLabs subscription/balance — cached from /v1/user/subscription. The
+    // single credit pool covers TTS chars + STT minutes (Meetings, chat STT,
+    // terminal STT, claude STT, OpenClaw TTS) so this is the right home for the
+    // balance display rather than putting it inside the Meetings panel.
+    /** Full subscription snapshot. Null = never fetched. */
+    var voiceSubData by mutableStateOf<com.r1.launcher.voice.SubscriptionData?>(null)
+    /** True between fetch start and response. */
+    var voiceSubLoading by mutableStateOf(false)
+    /** When the cached values were fetched (epoch ms). 0 = never. */
+    var voiceSubFetchedAtMs by mutableStateOf(0L)
+    /** Last error message from the fetch, or null on success / never tried. */
+    var voiceSubError by mutableStateOf<String?>(null)
+    /** Focus index for the SETTINGS_VOICE_SUBSCRIPTION page rows. */
+    var voiceSubFocus by mutableIntStateOf(0)
     // Live partial transcripts during STT recording. chatPartialText already
     // existed (line 126) and is reused for OpenClaw chat. The two below are
     // new for terminal/claude panels which gain dictation via ElevenLabs.
@@ -289,6 +308,106 @@ class LauncherState {
      *  When true, opening the Claude tile drops straight into chat — the
      *  QR redirect was a setup affordance, not a recurring detour. */
     var claudeAuthed by mutableStateOf(false)
+
+    // --- meetings (transcriber) ---
+    /** Index of saved meetings, newest first. Hydrated from MeetingStore on
+     *  panel entry; updated in-place after start/stop/transcribe/delete. */
+    val meetings = mutableStateListOf<MeetingIndexEntry>()
+    /** Focus on TRANSCRIBER_LIST: 0=back pill, 1=settings gear (top-right),
+     *  2="+ new recording", 3..N+2=meetings. */
+    var transcriberListFocus by mutableIntStateOf(0)
+    /** UUID of the currently-selected meeting in detail panel. */
+    var currentMeetingUuid by mutableStateOf<String?>(null)
+    /** Detail-panel focus when the ⋮ overlay is closed: 0=back pill,
+     *  1=⋮ menu icon. While the overlay is open, [transcriberDetailMenuFocus]
+     *  drives the wheel instead. */
+    var transcriberDetailFocus by mutableIntStateOf(0)
+    /** Settings panel focus: 0=back, 1=smtp host, 2=smtp port, 3=smtp user,
+     *  4=smtp password, 5=default recipient, 6=clear smtp. */
+    var transcriberSettingsFocus by mutableIntStateOf(0)
+    /** Live recording state mirrored from the FGS binder. */
+    var recordingActive by mutableStateOf(false)
+    var recordingElapsedMs by mutableStateOf(0L)
+    var recordingPeak by mutableIntStateOf(0)
+    /** True between record-stop and Scribe response (or failure). */
+    var transcribeBusy by mutableStateOf(false)
+    /** Buffer for the recipient typed in the detail panel email keyboard. */
+    var transcriberRecipientInput by mutableStateOf("")
+    /** Which transcriber-settings field the keyboard is editing.
+     *  Empty string = keyboard not visible. */
+    var transcriberSettingsEditField by mutableStateOf("")
+    var transcriberSettingsEditInput by mutableStateOf("")
+    /** Has SMTP creds (cached from prefs to avoid repeated reads on the UI thread). */
+    var hasSmtp by mutableStateOf(false)
+    var smtpHostDisplay by mutableStateOf("")
+    var smtpPortDisplay by mutableIntStateOf(0)
+    var smtpUserDisplay by mutableStateOf("")
+    var defaultRecipientDisplay by mutableStateOf("")
+    /** True while audio is playing back from the detail panel. */
+    var detailPlaying by mutableStateOf(false)
+    /** When non-empty, shown on the detail panel (e.g. "sent to alice@…", "send failed: …"). */
+    var detailStatus by mutableStateOf("")
+    /** True while the ⋮ action overlay is open on the detail panel. While open,
+     *  the wheel + activate routes through [transcriberDetailMenuFocus] and
+     *  back/menu-press first closes the overlay before unwinding the panel. */
+    var transcriberDetailMenuOpen by mutableStateOf(false)
+    /** Focus index inside the action menu — 0..(N-1) over the dynamic action
+     *  set computed from the meeting's status (play/email/retry/delete). */
+    var transcriberDetailMenuFocus by mutableIntStateOf(0)
+    /** The action set currently shown in the ⋮ menu. Host populates it on
+     *  open based on the meeting's status; nav reads it for wheel max + dispatch. */
+    val transcriberDetailMenuActions = mutableStateListOf<TranscriberDetailAction>()
+
+    // --- survey call bot ---
+    /** Index of saved surveys (templates). Hydrated from SurveyStore on entry. */
+    val surveys = mutableStateListOf<SurveyIndexEntry>()
+    /** Index of saved call records (one per completed call). */
+    val callRecords = mutableStateListOf<CallRecordIndexEntry>()
+    /** Index of campaigns (a survey + a contact list + status). */
+    val campaigns = mutableStateListOf<CampaignIndexEntry>()
+    /** Focus on SURVEY_LIST: 0=back, 1=settings gear, 2="+ new campaign",
+     *  3..=campaigns rows. */
+    var surveyListFocus by mutableIntStateOf(0)
+    /** Focus on SURVEY_CAMPAIGN composer: 0=back, 1=pick survey, 2=pick contacts,
+     *  3=start. Author the survey + contacts on the web companion. */
+    var surveyCampaignFocus by mutableIntStateOf(0)
+    /** Two-row pre-dial confirm: 0=cancel, 1=confirm + dial. */
+    var surveyConsentFocus by mutableIntStateOf(0)
+    /** Detail panel: 0=back, 1=⋮ (mirror transcriber detail). */
+    var surveyDetailFocus by mutableIntStateOf(0)
+    /** Settings rows: 0=back, 1=openai key, 2=sip host, 3=sip user,
+     *  4=sip password, 5=sip from-number, 6=consent text, 7=voice cycle,
+     *  8=summarizer model, 9=email recipient, 10=clear all. */
+    var surveySettingsFocus by mutableIntStateOf(0)
+    /** Currently selected campaign (for SURVEY_LIVE + post-call). */
+    var currentCampaignId by mutableStateOf<String?>(null)
+    /** Currently selected survey (for the campaign composer). */
+    var currentSurveyId by mutableStateOf<String?>(null)
+    /** Currently selected call record (for SURVEY_DETAIL). */
+    var currentCallRecordId by mutableStateOf<String?>(null)
+    /** Live state mirrored from SurveyOrchestrator while a call is in flight. */
+    var surveyCallActive by mutableStateOf(false)
+    var surveyCallElapsedMs by mutableStateOf(0L)
+    var surveyCallPeak by mutableIntStateOf(0)
+    var surveyCallContactName by mutableStateOf("")
+    /** "dialing" / "ringing" / "live" / "wrapping up" / "ended" / "failed". */
+    var surveyCallStatus by mutableStateOf("")
+    var surveyCallCurrentQuestion by mutableStateOf("")
+    /** Running answer count for the live UI. */
+    var surveyCallAnswered by mutableIntStateOf(0)
+    /** Total questions in the active survey (for the "x of N" indicator). */
+    var surveyCallTotal by mutableIntStateOf(0)
+    /** Cached display values for SURVEY_SETTINGS rows (no secrets in plain state). */
+    var hasOpenAiKey by mutableStateOf(false)
+    var openAiKeyTail by mutableStateOf("")
+    var hasSipCreds by mutableStateOf(false)
+    var sipHostDisplay by mutableStateOf("")
+    var sipUserDisplay by mutableStateOf("")
+    var sipFromDisplay by mutableStateOf("")
+    var realtimeVoiceDisplay by mutableStateOf("alloy")
+    var summarizerModelDisplay by mutableStateOf("claude-haiku-4-5-20251001")
+    var surveyConsentTextDisplay by mutableStateOf("")
+    var surveyEmailRecipientDisplay by mutableStateOf("")
 
     // --- toast overlay ---
     /** Currently visible toast, or null when hidden. Set via [showToast];
@@ -455,6 +574,11 @@ class LauncherState {
         panel = Panel.SETTINGS_VOICE_TUNING
     }
 
+    fun openSettingsVoiceSubscription() {
+        voiceSubFocus = 0
+        panel = Panel.SETTINGS_VOICE_SUBSCRIPTION
+    }
+
     fun openSettingsLanguage() {
         settingsLanguageFocus = 0
         panel = Panel.SETTINGS_LANGUAGE
@@ -518,6 +642,72 @@ class LauncherState {
         panel = Panel.OPENCLAW_SETTINGS
     }
 
+    fun openTranscriberList() {
+        transcriberListFocus = 0
+        detailStatus = ""
+        panel = Panel.TRANSCRIBER_LIST
+    }
+
+    fun openTranscriberRecording() {
+        // No focus index — recording panel has a single stop pill driven by
+        // the side-button toggle, plus a back row that wheel-up reaches.
+        panel = Panel.TRANSCRIBER_RECORDING
+    }
+
+    fun openTranscriberDetail(uuid: String) {
+        currentMeetingUuid = uuid
+        transcriberDetailFocus = 0
+        transcriberDetailMenuOpen = false
+        transcriberDetailMenuFocus = 0
+        transcriberRecipientInput = defaultRecipientDisplay
+        detailStatus = ""
+        panel = Panel.TRANSCRIBER_DETAIL
+    }
+
+    fun openTranscriberSettings() {
+        transcriberSettingsFocus = 0
+        transcriberSettingsEditField = ""
+        transcriberSettingsEditInput = ""
+        panel = Panel.TRANSCRIBER_SETTINGS
+    }
+
+    fun openSurveyList() {
+        surveyListFocus = 0
+        panel = Panel.SURVEY_LIST
+    }
+
+    fun openSurveyCampaign() {
+        surveyCampaignFocus = 0
+        panel = Panel.SURVEY_CAMPAIGN
+    }
+
+    fun openSurveyConsent(campaignId: String) {
+        currentCampaignId = campaignId
+        surveyConsentFocus = 0
+        panel = Panel.SURVEY_CONSENT
+    }
+
+    fun openSurveyLive() {
+        surveyCallActive = true
+        surveyCallElapsedMs = 0L
+        surveyCallPeak = 0
+        surveyCallAnswered = 0
+        surveyCallStatus = "dialing"
+        surveyCallCurrentQuestion = ""
+        panel = Panel.SURVEY_LIVE
+    }
+
+    fun openSurveyDetail(callRecordId: String) {
+        currentCallRecordId = callRecordId
+        surveyDetailFocus = 0
+        panel = Panel.SURVEY_DETAIL
+    }
+
+    fun openSurveySettings() {
+        surveySettingsFocus = 0
+        panel = Panel.SURVEY_SETTINGS
+    }
+
     fun goHome() {
         panel = Panel.HOME
     }
@@ -535,6 +725,7 @@ class LauncherState {
             Panel.SETTINGS_LANGUAGE -> Panel.SETTINGS_DEVICE
             Panel.SETTINGS_DISPLAY, Panel.SETTINGS_SOUND, Panel.SETTINGS_DEVICE, Panel.SETTINGS_ABOUT, Panel.SETTINGS_VOICE -> Panel.SETTINGS
             Panel.SETTINGS_VOICE_TUNING -> Panel.SETTINGS_VOICE
+            Panel.SETTINGS_VOICE_SUBSCRIPTION -> Panel.SETTINGS_VOICE
             Panel.WIFI_SCAN -> if (isOnboarding) Panel.ONBOARDING else Panel.NETWORK
             Panel.WIFI_PASSWORD -> Panel.WIFI_SCAN
             Panel.WIFI_SHARE -> Panel.NETWORK
@@ -550,6 +741,18 @@ class LauncherState {
             Panel.MESSAGES_THREAD -> Panel.MESSAGES
             Panel.TERMINAL -> Panel.APPS
             Panel.CLAUDE -> Panel.APPS
+            Panel.TRANSCRIBER_LIST -> Panel.APPS
+            // Recording-stop side-effect is fired by LauncherActivity's
+            // backPressed handling; here we just unwind the panel.
+            Panel.TRANSCRIBER_RECORDING -> Panel.TRANSCRIBER_LIST
+            Panel.TRANSCRIBER_DETAIL -> Panel.TRANSCRIBER_LIST
+            Panel.TRANSCRIBER_SETTINGS -> Panel.TRANSCRIBER_LIST
+            Panel.SURVEY_LIST -> Panel.APPS
+            Panel.SURVEY_CAMPAIGN -> Panel.SURVEY_LIST
+            Panel.SURVEY_CONSENT -> Panel.SURVEY_CAMPAIGN
+            Panel.SURVEY_LIVE -> Panel.SURVEY_LIST
+            Panel.SURVEY_DETAIL -> Panel.SURVEY_LIST
+            Panel.SURVEY_SETTINGS -> Panel.SURVEY_LIST
             Panel.HOME -> Panel.HOME
         }
     }

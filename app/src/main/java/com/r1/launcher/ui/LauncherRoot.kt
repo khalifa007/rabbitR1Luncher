@@ -171,6 +171,12 @@ fun LauncherRoot(
             onSetSpeed = { v -> host.voiceSetSpeed(v) },
         )
 
+        SettingsVoiceSubscriptionPanel(
+            state = state,
+            onBack = { state.back(); host.backTone() },
+            onRefresh = { host.voiceFetchSubscription(force = true) },
+        )
+
         SettingsLanguagePanel(
             state = state,
             onRowClick = { idx ->
@@ -377,6 +383,84 @@ fun LauncherRoot(
             onClear = { host.claudeClear(); host.popTone() },
             onPaste = { host.claudePasteFromClipboard(); host.popTone() },
         )
+
+        TranscriberListPanel(
+            state = state,
+            onRowClick = { idx ->
+                // Layout: 0=back, 1=settings (gear), 2=record, 3..N+2=meetings.
+                when {
+                    idx == 0 -> { state.back(); host.backTone() }
+                    idx == 1 -> { host.transcriberOpenSettings(); host.selectTone() }
+                    idx == 2 -> { host.transcriberStartRecording(); host.popTone() }
+                    idx - 3 in state.meetings.indices -> {
+                        val m = state.meetings[idx - 3]
+                        host.transcriberOpenDetail(m.uuid)
+                        host.selectTone()
+                    }
+                }
+            },
+        )
+
+        TranscriberRecordingPanel(
+            state = state,
+            onBack = {
+                host.transcriberStopRecording()
+                state.back(); host.backTone()
+            },
+            onStop = { host.transcriberStopRecording(); host.popTone() },
+        )
+
+        TranscriberDetailPanel(
+            state = state,
+            onBack = {
+                if (state.transcriberDetailMenuOpen) {
+                    state.transcriberDetailMenuOpen = false
+                    state.transcriberDetailMenuFocus = 0
+                    host.backTone()
+                } else {
+                    state.back()
+                    host.backTone()
+                }
+            },
+            onMenuOpen = { host.transcriberOpenDetailMenu(); host.selectTone() },
+            onMenuItemClick = { action ->
+                host.transcriberDetailMenuActivate(action)
+                host.popTone()
+            },
+            onMenuClose = {
+                state.transcriberDetailMenuOpen = false
+                state.transcriberDetailMenuFocus = 0
+                host.backTone()
+            },
+        )
+
+        TranscriberSettingsPanel(
+            state = state,
+            onRowClick = { idx -> host.transcriberSettingsRowActivate(idx) },
+            onSaveField = { field, value -> host.transcriberSaveSmtpField(field, value) },
+            onPasteField = { field -> host.transcriberPasteSmtpField(field) },
+            onCloseKeyboard = {
+                state.transcriberSettingsEditField = ""
+                state.transcriberSettingsEditInput = ""
+            },
+        )
+
+        SurveyListPanel(state = state, onRowClick = { idx -> host.surveyListRowActivate(idx) })
+        SurveyCampaignPanel(state = state, onRowClick = { idx -> host.surveyCampaignRowActivate(idx) })
+        SurveyConsentPanel(state = state, onRowClick = { idx ->
+            when (idx) {
+                0 -> { state.back(); host.backTone() }
+                1 -> { host.surveyConfirmCampaignAndDial(); host.selectTone() }
+            }
+        })
+        SurveyLivePanel(state = state)
+        SurveyDetailPanel(state = state, onRowClick = { idx ->
+            when (idx) {
+                0 -> { state.back(); host.backTone() }
+                1 -> state.currentCallRecordId?.let { host.surveyEmailCallRecord(it) }
+            }
+        })
+        SurveySettingsPanel(state = state, onRowClick = { idx -> host.surveySettingsRowActivate(idx) })
 
         // Topbar overlay — only on the clock screen; every other panel
         // either draws its own header or is a full-screen takeover.

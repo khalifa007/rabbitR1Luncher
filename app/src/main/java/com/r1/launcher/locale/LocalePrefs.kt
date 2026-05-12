@@ -48,6 +48,7 @@ class LocalePrefs private constructor(ctx: Context) {
         val SUPPORTED: List<Language> = listOf(
             Language(code = "en", displayName = "English",  isRtl = false),
             Language(code = "ar", displayName = "العربية", isRtl = true),
+            Language(code = "fr", displayName = "Français", isRtl = false),
         )
 
         fun isRtl(code: String): Boolean =

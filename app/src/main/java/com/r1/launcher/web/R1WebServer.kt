@@ -97,12 +97,82 @@ class R1WebServer(
                 uri == "/style.css" -> serveAsset("web/style.css", "text/css")
                 uri == "/api/state" -> jsonResponse(WebRpc.buildSnapshot(state, ctx))
                 uri == "/favicon.ico" -> notFound()
+                uri.startsWith("/api/transcriber/audio/") ->
+                    serveTranscriberAudio(uri.removePrefix("/api/transcriber/audio/"))
+                uri.startsWith("/api/transcriber/transcript/") ->
+                    serveTranscriberTranscript(uri.removePrefix("/api/transcriber/transcript/"))
+                uri.startsWith("/api/survey/audio/") ->
+                    serveSurveyAudio(uri.removePrefix("/api/survey/audio/"))
                 else -> notFound()
             }
         }.getOrElse { e ->
             Log.w(TAG, "serve $uri failed: ${e.message}")
             errorResponse(Response.Status.INTERNAL_ERROR, e.message ?: "error")
         }
+    }
+
+    /** Stream the m4a recording. Don't readBytes() — files can be 30 MB+. */
+    private fun serveTranscriberAudio(uuidWithExt: String): Response {
+        val uuid = uuidWithExt.removeSuffix(".m4a").removeSuffix(".mp4")
+        if (!uuid.matches(Regex("[a-zA-Z0-9-]+"))) return notFound()
+        val store = com.r1.launcher.transcriber.MeetingStore.get(ctx)
+        val file = store.audioFile(uuid)
+        if (!file.exists() || file.length() == 0L) return notFound()
+        val resp = newChunkedResponse(
+            Response.Status.OK,
+            "audio/mp4",
+            java.io.FileInputStream(file),
+        )
+        resp.addHeader("Content-Disposition", "attachment; filename=\"$uuid.m4a\"")
+        resp.addHeader("Cache-Control", "no-store")
+        return resp
+    }
+
+    /** Stream the survey-call WAV. Path is `<campaignId>/<recordId>.wav`;
+     *  matches the on-disk layout in [com.r1.launcher.survey.SurveyStore.audioFile]. */
+    private fun serveSurveyAudio(pathWithExt: String): Response {
+        val cleaned = pathWithExt.removeSuffix(".wav")
+        val parts = cleaned.split('/')
+        if (parts.size != 2) return notFound()
+        val campaignId = parts[0]
+        val recordId = parts[1]
+        // Defense in depth: only the characters we issue in our own ids.
+        val idPat = Regex("[A-Za-z0-9_-]+")
+        if (!campaignId.matches(idPat) || !recordId.matches(idPat)) return notFound()
+        val store = com.r1.launcher.survey.SurveyStore.get(ctx)
+        val file = store.audioFile(campaignId, recordId)
+        if (!file.exists() || file.length() == 0L) return notFound()
+        val resp = newChunkedResponse(
+            Response.Status.OK,
+            "audio/wav",
+            java.io.FileInputStream(file),
+        )
+        resp.addHeader("Content-Disposition", "attachment; filename=\"$recordId.wav\"")
+        resp.addHeader("Cache-Control", "no-store")
+        return resp
+    }
+
+    /** `<uuid>.txt` returns the rendered transcript; `<uuid>.json` returns the
+     *  raw Scribe response (suitable for re-rendering with renamed speakers). */
+    private fun serveTranscriberTranscript(pathWithExt: String): Response {
+        val uuid: String
+        val isJson: Boolean
+        when {
+            pathWithExt.endsWith(".json") -> { uuid = pathWithExt.removeSuffix(".json"); isJson = true }
+            pathWithExt.endsWith(".txt") -> { uuid = pathWithExt.removeSuffix(".txt"); isJson = false }
+            else -> { uuid = pathWithExt; isJson = false }
+        }
+        if (!uuid.matches(Regex("[a-zA-Z0-9-]+"))) return notFound()
+        val store = com.r1.launcher.transcriber.MeetingStore.get(ctx)
+        val meeting = store.loadMeeting(uuid) ?: return notFound()
+        val body = if (isJson) meeting.transcriptJson ?: "{}" else meeting.transcriptText.orEmpty()
+        val mime = if (isJson) "application/json" else "text/plain; charset=utf-8"
+        val resp = newFixedLengthResponse(Response.Status.OK, mime, body)
+        resp.addHeader(
+            "Content-Disposition",
+            "attachment; filename=\"$uuid.${if (isJson) "json" else "txt"}\"",
+        )
+        return resp
     }
 
     private fun serveAsset(path: String, mime: String): Response {
@@ -322,5 +392,31 @@ class R1WebServer(
         if (sockets.isEmpty()) return
         val payload = buildJsonObject { put("ok", ok) }
         sockets.toList().forEach { it.sendEvent("claude.setup.done", payload) }
+    }
+
+    // --- survey broadcasts (wired up by SipDialer / SurveyOrchestrator in task #10) ---
+
+    /** Push a live-call state tick — caller name, current question prompt,
+     *  status, elapsed ms. Web companion's live view renders this. */
+    fun broadcastSurveyCallState(payload: JsonObject) {
+        if (sockets.isEmpty()) return
+        sockets.toList().forEach { it.sendEvent("survey.call.state", payload) }
+    }
+
+    /** Append a transcript delta to the live view. `role` is "bot" or "user". */
+    fun broadcastSurveyTranscriptDelta(role: String, text: String) {
+        if (sockets.isEmpty()) return
+        val payload = buildJsonObject {
+            put("role", role)
+            put("text", text)
+        }
+        sockets.toList().forEach { it.sendEvent("survey.call.transcript", payload) }
+    }
+
+    /** Final summary + answers landed — web companion should refresh its
+     *  call list and (if the live view was open) show the result. */
+    fun broadcastSurveyCallDone(payload: JsonObject) {
+        if (sockets.isEmpty()) return
+        sockets.toList().forEach { it.sendEvent("survey.call.done", payload) }
     }
 }

@@ -60,6 +60,10 @@ interface LauncherHost {
     fun voiceResetTuning()
     /** Synthesize a fixed sample with the current settings and play it. */
     fun voiceTestSynthesize()
+    /** Fetch ElevenLabs `/v1/user/subscription` and update the state cache.
+     *  [force] = true bypasses the 60s in-memory cache. Runs on a background
+     *  thread; UI thread reads `voiceSubLoading` / `voiceSub*` for display. */
+    fun voiceFetchSubscription(force: Boolean = false)
     /** Activate handler for SETTINGS_VOICE_TUNING rows. */
     fun voiceTuningRowActivate(idx: Int)
     fun openClawScrollUp()
@@ -129,6 +133,76 @@ interface LauncherHost {
     fun claudeSetupRunning(): Boolean
     fun copyToClipboard(text: String, label: String = "r1-launcher")
     fun setLanguage(code: String)
+
+    // --- meetings (transcriber) ---
+    fun transcriberOpen()
+    fun transcriberStartRecording()
+    fun transcriberStopRecording()
+    fun transcriberToggleRecording()
+    fun transcriberOpenDetail(uuid: String)
+    fun transcriberRetryTranscribe(uuid: String)
+    fun transcriberDelete(uuid: String)
+    fun transcriberPlayAudio(uuid: String)
+    fun transcriberStopAudio()
+    fun transcriberShareEmail(uuid: String, recipient: String)
+    fun transcriberOpenSettings()
+    fun transcriberSettingsRowActivate(idx: Int)
+    fun transcriberSaveSmtpField(field: String, value: String)
+    fun transcriberPasteSmtpField(field: String)
+    fun transcriberClearSmtp()
+    fun transcriberPasteRecipient()
+    /** Open the ⋮ action overlay on the detail panel. Computes the action
+     *  set from the current meeting's status and writes it into
+     *  `state.transcriberDetailMenuActions`, then flips the menu open. */
+    fun transcriberOpenDetailMenu()
+    /** Dispatch a single ⋮ menu action. The activity reads the current meeting
+     *  uuid from state. */
+    fun transcriberDetailMenuActivate(action: com.r1.launcher.transcriber.TranscriberDetailAction)
+
+    // --- survey call bot ---
+    fun surveyOpen()
+    fun surveyOpenCampaign()
+    fun surveyConfirmCampaignAndDial()
+    fun surveyHangup()
+    fun surveyOpenDetail(callRecordId: String)
+    fun surveyDeleteCallRecord(callRecordId: String)
+    fun surveyEmailCallRecord(callRecordId: String)
+    /** Re-run the LLM summary for a finished call record (overwrites any
+     *  previous summary). Used when the first summary was empty or wrong. */
+    fun surveyRetrySummary(callRecordId: String)
+    /** Post-call entry point from the SIP/orchestrator path: finalize the
+     *  record, generate the summary, and email it. Idempotent. */
+    fun surveyHandleCallComplete(callRecordId: String)
+    fun surveyPlayAudio(callRecordId: String)
+    fun surveyStopAudio()
+    fun surveyOpenSettings()
+    fun surveySettingsRowActivate(idx: Int)
+    fun surveyCampaignRowActivate(idx: Int)
+    fun surveyListRowActivate(idx: Int)
+    /** Persist the OpenAI gpt-realtime-2 API key. */
+    fun surveySaveOpenAiKey(key: String)
+    fun surveyPasteOpenAiKey()
+    fun surveyClearOpenAiKey()
+    fun surveyCycleVoice()
+    fun surveyCycleSummarizerModel()
+
+    // --- web companion CRUD ---
+    /** Persist a Survey (new if [com.r1.launcher.survey.Survey.id] is blank,
+     *  update otherwise). Returns the surveyId. */
+    fun surveyUpsertSurvey(survey: com.r1.launcher.survey.Survey): String
+    fun surveyDeleteSurveyById(surveyId: String)
+    /** Create a campaign, ready to start. Returns the new campaign id. */
+    fun surveyCreateCampaign(surveyId: String, contacts: List<com.r1.launcher.survey.Contact>): String
+    fun surveyCancelCampaignById(campaignId: String)
+    /** Kick off (or resume) calling through a campaign. Calls into the SIP
+     *  dialer when task #10 is wired; for now toasts a placeholder. */
+    fun surveyStartCampaignById(campaignId: String)
+    /** Persist a single setting from the web companion. Field names:
+     *   - `openai_key`, `claude_key`
+     *   - `sip_host`, `sip_user`, `sip_password`, `sip_from`
+     *   - `consent_text`, `voice`, `summarizer_model`, `email_recipient`
+     *  Empty string clears the field for nullable backings. */
+    fun surveySaveSettingsField(field: String, value: String)
 }
 
 fun LauncherState.wheelUp(host: LauncherHost) {
@@ -195,6 +269,13 @@ fun LauncherState.wheelUp(host: LauncherHost) {
                 back(); host.backTone()
             } else {
                 voiceTuningFocus--; host.navTone()
+            }
+        }
+        Panel.SETTINGS_VOICE_SUBSCRIPTION -> {
+            if (voiceSubFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                voiceSubFocus--; host.navTone()
             }
         }
         Panel.SETTINGS_LANGUAGE -> {
@@ -291,6 +372,74 @@ fun LauncherState.wheelUp(host: LauncherHost) {
         }
         Panel.TERMINAL -> { terminalScrollIndex++; host.navTone() }
         Panel.CLAUDE -> { claudeScrollIndex++; host.navTone() }
+        Panel.TRANSCRIBER_LIST -> {
+            if (transcriberListFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                transcriberListFocus--; host.navTone()
+            }
+        }
+        // Recording panel: wheel-up cancels back to list (recording continues
+        // in the FGS — user can stop it from the list row by re-entering).
+        // Activate (side tap) is the canonical stop gesture.
+        Panel.TRANSCRIBER_RECORDING -> { /* no scroll target */ }
+        Panel.TRANSCRIBER_DETAIL -> {
+            if (transcriberDetailMenuOpen) {
+                if (transcriberDetailMenuFocus <= 0) {
+                    transcriberDetailMenuFocus = 0
+                    host.backTone()
+                } else {
+                    transcriberDetailMenuFocus--; host.navTone()
+                }
+            } else if (transcriberDetailFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                transcriberDetailFocus--; host.navTone()
+            }
+        }
+        Panel.TRANSCRIBER_SETTINGS -> {
+            if (transcriberSettingsFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                transcriberSettingsFocus--; host.navTone()
+            }
+        }
+        Panel.SURVEY_LIST -> {
+            if (surveyListFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                surveyListFocus--; host.navTone()
+            }
+        }
+        Panel.SURVEY_CAMPAIGN -> {
+            if (surveyCampaignFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                surveyCampaignFocus--; host.navTone()
+            }
+        }
+        Panel.SURVEY_CONSENT -> {
+            if (surveyConsentFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                surveyConsentFocus--; host.navTone()
+            }
+        }
+        Panel.SURVEY_LIVE -> { /* side-button hangs up; no scroll target */ }
+        Panel.SURVEY_DETAIL -> {
+            if (surveyDetailFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                surveyDetailFocus--; host.navTone()
+            }
+        }
+        Panel.SURVEY_SETTINGS -> {
+            if (surveySettingsFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                surveySettingsFocus--; host.navTone()
+            }
+        }
         Panel.HOME -> { /* clock screen — no list to scroll */ }
     }
 }
@@ -342,8 +491,8 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.SETTINGS_VOICE -> {
             val prev = voiceFocus
-            // back, on/off, key, scan-qr, voice picker, custom-id, test, tuning, clear
-            voiceFocus = (voiceFocus + 1).coerceAtMost(8)
+            // back, on/off, key, scan-qr, subscription, voice picker, custom-id, test, tuning, clear
+            voiceFocus = (voiceFocus + 1).coerceAtMost(9)
             if (prev != voiceFocus) host.navTone()
         }
         Panel.SETTINGS_VOICE_TUNING -> {
@@ -351,6 +500,12 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             // back, model, stability, similarity, style, speed, speaker-boost, test, reset
             voiceTuningFocus = (voiceTuningFocus + 1).coerceAtMost(8)
             if (prev != voiceTuningFocus) host.navTone()
+        }
+        Panel.SETTINGS_VOICE_SUBSCRIPTION -> {
+            val prev = voiceSubFocus
+            // back, refresh
+            voiceSubFocus = (voiceSubFocus + 1).coerceAtMost(1)
+            if (prev != voiceSubFocus) host.navTone()
         }
         Panel.SETTINGS_LANGUAGE -> {
             // back + N supported languages → max idx = N
@@ -455,6 +610,66 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             claudeScrollIndex = (claudeScrollIndex - 1).coerceAtLeast(0)
             if (prev != claudeScrollIndex) host.navTone()
         }
+        Panel.TRANSCRIBER_LIST -> {
+            // 0=back, 1="+ new recording", 2..=meetings ; +1 for settings shortcut at the end
+            val max = 2 + meetings.size  // back + new + N meetings + settings = last idx N+2
+            val prev = transcriberListFocus
+            transcriberListFocus = (transcriberListFocus + 1).coerceAtMost(max)
+            if (prev != transcriberListFocus) host.navTone()
+        }
+        Panel.TRANSCRIBER_RECORDING -> { /* no scroll target */ }
+        Panel.TRANSCRIBER_DETAIL -> {
+            if (transcriberDetailMenuOpen) {
+                val max = (transcriberDetailMenuActions.size - 1).coerceAtLeast(0)
+                val prev = transcriberDetailMenuFocus
+                transcriberDetailMenuFocus = (transcriberDetailMenuFocus + 1).coerceAtMost(max)
+                if (prev != transcriberDetailMenuFocus) host.navTone()
+            } else {
+                val prev = transcriberDetailFocus
+                // back, ⋮ — actions are now hidden behind the menu
+                transcriberDetailFocus = (transcriberDetailFocus + 1).coerceAtMost(1)
+                if (prev != transcriberDetailFocus) host.navTone()
+            }
+        }
+        Panel.TRANSCRIBER_SETTINGS -> {
+            val prev = transcriberSettingsFocus
+            // back, host, port, user, password, recipient, clear
+            transcriberSettingsFocus = (transcriberSettingsFocus + 1).coerceAtMost(6)
+            if (prev != transcriberSettingsFocus) host.navTone()
+        }
+        Panel.SURVEY_LIST -> {
+            // 0=back, 1=settings, 2="+ new campaign", 3..=campaigns rows
+            val max = 2 + campaigns.size
+            val prev = surveyListFocus
+            surveyListFocus = (surveyListFocus + 1).coerceAtMost(max)
+            if (prev != surveyListFocus) host.navTone()
+        }
+        Panel.SURVEY_CAMPAIGN -> {
+            // 0=back, 1=pick survey, 2=pick contacts, 3=start
+            val prev = surveyCampaignFocus
+            surveyCampaignFocus = (surveyCampaignFocus + 1).coerceAtMost(3)
+            if (prev != surveyCampaignFocus) host.navTone()
+        }
+        Panel.SURVEY_CONSENT -> {
+            // 0=cancel, 1=confirm + dial
+            val prev = surveyConsentFocus
+            surveyConsentFocus = (surveyConsentFocus + 1).coerceAtMost(1)
+            if (prev != surveyConsentFocus) host.navTone()
+        }
+        Panel.SURVEY_LIVE -> { /* side-button hangs up; no scroll target */ }
+        Panel.SURVEY_DETAIL -> {
+            // 0=back, 1=⋮
+            val prev = surveyDetailFocus
+            surveyDetailFocus = (surveyDetailFocus + 1).coerceAtMost(1)
+            if (prev != surveyDetailFocus) host.navTone()
+        }
+        Panel.SURVEY_SETTINGS -> {
+            // back, openai-key, sip-host, sip-user, sip-password, sip-from,
+            // consent text, voice cycle, summarizer model, email recipient, clear
+            val prev = surveySettingsFocus
+            surveySettingsFocus = (surveySettingsFocus + 1).coerceAtMost(10)
+            if (prev != surveySettingsFocus) host.navTone()
+        }
         Panel.HOME -> {
             openApps()
             host.selectTone()
@@ -515,6 +730,10 @@ fun LauncherState.activate(host: LauncherHost) {
         }
         Panel.SETTINGS_VOICE -> { host.voiceSettingsRowActivate(voiceFocus); host.selectTone() }
         Panel.SETTINGS_VOICE_TUNING -> { host.voiceTuningRowActivate(voiceTuningFocus); host.selectTone() }
+        Panel.SETTINGS_VOICE_SUBSCRIPTION -> when (voiceSubFocus) {
+            0 -> { back(); host.backTone() }
+            1 -> { host.voiceFetchSubscription(force = true); host.popTone() }
+        }
         Panel.SETTINGS_DISPLAY -> when (settingsDisplayFocus) {
             0 -> { back(); host.backTone() }
             1 -> { openBrightness(); host.selectTone() }
@@ -626,6 +845,58 @@ fun LauncherState.activate(host: LauncherHost) {
         }
         // Wheel press on the clock screen jumps straight to the apps grid.
         Panel.HOME -> { openApps(); host.selectTone() }
+        Panel.TRANSCRIBER_LIST -> when {
+            // 0=back, 1=settings, 2=record, 3..N+2=meetings
+            transcriberListFocus == 0 -> { back(); host.backTone() }
+            transcriberListFocus == 1 -> { host.transcriberOpenSettings(); host.selectTone() }
+            transcriberListFocus == 2 -> { host.transcriberStartRecording(); host.popTone() }
+            transcriberListFocus - 3 in meetings.indices -> {
+                val m = meetings[transcriberListFocus - 3]
+                host.transcriberOpenDetail(m.uuid)
+                host.selectTone()
+            }
+        }
+        Panel.TRANSCRIBER_RECORDING -> { host.transcriberStopRecording(); host.popTone() }
+        Panel.TRANSCRIBER_DETAIL -> {
+            if (transcriberDetailMenuOpen) {
+                val action = transcriberDetailMenuActions.getOrNull(transcriberDetailMenuFocus)
+                if (action != null) {
+                    host.transcriberDetailMenuActivate(action)
+                    host.popTone()
+                }
+            } else when (transcriberDetailFocus) {
+                0 -> { back(); host.backTone() }
+                1 -> { host.transcriberOpenDetailMenu(); host.selectTone() }
+            }
+        }
+        Panel.TRANSCRIBER_SETTINGS -> {
+            host.transcriberSettingsRowActivate(transcriberSettingsFocus)
+            host.selectTone()
+        }
+        Panel.SURVEY_LIST -> {
+            host.surveyListRowActivate(surveyListFocus)
+            host.selectTone()
+        }
+        Panel.SURVEY_CAMPAIGN -> {
+            host.surveyCampaignRowActivate(surveyCampaignFocus)
+            host.selectTone()
+        }
+        Panel.SURVEY_CONSENT -> when (surveyConsentFocus) {
+            0 -> { back(); host.backTone() }
+            1 -> { host.surveyConfirmCampaignAndDial(); host.selectTone() }
+        }
+        // Side-button activate while on the live call panel = hang up.
+        Panel.SURVEY_LIVE -> { host.surveyHangup(); host.popTone() }
+        Panel.SURVEY_DETAIL -> when (surveyDetailFocus) {
+            0 -> { back(); host.backTone() }
+            // No multi-action menu yet — single action is "email this call".
+            // Re-summary + delete + playback live on the web companion for now.
+            1 -> currentCallRecordId?.let { host.surveyEmailCallRecord(it); host.selectTone() }
+        }
+        Panel.SURVEY_SETTINGS -> {
+            host.surveySettingsRowActivate(surveySettingsFocus)
+            host.selectTone()
+        }
     }
 }
 
@@ -637,6 +908,28 @@ fun LauncherState.backPressed(host: LauncherHost) {
     }
     if (panel == Panel.OPENCLAW_CAMERA) {
         back(); host.backTone()
+        return
+    }
+    // Back from the recording panel always stops the FGS — leaving a recording
+    // running while the user navigates away is almost never what they want
+    // (and would chew battery indefinitely).
+    if (panel == Panel.TRANSCRIBER_RECORDING) {
+        host.transcriberStopRecording()
+        back(); host.backTone()
+        return
+    }
+    // Back from a live survey call hangs up first — same rationale.
+    if (panel == Panel.SURVEY_LIVE) {
+        host.surveyHangup()
+        back(); host.backTone()
+        return
+    }
+    // On the detail page, back first closes the ⋮ overlay if it's open. Only
+    // a second back unwinds to the list.
+    if (panel == Panel.TRANSCRIBER_DETAIL && transcriberDetailMenuOpen) {
+        transcriberDetailMenuOpen = false
+        transcriberDetailMenuFocus = 0
+        host.backTone()
         return
     }
     if (panel != Panel.HOME) {

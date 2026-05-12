@@ -21,6 +21,8 @@
     <string name="app_label_messages">messages</string>
     <string name="app_label_terminal">terminal</string>
     <string name="app_label_claude">claude code</string>
+    <string name="app_label_meetings">meetings</string>
+    <string name="app_label_survey">surveyor</string>
 
     <!-- Settings root -->
     <string name="settings_title">settings</string>
@@ -164,6 +166,23 @@
     <!-- Messages -->
     <string name="messages_empty">no messages</string>
 
+    <!-- Voice subscription panel -->
+    <string name="voice_sub_title">elevenlabs balance</string>
+    <string name="voice_sub_error">error</string>
+    <string name="voice_sub_no_data">no data — tap refresh</string>
+    <string name="voice_sub_credits_help">credits cover all elevenlabs use: tts, stt, scribe (meetings).</string>
+    <string name="voice_sub_fetched_ago">fetched %1$s ago</string>
+
+    <!-- Transcriber / meetings -->
+    <string name="transcriber_list_title">meetings</string>
+    <string name="transcriber_no_recordings">no recordings yet</string>
+    <string name="transcriber_transcribing">transcribing...</string>
+    <string name="transcriber_recording_stop">stop</string>
+    <string name="transcriber_recording_hint">tap side button to stop</string>
+    <string name="transcriber_meeting_not_found">meeting not found</string>
+    <string name="transcriber_menu_actions">actions</string>
+    <string name="transcriber_settings_title">meetings settings</string>
+
     <!-- Terminal -->
     <string name="terminal_kb_hide">hide</string>
     <string name="terminal_kb_show">kbd</string>
@@ -180,6 +199,9 @@
     <string name="claude_thinking">thinking</string>
     <string name="claude_input_hint">type here...</string>
     <string name="claude_empty_hint">ask claude code anything\n\nwheel-press to send\nlong-press side button to dictate</string>
+    <string name="claude_panel_subtitle">easier from a browser</string>
+    <string name="claude_panel_open_anyway">open anyway</string>
+    <string name="claude_exit_no_output">claude exited %1$d (no output)</string>
 
     <!-- OpenClaw chat -->
     <string name="openclaw_back_home">home</string>

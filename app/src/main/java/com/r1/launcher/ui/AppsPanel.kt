@@ -58,6 +58,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import androidx.core.graphics.drawable.toBitmap
 import com.r1.launcher.AppEntry
@@ -171,17 +172,23 @@ private fun AppCard(
         AppEntry.Messages -> "_r1_messages"
         AppEntry.Terminal -> "_r1_terminal"
         AppEntry.Claude -> "_r1_claude"
+        AppEntry.Meetings -> "_r1_meetings"
+        AppEntry.Survey -> "_r1_survey"
     }
     val isSettings = entry is AppEntry.Settings
     val isOpenClaw = entry is AppEntry.OpenClaw
     val isMessages = entry is AppEntry.Messages
     val isTerminal = entry is AppEntry.Terminal
     val isClaude = entry is AppEntry.Claude
+    val isMeetings = entry is AppEntry.Meetings
+    val isSurvey = entry is AppEntry.Survey
     val settingsPainter = if (isSettings) painterResource(R.drawable.ic_settings) else null
     val openClawPainter = if (isOpenClaw) painterResource(R.drawable.ic_wifi_arc) else null
     val messagesPainter = if (isMessages) painterResource(R.drawable.ic_messages) else null
     val terminalPainter = if (isTerminal) painterResource(R.drawable.ic_terminal) else null
     val claudePainter = if (isClaude) painterResource(R.drawable.ic_claude) else null
+    val meetingsPainter = if (isMeetings) painterResource(R.drawable.ic_meetings) else null
+    val surveyPainter = if (isSurvey) painterResource(R.drawable.ic_survey) else null
 
     var iconPainter by remember(pkg) {
         val cached = iconCache.get(pkg)
@@ -194,6 +201,8 @@ private fun AppCard(
         AppEntry.Messages -> stringResource(R.string.app_label_messages)
         AppEntry.Terminal -> stringResource(R.string.app_label_terminal)
         AppEntry.Claude -> stringResource(R.string.app_label_claude)
+        AppEntry.Meetings -> stringResource(R.string.app_label_meetings)
+        AppEntry.Survey -> stringResource(R.string.app_label_survey)
     }
     var label by remember(pkg, syntheticLabel) {
         mutableStateOf(
@@ -296,7 +305,7 @@ private fun AppCard(
                 .fillMaxWidth()
                 .padding(start = 16.dp, end = 16.dp, top = 16.dp),
         ) {
-            val effectivePainter = settingsPainter ?: openClawPainter ?: messagesPainter ?: terminalPainter ?: claudePainter ?: iconPainter
+            val effectivePainter = settingsPainter ?: openClawPainter ?: messagesPainter ?: terminalPainter ?: claudePainter ?: meetingsPainter ?: surveyPainter ?: iconPainter
             if (effectivePainter != null) {
                 Image(
                     painter = effectivePainter,
@@ -325,6 +334,8 @@ private fun appKey(entry: AppEntry): String = when (entry) {
     AppEntry.Messages -> "messages/messages"
     AppEntry.Terminal -> "terminal/terminal"
     AppEntry.Claude -> "claude/claude"
+    AppEntry.Meetings -> "meetings/meetings"
+    AppEntry.Survey -> "survey/survey"
 }
 
 private fun appContentType(entry: AppEntry): String = when (entry) {
@@ -334,6 +345,8 @@ private fun appContentType(entry: AppEntry): String = when (entry) {
     AppEntry.Messages -> "messages"
     AppEntry.Terminal -> "terminal"
     AppEntry.Claude -> "claude"
+    AppEntry.Meetings -> "meetings"
+    AppEntry.Survey -> "survey"
 }
 
 class FolderShape : androidx.compose.ui.graphics.Shape {
@@ -395,10 +408,63 @@ class FolderShape : androidx.compose.ui.graphics.Shape {
 @Composable
 fun FolderTray(modifier: Modifier = Modifier) {
     val folderShape = remember { FolderShape() }
+    val info = remember { carrotOsInfo() }
+    val labelGray = Color(0xFF6B3A00)
     Box(
         modifier = modifier
             .clip(folderShape)
             .background(Color(0xFFF57C00))
             .border(2.dp, Color.Black, folderShape),
+    ) {
+        androidx.compose.foundation.layout.Column(
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+            horizontalAlignment = Alignment.Start,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 18.dp, bottom = 18.dp, end = 18.dp),
+        ) {
+            Text(
+                text = "carrotos",
+                color = labelGray,
+                style = LocalR1Type.current.appCard.copy(fontSize = 18.sp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = "v${info.version}",
+                color = labelGray,
+                style = LocalR1Type.current.tiny,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = info.build,
+                color = labelGray,
+                style = LocalR1Type.current.tiny,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+private data class CarrotOsInfo(val version: String, val build: String)
+
+private fun carrotOsInfo(): CarrotOsInfo {
+    val version = systemProp("ro.carrot.version")
+        ?: systemProp("ro.lineage.version")
+        ?: android.os.Build.VERSION.RELEASE
+    val build = systemProp("ro.carrot.build.id")
+        ?: systemProp("ro.lineage.build.version")
+        ?: android.os.Build.ID
+    return CarrotOsInfo(
+        version = version.lowercase(),
+        build = build.lowercase(),
     )
 }
+
+private fun systemProp(key: String): String? = runCatching {
+    val cls = Class.forName("android.os.SystemProperties")
+    val get = cls.getMethod("get", String::class.java)
+    (get.invoke(null, key) as? String)?.takeIf { it.isNotBlank() }
+}.getOrNull()

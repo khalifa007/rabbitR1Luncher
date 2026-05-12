@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">R1 Home</string>
+    <string name="store_empty">المتجر فارغ</string>
+    <string name="store_error">تعذّر تحميل المتجر</string>
+    <string name="item_wifi">Wi-Fi</string>
+    <string name="item_mobile">إعادة التشغيل</string>
+    <string name="item_bluetooth">إيقاف التشغيل</string>
+    <string name="item_update">البحث عن تحديث</string>
+    <string name="store_title">المتجر</string>
+    <string name="home_back">الرئيسية</string>
+    <string name="accessibility_description">يسمح لمشغّل R1 بفتح حوار طاقة النظام. مطلوب لأزرار الإيقاف وإعادة التشغيل.</string>
 
     <!-- Common -->
     <string name="back">→ رجوع</string>
@@ -12,6 +21,8 @@
     <string name="app_label_messages">الرسائل</string>
     <string name="app_label_terminal">الطرفية</string>
     <string name="app_label_claude">Claude Code</string>
+    <string name="app_label_meetings">الاجتماعات</string>
+    <string name="app_label_survey">المسوّق</string>
 
     <!-- Settings root -->
     <string name="settings_title">الإعدادات</string>
@@ -155,6 +166,23 @@
     <!-- Messages -->
     <string name="messages_empty">لا توجد رسائل</string>
 
+    <!-- Voice subscription panel -->
+    <string name="voice_sub_title">رصيد ElevenLabs</string>
+    <string name="voice_sub_error">خطأ</string>
+    <string name="voice_sub_no_data">لا توجد بيانات — اضغط للتحديث</string>
+    <string name="voice_sub_credits_help">يغطي الرصيد كل استخدامات ElevenLabs: تحويل النص إلى صوت، الصوت إلى نص، والاجتماعات.</string>
+    <string name="voice_sub_fetched_ago">جُلب قبل %1$s</string>
+
+    <!-- Transcriber / meetings -->
+    <string name="transcriber_list_title">الاجتماعات</string>
+    <string name="transcriber_no_recordings">لا توجد تسجيلات بعد</string>
+    <string name="transcriber_transcribing">جارٍ التفريغ...</string>
+    <string name="transcriber_recording_stop">إيقاف</string>
+    <string name="transcriber_recording_hint">اضغط الزر الجانبي للإيقاف</string>
+    <string name="transcriber_meeting_not_found">الاجتماع غير موجود</string>
+    <string name="transcriber_menu_actions">الإجراءات</string>
+    <string name="transcriber_settings_title">إعدادات الاجتماعات</string>
+
     <!-- Terminal -->
     <string name="terminal_kb_hide">إخفاء</string>
     <string name="terminal_kb_show">لوحة</string>
@@ -171,6 +199,9 @@
     <string name="claude_thinking">يفكّر</string>
     <string name="claude_input_hint">اكتب هنا...</string>
     <string name="claude_empty_hint">اسأل Claude Code أي شيء\n\nاضغط العجلة للإرسال\nاضغط مطوّلاً الزر الجانبي للإملاء</string>
+    <string name="claude_panel_subtitle">الاستخدام من المتصفح أسهل</string>
+    <string name="claude_panel_open_anyway">فتح هنا</string>
+    <string name="claude_exit_no_output">خرج Claude بالرمز %1$d (بدون مخرجات)</string>
 
     <!-- OpenClaw chat -->
     <string name="openclaw_back_home">الرئيسية</string>

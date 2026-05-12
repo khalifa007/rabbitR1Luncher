@@ -50,17 +50,19 @@ import com.r1.launcher.voice.VoicePrefs
  *   - OpenClaw chat / Terminal / Claude STT (ElevenLabs Realtime, key only)
  *   - OpenClaw assistant TTS readback (ElevenLabs Flash v2.5, key + voice id +
  *     model + voice_settings)
+ *   - Meetings (ElevenLabs Scribe v2 batch — same key, same credit pool)
  *
  * Row layout — kept in lockstep with [com.r1.launcher.LauncherActivity.voiceSettingsRowActivate]:
  *   0  < back
  *   1  voice: on/off    (toggles auto-speak of assistant replies)
  *   2  elevenlabs key   (status pill; on click opens RetroKeyboard overlay)
  *   3  scan key from qr (jumps to the QR scan panel with mode = OPENAI_KEY)
- *   4  voice: <name>    (cycles through 4 hardcoded ElevenLabs voices)
- *   5  custom voice id  (status pill; on click opens RetroKeyboard overlay)
- *   6  test voice       (synthesize a short sample with current settings)
- *   7  tuning           (opens SETTINGS_VOICE_TUNING)
- *   8  clear key
+ *   4  subscription     (live credit balance from /v1/user/subscription; tap to refresh)
+ *   5  voice: <name>    (cycles through 4 hardcoded ElevenLabs voices)
+ *   6  custom voice id  (status pill; on click opens RetroKeyboard overlay)
+ *   7  test voice       (synthesize a short sample with current settings)
+ *   8  tuning           (opens SETTINGS_VOICE_TUNING)
+ *   9  clear key
  */
 @Composable
 fun SettingsVoicePanel(
@@ -117,11 +119,16 @@ fun SettingsVoicePanel(
         else
             stringResource(R.string.voice_row_test)
 
+        // Subscription row is now pure navigation — opens its own page that
+        // does the actual fetch + full info display. No live data here.
+        val subStatus = "view balance & plan"
+        val subOk = false
         val items = listOf(
             SettingsItem.Standard(stringResource(R.string.back_short)),
             SettingsItem.Toggle(toggleLabel, state.voiceEnabled),
             SettingsItem.Standard(stringResource(R.string.voice_row_key)),  // subtitle injected below
             SettingsItem.Standard(stringResource(R.string.voice_row_scan_qr)),
+            SettingsItem.Standard("subscription"),                          // subtitle injected below
             SettingsItem.Standard("voice: $voiceLabel"),
             SettingsItem.Standard(stringResource(R.string.voice_row_custom_id)),
             SettingsItem.Standard(testLabel),
@@ -149,7 +156,8 @@ fun SettingsVoicePanel(
                 ) { idx, item ->
                     val (subtitle, subtitleOk) = when (idx) {
                         2 -> keyStatus to state.hasVoiceKey
-                        5 -> customStatus to state.voiceCustomId.isNotBlank()
+                        4 -> subStatus to subOk
+                        6 -> customStatus to state.voiceCustomId.isNotBlank()
                         else -> "" to false
                     }
                     val subtitleColor = if (subtitleOk)
@@ -163,7 +171,7 @@ fun SettingsVoicePanel(
                         onClick = {
                             when (idx) {
                                 2 -> { input = ""; kbTarget = KeyboardTarget.KEY }
-                                5 -> { input = ""; kbTarget = KeyboardTarget.CUSTOM_VOICE }
+                                6 -> { input = ""; kbTarget = KeyboardTarget.CUSTOM_VOICE }
                                 else -> onRowClick(idx)
                             }
                         },
@@ -290,6 +298,7 @@ private fun mask(s: String): String {
     if (s.length <= 8) return s
     return s.take(3) + "…" + s.takeLast(4)
 }
+
 
 @Composable
 private fun StatusDot(color: Color) {

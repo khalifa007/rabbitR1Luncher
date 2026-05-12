@@ -4,6 +4,12 @@ import android.content.Context
 import com.r1.launcher.LauncherHost
 import com.r1.launcher.LauncherState
 import com.r1.launcher.messages.SmsLoader
+import com.r1.launcher.survey.Contact
+import com.r1.launcher.survey.QuestionType
+import com.r1.launcher.survey.Survey
+import com.r1.launcher.survey.SurveyPrefs
+import com.r1.launcher.survey.SurveyQuestion
+import com.r1.launcher.survey.SurveyStore
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -171,7 +177,320 @@ object WebRpc {
             })
         }
 
+        // --- meetings (transcriber) ---
+        "transcriber.list" -> buildJsonObject {
+            put("recording", state.recordingActive)
+            put("transcribing", state.transcribeBusy)
+            put("hasSmtp", state.hasSmtp)
+            put("defaultRecipient", state.defaultRecipientDisplay)
+            put("meetings", buildJsonArray {
+                com.r1.launcher.transcriber.MeetingStore.get(ctx).listMeetings().forEach { m ->
+                    add(buildJsonObject {
+                        put("uuid", m.uuid)
+                        put("title", m.title)
+                        put("createdAtMs", m.createdAtMs)
+                        put("durationMs", m.durationMs)
+                        put("status", m.status.name.lowercase())
+                        put("speakerCount", m.speakerCount)
+                    })
+                }
+            })
+        }
+        "transcriber.delete" -> {
+            host.transcriberDelete(params.requireString("uuid")); JsonNull
+        }
+        "transcriber.email" -> {
+            host.transcriberShareEmail(
+                params.requireString("uuid"),
+                params.requireString("recipient"),
+            ); JsonNull
+        }
+        "transcriber.start" -> {
+            host.transcriberStartRecording(); JsonNull
+        }
+        "transcriber.stop" -> {
+            host.transcriberStopRecording(); JsonNull
+        }
+        "transcriber.retry" -> {
+            host.transcriberRetryTranscribe(params.requireString("uuid")); JsonNull
+        }
+
+        // --- survey call bot (Surveyor) ---
+        "survey.list" -> buildSurveyList(ctx)
+        "survey.get" -> buildSurveyFull(ctx, params.requireString("id"))
+        "survey.create", "survey.update" -> {
+            val s = parseSurveyFromParams(params)
+            val id = host.surveyUpsertSurvey(s)
+            buildJsonObject { put("id", id) }
+        }
+        "survey.delete" -> {
+            host.surveyDeleteSurveyById(params.requireString("id")); JsonNull
+        }
+        "campaign.list" -> buildCampaignList(ctx)
+        "campaign.get" -> buildCampaignFull(ctx, params.requireString("id"))
+        "campaign.create" -> {
+            val surveyId = params.requireString("surveyId")
+            val contacts = parseContactsFromParams(params)
+            if (contacts.isEmpty()) throw RpcException("empty_contacts", "no contacts provided")
+            val cid = host.surveyCreateCampaign(surveyId, contacts)
+            buildJsonObject { put("id", cid) }
+        }
+        "campaign.cancel" -> {
+            host.surveyCancelCampaignById(params.requireString("id")); JsonNull
+        }
+        "campaign.start" -> {
+            host.surveyStartCampaignById(params.requireString("id")); JsonNull
+        }
+        "call.list" -> buildCallList(ctx, params?.get("campaignId")?.jsonPrimitive?.contentOrNull)
+        "call.get" -> buildCallFull(ctx, params.requireString("id"))
+        "call.delete" -> {
+            host.surveyDeleteCallRecord(params.requireString("id")); JsonNull
+        }
+        "call.email" -> {
+            host.surveyEmailCallRecord(params.requireString("id")); JsonNull
+        }
+        "call.retry_summary" -> {
+            host.surveyRetrySummary(params.requireString("id")); JsonNull
+        }
+        "survey.settings.get" -> buildSurveySettings(state)
+        "survey.settings.set" -> {
+            host.surveySaveSettingsField(
+                params.requireString("field"),
+                params.requireString("value"),
+            ); JsonNull
+        }
+        "survey.live.state" -> buildSurveyLiveState(state)
+
         else -> throw RpcException("unknown_method", "unknown method: $method")
+    }
+
+    // ---- survey helpers ----
+
+    private fun buildSurveyList(ctx: Context): JsonArray = buildJsonArray {
+        SurveyStore.get(ctx).listSurveys().forEach { s ->
+            add(buildJsonObject {
+                put("id", s.id)
+                put("name", s.name)
+                put("questionCount", s.questionCount)
+                put("createdAtMs", s.createdAtMs)
+                put("updatedAtMs", s.updatedAtMs)
+            })
+        }
+    }
+
+    private fun buildSurveyFull(ctx: Context, id: String): JsonElement {
+        val s = SurveyStore.get(ctx).loadSurvey(id) ?: return JsonNull
+        return buildJsonObject {
+            put("id", s.id)
+            put("name", s.name)
+            put("createdAtMs", s.createdAtMs)
+            put("updatedAtMs", s.updatedAtMs)
+            put("consentText", s.consentText)
+            put("systemInstructions", s.systemInstructions)
+            put("questions", buildJsonArray {
+                s.questions.forEach { q ->
+                    add(buildJsonObject {
+                        put("id", q.id)
+                        put("prompt", q.prompt)
+                        put("type", q.type.wireName())
+                        put("choices", buildJsonArray { q.choices.forEach { add(JsonPrimitive(it)) } })
+                        put("followUpHint", q.followUpHint)
+                    })
+                }
+            })
+        }
+    }
+
+    private fun buildCampaignList(ctx: Context): JsonArray {
+        val store = SurveyStore.get(ctx)
+        val surveysById = store.listSurveys().associateBy { it.id }
+        return buildJsonArray {
+            store.listCampaigns().forEach { c ->
+                add(buildJsonObject {
+                    put("id", c.id)
+                    put("surveyId", c.surveyId)
+                    put("surveyName", surveysById[c.surveyId]?.name ?: "(missing)")
+                    put("contactCount", c.contactCount)
+                    put("nextContactIdx", c.nextContactIdx)
+                    put("status", c.status.name.lowercase())
+                    put("createdAtMs", c.createdAtMs)
+                })
+            }
+        }
+    }
+
+    private fun buildCampaignFull(ctx: Context, id: String): JsonElement {
+        val store = SurveyStore.get(ctx)
+        val c = store.loadCampaign(id) ?: return JsonNull
+        return buildJsonObject {
+            put("id", c.id)
+            put("surveyId", c.surveyId)
+            put("status", c.status.name.lowercase())
+            put("nextContactIdx", c.nextContactIdx)
+            put("createdAtMs", c.createdAtMs)
+            put("contacts", buildJsonArray {
+                c.contacts.forEach { contact ->
+                    add(buildJsonObject {
+                        put("name", contact.name)
+                        put("phone", contact.phone)
+                        put("locale", contact.locale)
+                    })
+                }
+            })
+        }
+    }
+
+    private fun buildCallList(ctx: Context, campaignFilter: String?): JsonArray {
+        val store = SurveyStore.get(ctx)
+        val rows = if (campaignFilter.isNullOrBlank()) store.listCallRecords()
+                   else store.listCallRecordsForCampaign(campaignFilter)
+        return buildJsonArray {
+            rows.forEach { r ->
+                add(buildJsonObject {
+                    put("id", r.id)
+                    put("campaignId", r.campaignId)
+                    put("surveyId", r.surveyId)
+                    put("contactName", r.contactName)
+                    put("contactPhone", r.contactPhone)
+                    put("createdAtMs", r.createdAtMs)
+                    put("durationMs", r.durationMs)
+                    put("status", r.status.name.lowercase())
+                })
+            }
+        }
+    }
+
+    private fun buildCallFull(ctx: Context, id: String): JsonElement {
+        val r = SurveyStore.get(ctx).loadCallRecord(id) ?: return JsonNull
+        return buildJsonObject {
+            put("id", r.id)
+            put("campaignId", r.campaignId)
+            put("surveyId", r.surveyId)
+            put("createdAtMs", r.createdAtMs)
+            put("durationMs", r.durationMs)
+            put("status", r.status.name.lowercase())
+            put("endReason", r.endReason)
+            put("summary", r.summary)
+            put("sentiment", r.sentiment)
+            put("completeness", r.completeness)
+            put("transcript", r.transcript)
+            put("contact", buildJsonObject {
+                put("name", r.contact.name)
+                put("phone", r.contact.phone)
+                put("locale", r.contact.locale)
+            })
+            put("answers", buildJsonObject {
+                r.structuredAnswers.forEach { (k, v) -> put(k, v) }
+            })
+            put("audioUrl", "/api/survey/audio/${r.campaignId}/${r.id}.wav")
+        }
+    }
+
+    private fun buildSurveySettings(state: LauncherState): JsonObject = buildJsonObject {
+        put("hasOpenAiKey", state.hasOpenAiKey)
+        put("openAiKeyTail", state.openAiKeyTail)
+        put("hasSipCreds", state.hasSipCreds)
+        put("sipHost", state.sipHostDisplay)
+        put("sipUser", state.sipUserDisplay)
+        put("sipFrom", state.sipFromDisplay)
+        put("voice", state.realtimeVoiceDisplay)
+        put("summarizerModel", state.summarizerModelDisplay)
+        put("consentText", state.surveyConsentTextDisplay)
+        put("emailRecipient", state.surveyEmailRecipientDisplay)
+        put("voiceCatalog", buildJsonArray {
+            SurveyPrefs.REALTIME_VOICES.forEach { add(JsonPrimitive(it)) }
+        })
+        put("summarizerCatalog", buildJsonArray {
+            SurveyPrefs.SUMMARIZER_MODELS.forEach { (label, id) ->
+                add(buildJsonObject { put("label", label); put("id", id) })
+            }
+        })
+    }
+
+    private fun buildSurveyLiveState(state: LauncherState): JsonObject = buildJsonObject {
+        put("active", state.surveyCallActive)
+        put("campaignId", state.currentCampaignId)
+        put("recordId", state.currentCallRecordId)
+        put("status", state.surveyCallStatus)
+        put("contactName", state.surveyCallContactName)
+        put("currentQuestion", state.surveyCallCurrentQuestion)
+        put("elapsedMs", state.surveyCallElapsedMs)
+    }
+
+    private fun parseSurveyFromParams(params: JsonObject?): Survey {
+        if (params == null) throw RpcException("missing_body", "survey body required")
+        val id = params["id"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val name = params.requireString("name").trim()
+        if (name.isBlank()) throw RpcException("bad_name", "survey name is blank")
+        val consentText = params["consentText"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+        val systemInstructions = params["systemInstructions"]?.jsonPrimitive?.contentOrNull
+            ?.takeIf { it.isNotBlank() }
+        val questionsArr = params["questions"] as? JsonArray
+            ?: throw RpcException("bad_questions", "questions array required")
+        if (questionsArr.isEmpty()) throw RpcException("empty_questions", "at least one question required")
+        var nextAutoIdx = 1
+        val questions = questionsArr.map { qElem ->
+            val qo = qElem as? JsonObject
+                ?: throw RpcException("bad_question", "questions must be objects")
+            val qid = qo["id"]?.jsonPrimitive?.contentOrNull?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: "q_${nextAutoIdx++}"
+            val prompt = qo.requireString("prompt").trim()
+            if (prompt.isBlank()) throw RpcException("bad_prompt", "question prompt blank")
+            val type = parseQuestionType(qo["type"]?.jsonPrimitive?.contentOrNull)
+            val choices = (qo["choices"] as? JsonArray)
+                ?.mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.takeIf { s -> s.isNotEmpty() } }
+                ?: emptyList()
+            val followUpHint = qo["followUpHint"]?.jsonPrimitive?.contentOrNull
+                ?.takeIf { it.isNotBlank() }
+            SurveyQuestion(
+                id = qid,
+                prompt = prompt,
+                type = type,
+                choices = choices,
+                followUpHint = followUpHint,
+            )
+        }
+        return Survey(
+            id = id,
+            name = name,
+            questions = questions,
+            createdAtMs = 0L,    // overwritten in surveyUpsertSurvey
+            updatedAtMs = 0L,
+            consentText = consentText,
+            systemInstructions = systemInstructions,
+        )
+    }
+
+    private fun parseQuestionType(wire: String?): QuestionType = when (wire?.trim()?.lowercase()) {
+        "multi_choice" -> QuestionType.MULTI_CHOICE
+        "yes_no" -> QuestionType.YES_NO
+        "number" -> QuestionType.NUMBER
+        "rating_1_5" -> QuestionType.RATING_1_5
+        "open", null, "" -> QuestionType.OPEN
+        else -> throw RpcException("bad_question_type", "unknown question type: $wire")
+    }
+
+    private fun QuestionType.wireName(): String = when (this) {
+        QuestionType.OPEN -> "open"
+        QuestionType.MULTI_CHOICE -> "multi_choice"
+        QuestionType.YES_NO -> "yes_no"
+        QuestionType.NUMBER -> "number"
+        QuestionType.RATING_1_5 -> "rating_1_5"
+    }
+
+    private fun parseContactsFromParams(params: JsonObject?): List<Contact> {
+        val arr = params?.get("contacts") as? JsonArray
+            ?: throw RpcException("bad_contacts", "contacts array required")
+        return arr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val name = o["name"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            val phone = o["phone"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            val locale = o["locale"]?.jsonPrimitive?.contentOrNull?.trim()
+                ?.takeIf { it.isNotBlank() } ?: "en"
+            if (phone.isBlank()) return@mapNotNull null
+            Contact(name = name, phone = phone, locale = locale)
+        }
     }
 
     /** Gate the web-terminal methods behind the explicit opt-in toggle so that

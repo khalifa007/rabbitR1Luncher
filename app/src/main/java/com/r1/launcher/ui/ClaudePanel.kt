@@ -314,13 +314,13 @@ private fun ClaudeWebHint(
         Spacer(Modifier.height(6.dp))
 
         Text(
-            text = "claude code",
+            text = stringResource(R.string.app_label_claude),
             style = type.appCard.copy(fontSize = 22.sp, textAlign = TextAlign.Center),
             color = Color(0xFFFF6A00),
         )
         Spacer(Modifier.height(2.dp))
         Text(
-            text = "easier from a browser",
+            text = stringResource(R.string.claude_panel_subtitle),
             style = type.appCard.copy(fontSize = 12.sp, textAlign = TextAlign.Center),
             color = colors.muted,
         )
@@ -374,7 +374,7 @@ private fun ClaudeWebHint(
                 .padding(horizontal = 14.dp, vertical = 8.dp),
         ) {
             Text(
-                text = "open anyway",
+                text = stringResource(R.string.claude_panel_open_anyway),
                 style = type.appCard.copy(fontSize = 14.sp),
                 color = colors.muted,
             )

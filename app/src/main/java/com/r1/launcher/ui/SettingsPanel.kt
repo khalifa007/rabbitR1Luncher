@@ -354,7 +354,7 @@ internal fun SettingsRow(
                 if (subtitle.isNotEmpty()) {
                     Text(
                         text = subtitle,
-                        color = subtitleColor,
+                        color = if (focused) Color.Black else subtitleColor,
                         fontSize = 14.sp,
                         fontFamily = type.appCard.fontFamily,
                         fontWeight = FontWeight.Normal,

@@ -35,6 +35,15 @@ import androidx.core.content.ContextCompat
 import com.r1.launcher.openclaw.GatewaySession
 import com.r1.launcher.openclaw.OpenClawPrefs
 import com.r1.launcher.openclaw.decodeGatewaySetupCode
+import com.r1.launcher.transcriber.Meeting
+import com.r1.launcher.transcriber.MeetingStatus
+import com.r1.launcher.transcriber.MeetingStore
+import com.r1.launcher.transcriber.ScribeClient
+import com.r1.launcher.transcriber.SmtpSender
+import com.r1.launcher.transcriber.TranscriberPrefs
+import com.r1.launcher.transcriber.TranscriberRecordingService
+import com.r1.launcher.transcriber.TranscriptFormatter
+import kotlinx.serialization.json.put
 import com.r1.launcher.ui.LauncherRoot
 import com.r1.launcher.ui.MOTOR_BACK
 import com.r1.launcher.ui.R1Theme
@@ -70,6 +79,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         private const val REQ_AUDIO_PERM = 4802
         private const val REQ_PHONE_PERM = 4803
         private const val REQ_SMS_PERM = 4804
+        private const val REQ_NOTIF_PERM = 4805
+        private const val REQ_AUDIO_PERM_TRANSCRIBER = 4806
     }
 
     override fun attachBaseContext(newBase: Context) {
@@ -152,6 +163,50 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     /** Which sink to deliver the STT transcript to. */
     private enum class VoiceSink { CHAT, TERMINAL, CLAUDE }
     private var voiceSink: VoiceSink? = null
+
+    // --- meetings (transcriber) ---
+    private val transcriberPrefs by lazy { TranscriberPrefs.get(this) }
+    private val meetingStore by lazy { MeetingStore.get(this) }
+
+    // --- survey call bot ---
+    private val surveyPrefs by lazy { com.r1.launcher.survey.SurveyPrefs.get(this) }
+    private val surveyStore by lazy { com.r1.launcher.survey.SurveyStore.get(this) }
+    private var transcriberBinder: TranscriberRecordingService.LocalBinder? = null
+    private var transcriberServiceBound: Boolean = false
+    private var transcriberCurrentMeeting: Meeting? = null
+    private var transcriberPlayer: MediaPlayer? = null
+    private val transcriberExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private val transcriberPollRunnable = object : Runnable {
+        override fun run() {
+            val b = transcriberBinder
+            if (b != null && b.isRecording) {
+                state.recordingActive = true
+                state.recordingElapsedMs = b.elapsedMs
+                state.recordingPeak = b.peakLevel
+                ui.postDelayed(this, 200L)
+            } else {
+                state.recordingActive = false
+            }
+        }
+    }
+    private val transcriberServiceConn = object : android.content.ServiceConnection {
+        override fun onServiceConnected(name: android.content.ComponentName?, service: android.os.IBinder?) {
+            transcriberBinder = service as? TranscriberRecordingService.LocalBinder
+            // If we bound to an active recording (e.g. activity recreate after
+            // low-mem kill), surface it back into the panel state.
+            if (transcriberBinder?.isRecording == true) {
+                // Don't auto-jump panels on rebind; the user is wherever they
+                // are, and the list page reflects active recording via the
+                // pulsing record row.
+                state.recordingActive = true
+                ui.removeCallbacks(transcriberPollRunnable)
+                ui.post(transcriberPollRunnable)
+            }
+        }
+        override fun onServiceDisconnected(name: android.content.ComponentName?) {
+            transcriberBinder = null
+        }
+    }
 
     private val ui = Handler(Looper.getMainLooper())
     // Lazy so Locale.getDefault() resolves AFTER attachBaseContext. The locale
@@ -324,6 +379,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             toast(msg)
         }
 
+        // Hydrate transcriber prefs cache for the UI thread.
+        refreshTranscriberPrefsCache()
+        // Pre-bind to the recording service so a recovery from low-mem-kill
+        // (FGS survives, activity doesn't) immediately sees the active recording.
+        bindTranscriberService()
+
         state.openClawHideChat = openClawPrefs.hideChat
         state.chatFontSize = openClawPrefs.chatFontSize
         // Hydrate global voice state from prefs.
@@ -385,6 +446,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.apps.add(AppEntry.OpenClaw)
         state.apps.add(AppEntry.Terminal)
         state.apps.add(AppEntry.Claude)
+        state.apps.add(AppEntry.Meetings)
+        state.apps.add(AppEntry.Survey)
         state.apps.add(AppEntry.Settings)
         state.appsLoaded = true
         if (state.appsFocus >= state.apps.size) state.appsFocus = 0
@@ -490,6 +553,13 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         openClawTtsCall = null
         runCatching { openClawSpeechPlayer?.release() }
         openClawSpeechPlayer = null
+        // Stop transcriber playback but DO NOT stop the FGS — if a meeting is
+        // recording when the user kills the launcher, we want it to keep going
+        // until they explicitly stop it. Just unbind from our side.
+        runCatching { transcriberPlayer?.release() }
+        transcriberPlayer = null
+        unbindTranscriberService()
+        runCatching { transcriberExecutor.shutdownNow() }
     }
 
     override fun onBackPressed() {
@@ -653,6 +723,14 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 // hitting any of the auth-action callbacks. Cheap; runs on
                 // a background thread.
                 refreshClaudeAuthFlag()
+            }
+            AppEntry.Meetings -> {
+                selectTone()
+                transcriberOpen()
+            }
+            AppEntry.Survey -> {
+                selectTone()
+                surveyOpen()
             }
             null -> Unit
         }
@@ -1884,6 +1962,13 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
      */
     private fun startVoiceCapture(sink: VoiceSink) {
         if (!ensureAudioPerm()) return
+        // Mic source is single-consumer: if the meetings FGS is recording, abort.
+        // Without this we'd silently get garbage frames or have the FGS lose
+        // its audio path mid-meeting.
+        if (transcriberBinder?.isRecording == true) {
+            toastFail("stop recording first")
+            return
+        }
         val key = voicePrefs.elevenlabsKey
         if (key.isNullOrBlank()) {
             toast("voice: set elevenlabs key in settings → voice")
@@ -2122,7 +2207,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                         appendClaudeMessage(
                             com.r1.launcher.claude.ClaudeMessage(
                                 role = "assistant",
-                                text = "claude exited $exitCode (no output)",
+                                text = getString(R.string.claude_exit_no_output, exitCode),
                                 error = true,
                             ),
                         )
@@ -2824,11 +2909,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         //   1  voice on/off
         //   2  elevenlabs key  (handled inline by the panel's keyboard overlay)
         //   3  scan key from qr
-        //   4  voice picker (cycle catalog)
-        //   5  custom voice id (handled inline by the panel's keyboard overlay)
-        //   6  test voice
-        //   7  tuning (opens SETTINGS_VOICE_TUNING)
-        //   8  clear key
+        //   4  subscription (tap = force-refresh balance)
+        //   5  voice picker (cycle catalog)
+        //   6  custom voice id (handled inline by the panel's keyboard overlay)
+        //   7  test voice
+        //   8  tuning (opens SETTINGS_VOICE_TUNING)
+        //   9  clear key
         when (idx) {
             0 -> { state.back(); backTone() }
             1 -> voiceToggleEnabled()
@@ -2838,11 +2924,18 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 state.openOpenAiKeyQr() // QR scan path is reused — see openClawScanned
                 selectTone()
             }
-            4 -> voiceCycleVoiceId()
-            // 5 handled by the panel's keyboard overlay
-            6 -> voiceTestSynthesize()
-            7 -> { state.openSettingsVoiceTuning(); selectTone() }
-            8 -> voiceClearKey()
+            4 -> {
+                state.openSettingsVoiceSubscription()
+                // Auto-fetch on entry; honors the 60s cache so re-entering
+                // the page in quick succession doesn't re-hit the API.
+                voiceFetchSubscription(force = false)
+                selectTone()
+            }
+            5 -> voiceCycleVoiceId()
+            // 6 handled by the panel's keyboard overlay
+            7 -> voiceTestSynthesize()
+            8 -> { state.openSettingsVoiceTuning(); selectTone() }
+            9 -> voiceClearKey()
         }
     }
 
@@ -2925,6 +3018,47 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.voiceSpeakerBoost = voicePrefs.speakerBoost
         toast("tuning reset")
         popTone()
+    }
+
+    private val voiceSubExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    @Volatile private var voiceSubInFlight: Boolean = false
+
+    override fun voiceFetchSubscription(force: Boolean) {
+        val key = voicePrefs.elevenlabsKey
+        if (key.isNullOrBlank()) {
+            state.voiceSubError = "no key"
+            state.voiceSubLoading = false
+            return
+        }
+        // 60s in-memory cache so wheel-spamming the row doesn't hammer the API.
+        // Force = true (manual tap) bypasses the cache.
+        val ageMs = System.currentTimeMillis() - state.voiceSubFetchedAtMs
+        if (!force && state.voiceSubFetchedAtMs > 0L && ageMs < 60_000L) return
+        if (voiceSubInFlight) return
+        voiceSubInFlight = true
+        state.voiceSubLoading = true
+        state.voiceSubError = null
+        voiceSubExecutor.submit {
+            val client = com.r1.launcher.voice.ElevenLabsSubscriptionClient(key)
+            when (val r = client.fetch()) {
+                is com.r1.launcher.voice.ElevenLabsSubscriptionClient.Result.Success -> {
+                    ui.post {
+                        state.voiceSubData = r.data
+                        state.voiceSubFetchedAtMs = System.currentTimeMillis()
+                        state.voiceSubLoading = false
+                        state.voiceSubError = null
+                    }
+                }
+                is com.r1.launcher.voice.ElevenLabsSubscriptionClient.Result.Failure -> {
+                    ui.post {
+                        state.voiceSubLoading = false
+                        state.voiceSubError = if (r.httpCode == 401) "invalid key"
+                            else "${r.httpCode}: ${r.message.take(80)}"
+                    }
+                }
+            }
+            voiceSubInFlight = false
+        }
     }
 
     override fun voiceTestSynthesize() {
@@ -3254,6 +3388,19 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         return granted
     }
 
+    /** API 33+ runtime grant for the persistent recording-cue notification.
+     *  Denial doesn't block recording — a microphone-typed FGS still runs.
+     *  Returns true when the perm is granted (or pre-API-33), false otherwise. */
+    private fun ensureNotifPerm(): Boolean {
+        if (Build.VERSION.SDK_INT < 33) return true
+        val granted = ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            ActivityCompat.requestPermissions(this, arrayOf("android.permission.POST_NOTIFICATIONS"), REQ_NOTIF_PERM)
+        }
+        return granted
+    }
+
     private fun ensureAudioPerm(): Boolean {
         val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
@@ -3474,8 +3621,14 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                         sideLastShortUpMs = now
                         val action = Runnable {
                             pendingSideSingle = null
-                            if (state.panel == Panel.HOME) lockScreen()
-                            else state.activate(this)
+                            when (state.panel) {
+                                Panel.HOME -> lockScreen()
+                                // Recording panel uses tap-to-toggle instead of
+                                // PTT hold — long meetings make hold-to-record
+                                // impractical. Tap also stops a running record.
+                                Panel.TRANSCRIBER_RECORDING -> transcriberToggleRecording()
+                                else -> state.activate(this)
+                            }
                         }
                         pendingSideSingle = action
                         ui.postDelayed(action, SIDE_DOUBLE_PRESS_MS)
@@ -3596,5 +3749,1117 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     /** Outcome toast — red edge. */
     private fun toastFail(msg: String) {
         ui.post { state.showToast(msg, ToastKind.FAIL) }
+    }
+
+    // ============================================================
+    // Meetings (transcriber) — host implementations
+    // ============================================================
+
+    private fun bindTranscriberService() {
+        if (transcriberServiceBound) return
+        val intent = Intent(this, TranscriberRecordingService::class.java)
+        transcriberServiceBound = bindService(intent, transcriberServiceConn, Context.BIND_AUTO_CREATE)
+    }
+
+    private fun unbindTranscriberService() {
+        if (!transcriberServiceBound) return
+        runCatching { unbindService(transcriberServiceConn) }
+        transcriberServiceBound = false
+        transcriberBinder = null
+    }
+
+    private fun refreshTranscriberPrefsCache() {
+        state.hasSmtp = transcriberPrefs.hasSmtp()
+        state.smtpHostDisplay = transcriberPrefs.smtpHost
+        state.smtpPortDisplay = transcriberPrefs.smtpPort
+        state.smtpUserDisplay = transcriberPrefs.smtpUser ?: ""
+        state.defaultRecipientDisplay = transcriberPrefs.defaultRecipient
+    }
+
+    private fun reloadMeetings() {
+        val list = meetingStore.listMeetings()
+        state.meetings.clear()
+        state.meetings.addAll(list)
+        // Layout: 0=back, 1=settings, 2=record, 3..N+2=meetings — last valid
+        // index is 2 + N. Snap focus back to back-pill if it would point past
+        // the end after a deletion.
+        val maxIdx = 2 + list.size
+        if (state.transcriberListFocus > maxIdx) {
+            state.transcriberListFocus = 0
+        }
+    }
+
+    override fun transcriberOpen() {
+        refreshTranscriberPrefsCache()
+        reloadMeetings()
+        bindTranscriberService()
+        state.openTranscriberList()
+    }
+
+    override fun transcriberStartRecording() {
+        if (!ensureAudioPerm()) return
+        ensureNotifPerm() // best-effort — denial doesn't block recording
+        // Conflict guard: STT capture for chat/terminal/claude already holds
+        // the mic. Refuse rather than silently corrupt both.
+        if (voiceCapture != null) {
+            toastFail("voice capture active")
+            return
+        }
+        if (transcriberBinder?.isRecording == true) {
+            // Already recording — just open the panel.
+            state.openTranscriberRecording()
+            return
+        }
+        val key = voicePrefs.elevenlabsKey
+        if (key.isNullOrBlank()) {
+            toastFail("set elevenlabs key in settings → voice")
+            return
+        }
+
+        val uuid = java.util.UUID.randomUUID().toString()
+        val now = System.currentTimeMillis()
+        val title = "Meeting " + SimpleDateFormat("yyyy-MM-dd HH:mm", com.r1.launcher.locale.digitFriendlyLocale()).format(Date(now))
+        val audioPath = meetingStore.audioFile(uuid).absolutePath
+        val meeting = Meeting(
+            uuid = uuid,
+            title = title,
+            createdAtMs = now,
+            audioPath = audioPath,
+            status = MeetingStatus.RECORDING,
+            // Snapshot the API key so a mid-recording Settings → Voice → "clear key"
+            // doesn't break the upload after stop.
+            apiKeySnapshot = key,
+        )
+        meetingStore.save(meeting)
+        transcriberCurrentMeeting = meeting
+
+        // Kick the FGS via startForegroundService (must call startForeground()
+        // within 10s — the service does that synchronously in onStartCommand).
+        val intent = TranscriberRecordingService.startIntent(this, audioPath, title)
+        ContextCompat.startForegroundService(this, intent)
+        bindTranscriberService()
+
+        state.recordingActive = true
+        state.recordingElapsedMs = 0L
+        state.recordingPeak = 0
+        ui.removeCallbacks(transcriberPollRunnable)
+        ui.post(transcriberPollRunnable)
+        playRecordStartTone()
+        reloadMeetings()
+        state.openTranscriberRecording()
+    }
+
+    override fun transcriberStopRecording() {
+        val meeting = transcriberCurrentMeeting
+        val binder = transcriberBinder
+        if (binder == null || !binder.isRecording) {
+            // Nothing recording — defensive cleanup of any stale state.
+            state.recordingActive = false
+            state.recordingElapsedMs = 0L
+            transcriberCurrentMeeting = null
+            return
+        }
+        val elapsed = binder.elapsedMs
+        startService(TranscriberRecordingService.stopIntent(this))
+        ui.removeCallbacks(transcriberPollRunnable)
+        state.recordingActive = false
+        state.recordingElapsedMs = 0L
+        state.recordingPeak = 0
+        playRecordStopTone()
+
+        if (meeting == null) return
+        // MediaRecorder.stop() finalizes the moov atom; give it ~500ms then
+        // kick off the upload. The FGS's onDestroy/STOP path is synchronous
+        // but the file system flush isn't guaranteed instant.
+        ui.postDelayed({
+            meeting.durationMs = elapsed
+            meeting.status = MeetingStatus.QUEUED
+            meetingStore.save(meeting)
+            reloadMeetings()
+            kickTranscription(meeting)
+        }, 500L)
+        transcriberCurrentMeeting = null
+        // Drop the user back onto the list panel so the new entry is visible.
+        if (state.panel == Panel.TRANSCRIBER_RECORDING) {
+            state.openTranscriberList()
+        }
+    }
+
+    override fun transcriberToggleRecording() {
+        if (transcriberBinder?.isRecording == true) transcriberStopRecording()
+        else transcriberStartRecording()
+    }
+
+    private fun kickTranscription(meeting: Meeting) {
+        val key = meeting.apiKeySnapshot ?: voicePrefs.elevenlabsKey
+        if (key.isNullOrBlank()) {
+            meeting.status = MeetingStatus.FAILED
+            meeting.errorMessage = "no api key"
+            meetingStore.save(meeting)
+            ui.post {
+                reloadMeetings()
+                toastFail("no elevenlabs key")
+            }
+            return
+        }
+        meeting.status = MeetingStatus.TRANSCRIBING
+        meetingStore.save(meeting)
+        ui.post {
+            reloadMeetings()
+            state.transcribeBusy = true
+        }
+        transcriberExecutor.submit {
+            val client = ScribeClient(key)
+            val audio = java.io.File(meeting.audioPath)
+            val result = client.transcribe(audio)
+            ui.post { state.transcribeBusy = false }
+            when (result) {
+                is ScribeClient.Result.Success -> {
+                    val text = TranscriptFormatter.render(result.response, meeting.speakerNames)
+                    meeting.transcriptJson = result.rawJson
+                    meeting.transcriptText = text
+                    meeting.languageCode = result.response.language_code
+                    meeting.speakerCount = TranscriptFormatter.distinctSpeakerCount(result.response)
+                    meeting.status = MeetingStatus.TRANSCRIBED
+                    meeting.errorMessage = null
+                    // Strip the API-key snapshot now that the upload succeeded.
+                    meeting.apiKeySnapshot = null
+                    meetingStore.save(meeting)
+                    ui.post {
+                        reloadMeetings()
+                        toastSuccess("transcribed: ${meeting.speakerCount} speaker${if (meeting.speakerCount == 1) "" else "s"}")
+                    }
+                }
+                is ScribeClient.Result.Failure -> {
+                    meeting.status = MeetingStatus.FAILED
+                    meeting.errorMessage = "[HTTP ${result.httpCode}] ${result.message}"
+                    meetingStore.save(meeting)
+                    ui.post {
+                        reloadMeetings()
+                        toastFail("transcribe: ${result.message}".take(80))
+                    }
+                }
+            }
+        }
+    }
+
+    override fun transcriberOpenDetail(uuid: String) {
+        bindTranscriberService()
+        state.openTranscriberDetail(uuid)
+    }
+
+    override fun transcriberRetryTranscribe(uuid: String) {
+        val m = meetingStore.loadMeeting(uuid) ?: return
+        if (m.apiKeySnapshot.isNullOrBlank()) m.apiKeySnapshot = voicePrefs.elevenlabsKey
+        kickTranscription(m)
+    }
+
+    override fun transcriberDelete(uuid: String) {
+        runCatching { transcriberPlayer?.release() }
+        transcriberPlayer = null
+        state.detailPlaying = false
+        meetingStore.delete(uuid)
+        if (state.currentMeetingUuid == uuid) state.currentMeetingUuid = null
+        reloadMeetings()
+        if (state.panel == Panel.TRANSCRIBER_DETAIL) state.openTranscriberList()
+    }
+
+    override fun transcriberPlayAudio(uuid: String) {
+        val audio = meetingStore.audioFile(uuid)
+        if (!audio.exists() || audio.length() == 0L) {
+            toastFail("audio missing")
+            return
+        }
+        runCatching { transcriberPlayer?.release() }
+        transcriberPlayer = MediaPlayer().apply {
+            setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build(),
+            )
+            setDataSource(audio.absolutePath)
+            setOnCompletionListener {
+                state.detailPlaying = false
+                runCatching { it.release() }
+                if (transcriberPlayer === it) transcriberPlayer = null
+            }
+            setOnErrorListener { mp, _, _ ->
+                state.detailPlaying = false
+                runCatching { mp.release() }
+                if (transcriberPlayer === mp) transcriberPlayer = null
+                true
+            }
+            prepare()
+            start()
+        }
+        state.detailPlaying = true
+    }
+
+    override fun transcriberStopAudio() {
+        runCatching { transcriberPlayer?.stop() }
+        runCatching { transcriberPlayer?.release() }
+        transcriberPlayer = null
+        state.detailPlaying = false
+    }
+
+    override fun transcriberShareEmail(uuid: String, recipient: String) {
+        if (!transcriberPrefs.hasSmtp()) {
+            toastFail("set smtp creds in meetings → settings")
+            return
+        }
+        val recipientFinal = recipient.ifBlank { transcriberPrefs.defaultRecipient }
+        if (recipientFinal.isBlank()) {
+            toastFail("recipient empty")
+            return
+        }
+        val meeting = meetingStore.loadMeeting(uuid) ?: run {
+            toastFail("meeting missing")
+            return
+        }
+        val transcript = meeting.transcriptText
+            ?: meeting.errorMessage?.let { "(transcription failed: $it)" }
+            ?: ""
+        state.detailStatus = "sending..."
+        transcriberExecutor.submit {
+            val sender = SmtpSender(transcriberPrefs)
+            val result = sender.send(meeting, recipientFinal, java.io.File(meeting.audioPath), transcript)
+            ui.post {
+                when (result) {
+                    is SmtpSender.Result.Success -> {
+                        state.detailStatus = "sent to ${recipientFinal.take(28)}"
+                        toastSuccess("email sent")
+                    }
+                    is SmtpSender.Result.Failure -> {
+                        state.detailStatus = "send failed: ${result.message.take(40)}"
+                        toastFail("send failed: ${result.message.take(60)}")
+                    }
+                }
+            }
+        }
+    }
+
+    override fun transcriberOpenSettings() {
+        refreshTranscriberPrefsCache()
+        state.openTranscriberSettings()
+    }
+
+    override fun transcriberSettingsRowActivate(idx: Int) {
+        when (idx) {
+            0 -> { state.back(); backTone() }
+            1 -> openTranscriberKeyboard("host", transcriberPrefs.smtpHost)
+            2 -> openTranscriberKeyboard("port", transcriberPrefs.smtpPort.toString())
+            3 -> openTranscriberKeyboard("user", transcriberPrefs.smtpUser ?: "")
+            4 -> openTranscriberKeyboard("password", "")
+            5 -> openTranscriberKeyboard("recipient", transcriberPrefs.defaultRecipient)
+            6 -> { transcriberClearSmtp(); toastSuccess("smtp cleared") }
+        }
+    }
+
+    private fun openTranscriberKeyboard(field: String, current: String) {
+        state.transcriberSettingsEditField = field
+        state.transcriberSettingsEditInput = current
+    }
+
+    override fun transcriberSaveSmtpField(field: String, value: String) {
+        when (field) {
+            "host" -> transcriberPrefs.smtpHost = value.ifBlank { TranscriberPrefs.DEFAULT_HOST }
+            "port" -> transcriberPrefs.smtpPort = value.toIntOrNull()?.coerceIn(1, 65535) ?: TranscriberPrefs.DEFAULT_PORT
+            "user" -> transcriberPrefs.smtpUser = value.ifBlank { null }
+            "password" -> transcriberPrefs.smtpPassword = value.ifBlank { null }
+            "recipient" -> transcriberPrefs.defaultRecipient = value
+        }
+        refreshTranscriberPrefsCache()
+        state.transcriberSettingsEditField = ""
+        state.transcriberSettingsEditInput = ""
+    }
+
+    override fun transcriberPasteSmtpField(field: String) {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val raw = cm?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty().trim()
+        if (raw.isEmpty()) {
+            toast("clipboard empty")
+            return
+        }
+        state.transcriberSettingsEditInput = raw
+    }
+
+    override fun transcriberClearSmtp() {
+        transcriberPrefs.clear()
+        refreshTranscriberPrefsCache()
+    }
+
+    override fun transcriberPasteRecipient() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val raw = cm?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty().trim()
+        if (raw.isEmpty()) {
+            toast("clipboard empty")
+            return
+        }
+        state.transcriberRecipientInput = raw
+    }
+
+    override fun transcriberOpenDetailMenu() {
+        val uuid = state.currentMeetingUuid ?: return
+        val meeting = meetingStore.loadMeeting(uuid) ?: return
+        val actions = mutableListOf<com.r1.launcher.transcriber.TranscriberDetailAction>()
+        when (meeting.status) {
+            com.r1.launcher.transcriber.MeetingStatus.TRANSCRIBED -> {
+                actions += com.r1.launcher.transcriber.TranscriberDetailAction.PLAY_TOGGLE
+                actions += com.r1.launcher.transcriber.TranscriberDetailAction.EMAIL
+                actions += com.r1.launcher.transcriber.TranscriberDetailAction.DELETE
+            }
+            com.r1.launcher.transcriber.MeetingStatus.FAILED -> {
+                actions += com.r1.launcher.transcriber.TranscriberDetailAction.RETRY
+                actions += com.r1.launcher.transcriber.TranscriberDetailAction.DELETE
+            }
+            else -> {
+                // Recording / queued / transcribing — only safe action is delete
+                // (which also stops the FGS via transcriberDelete()'s normal path).
+                actions += com.r1.launcher.transcriber.TranscriberDetailAction.DELETE
+            }
+        }
+        actions += com.r1.launcher.transcriber.TranscriberDetailAction.CLOSE
+        state.transcriberDetailMenuActions.clear()
+        state.transcriberDetailMenuActions.addAll(actions)
+        state.transcriberDetailMenuFocus = 0
+        state.transcriberDetailMenuOpen = true
+    }
+
+    override fun transcriberDetailMenuActivate(
+        action: com.r1.launcher.transcriber.TranscriberDetailAction,
+    ) {
+        val uuid = state.currentMeetingUuid
+        when (action) {
+            com.r1.launcher.transcriber.TranscriberDetailAction.PLAY_TOGGLE -> {
+                if (state.detailPlaying) transcriberStopAudio()
+                else uuid?.let { transcriberPlayAudio(it) }
+                // Keep the menu open so the user can stop without re-tapping ⋮.
+            }
+            com.r1.launcher.transcriber.TranscriberDetailAction.EMAIL -> {
+                uuid?.let { transcriberShareEmail(it, state.transcriberRecipientInput) }
+                state.transcriberDetailMenuOpen = false
+            }
+            com.r1.launcher.transcriber.TranscriberDetailAction.RETRY -> {
+                uuid?.let { transcriberRetryTranscribe(it) }
+                state.transcriberDetailMenuOpen = false
+            }
+            com.r1.launcher.transcriber.TranscriberDetailAction.DELETE -> {
+                uuid?.let { transcriberDelete(it) }
+                state.transcriberDetailMenuOpen = false
+            }
+            com.r1.launcher.transcriber.TranscriberDetailAction.CLOSE -> {
+                state.transcriberDetailMenuOpen = false
+            }
+        }
+    }
+
+    // --- survey call bot ---
+
+    private fun refreshSurveyDisplayState() {
+        state.hasOpenAiKey = surveyPrefs.hasOpenAiKey()
+        state.openAiKeyTail = surveyPrefs.openAiKey?.takeLast(4) ?: ""
+        state.hasSipCreds = surveyPrefs.hasSipCreds()
+        state.sipHostDisplay = surveyPrefs.sipHost.orEmpty()
+        state.sipUserDisplay = surveyPrefs.sipUser.orEmpty()
+        state.sipFromDisplay = surveyPrefs.sipFromNumber.orEmpty()
+        state.realtimeVoiceDisplay = surveyPrefs.realtimeVoice
+        state.summarizerModelDisplay = surveyPrefs.summarizerModel
+        state.surveyConsentTextDisplay = surveyPrefs.consentText
+        state.surveyEmailRecipientDisplay = surveyPrefs.emailRecipient.orEmpty()
+    }
+
+    private fun reloadSurveysAndCampaigns() {
+        val s = surveyStore.listSurveys()
+        state.surveys.clear(); state.surveys.addAll(s)
+        val c = surveyStore.listCampaigns()
+        state.campaigns.clear(); state.campaigns.addAll(c)
+        val r = surveyStore.listCallRecords()
+        state.callRecords.clear(); state.callRecords.addAll(r)
+    }
+
+    override fun surveyOpen() {
+        refreshSurveyDisplayState()
+        reloadSurveysAndCampaigns()
+        state.openSurveyList()
+    }
+
+    override fun surveyOpenCampaign() {
+        state.currentSurveyId = state.surveys.firstOrNull()?.id
+        state.openSurveyCampaign()
+    }
+
+    override fun surveyConfirmCampaignAndDial() {
+        val cid = state.currentCampaignId ?: run {
+            toastFail("no campaign selected")
+            return
+        }
+        surveyStartCampaignById(cid)
+    }
+
+    override fun surveyHangup() {
+        val sess = surveyActiveSession
+        if (sess != null) {
+            sess.hangup()
+        } else {
+            state.surveyCallActive = false
+            state.surveyCallStatus = "ended"
+        }
+        // Pause the campaign so the loop doesn't dial the next contact after
+        // the user explicitly hung up.
+        state.currentCampaignId?.let { cid ->
+            surveyStore.loadCampaign(cid)?.let {
+                if (it.status == com.r1.launcher.survey.CampaignStatus.RUNNING) {
+                    surveyStore.saveCampaign(it.copy(
+                        status = com.r1.launcher.survey.CampaignStatus.PAUSED,
+                        updatedAtMs = System.currentTimeMillis(),
+                    ))
+                    reloadSurveysAndCampaigns()
+                }
+            }
+        }
+    }
+
+    override fun surveyOpenDetail(callRecordId: String) {
+        state.openSurveyDetail(callRecordId)
+    }
+
+    override fun surveyDeleteCallRecord(callRecordId: String) {
+        surveyStore.deleteCallRecord(callRecordId)
+        reloadSurveysAndCampaigns()
+    }
+
+    override fun surveyEmailCallRecord(callRecordId: String) {
+        runSurveyPostCallPipeline(callRecordId, forceSummary = false, email = true)
+    }
+
+    override fun surveyRetrySummary(callRecordId: String) {
+        runSurveyPostCallPipeline(callRecordId, forceSummary = true, email = false)
+    }
+
+    override fun surveyHandleCallComplete(callRecordId: String) {
+        // Entry from the SIP / orchestrator path once the call ends. Auto-runs
+        // summary + email so the user gets the artifact without touching the UI.
+        runSurveyPostCallPipeline(callRecordId, forceSummary = false, email = true)
+    }
+
+    /**
+     * Post-call pipeline. Runs on the shared [transcriberExecutor] (single
+     * thread is fine — survey calls are sequential):
+     *   1. Load the record.
+     *   2. If [forceSummary] or no summary on file → call [SummaryGenerator],
+     *      persist the result back to the record.
+     *   3. If [email] → SMTP-send the call as an audio + transcript + answers
+     *      attachment trio, using the survey-specific recipient when set,
+     *      falling back to the transcriber default recipient.
+     *
+     * All toasts are dispatched back to the UI thread; the executor itself
+     * never touches Compose state directly.
+     */
+    private fun runSurveyPostCallPipeline(
+        recordId: String,
+        forceSummary: Boolean,
+        email: Boolean,
+    ) {
+        val rec0 = surveyStore.loadCallRecord(recordId) ?: run {
+            toastFail("call record missing")
+            return
+        }
+        val recipient = surveyPrefs.emailRecipient
+            ?.takeIf { it.isNotBlank() }
+            ?: transcriberPrefs.defaultRecipient.takeIf { it.isNotBlank() }
+            .orEmpty()
+        if (email && !transcriberPrefs.hasSmtp()) {
+            toastFail("set smtp creds in meetings → settings")
+            return
+        }
+        if (email && recipient.isBlank()) {
+            toastFail("set survey email recipient first")
+            return
+        }
+        if (email) state.showToast("emailing survey…", com.r1.launcher.ToastKind.INFO)
+        else state.showToast("summarizing…", com.r1.launcher.ToastKind.INFO)
+        transcriberExecutor.submit {
+            // ---- summary ----
+            val rec = if (forceSummary || rec0.summary.isNullOrBlank()) {
+                runSurveySummary(rec0)
+            } else rec0
+
+            // ---- email ----
+            if (!email) {
+                ui.post {
+                    if (rec.summary.isNullOrBlank()) toastFail("summary failed")
+                    else state.showToast("summary updated", com.r1.launcher.ToastKind.SUCCESS)
+                }
+                return@submit
+            }
+            val survey = surveyStore.loadSurvey(rec.surveyId)
+            val payload = buildSurveyEmailPayload(rec, survey, recipient)
+            val sender = SmtpSender(transcriberPrefs)
+            val result = sender.sendGeneric(payload)
+            ui.post {
+                when (result) {
+                    is SmtpSender.Result.Success ->
+                        state.showToast(
+                            "emailed survey to ${recipient.take(28)}",
+                            com.r1.launcher.ToastKind.SUCCESS,
+                        )
+                    is SmtpSender.Result.Failure ->
+                        toastFail("email failed: ${result.message.take(60)}")
+                }
+            }
+        }
+    }
+
+    /** Runs [SummaryGenerator] for one [CallRecord] and writes the result back
+     *  to the store. Returns the record (updated if the summary succeeded,
+     *  original on any failure — the email still goes out either way). */
+    private fun runSurveySummary(rec: com.r1.launcher.survey.CallRecord): com.r1.launcher.survey.CallRecord {
+        val model = surveyPrefs.summarizerModel
+        val key = when {
+            model.startsWith("claude") -> surveyPrefs.claudeKey
+            model.startsWith("gpt") -> surveyPrefs.openAiKey
+            else -> null
+        }?.takeIf { it.isNotBlank() } ?: run {
+            android.util.Log.w("SurveyPostProc", "no api key for $model; skipping summary")
+            return rec
+        }
+        val survey = surveyStore.loadSurvey(rec.surveyId)
+        val gen = com.r1.launcher.survey.SummaryGenerator.forModel(model, key)
+        return when (val r = gen.generate(rec, survey)) {
+            is com.r1.launcher.survey.SummaryGenerator.Result.Success -> {
+                val updated = rec.copy(
+                    summary = r.data.summary,
+                    sentiment = r.data.sentiment,
+                    completeness = r.data.completeness,
+                )
+                surveyStore.saveCallRecord(updated)
+                ui.post {
+                    // If the user is currently viewing this record, reload it.
+                    if (state.currentCallRecordId == updated.id) {
+                        state.currentCallRecordId = null
+                        state.currentCallRecordId = updated.id
+                    }
+                }
+                updated
+            }
+            is com.r1.launcher.survey.SummaryGenerator.Result.Failure -> {
+                android.util.Log.w("SurveyPostProc", "summary failed: ${r.message}")
+                ui.post { toastFail("summary failed: ${r.message.take(60)}") }
+                rec
+            }
+        }
+    }
+
+    /** Assemble the SMTP payload for one call record: human-readable body,
+     *  WAV audio (if present), transcript .txt, and answers .json. */
+    private fun buildSurveyEmailPayload(
+        rec: com.r1.launcher.survey.CallRecord,
+        survey: com.r1.launcher.survey.Survey?,
+        recipient: String,
+    ): SmtpSender.EmailPayload {
+        val durationS = rec.durationMs / 1000
+        val mins = durationS / 60
+        val secs = durationS % 60
+        val surveyName = survey?.name ?: "(missing survey)"
+        val displayContact = rec.contact.name.ifBlank { rec.contact.phone }
+        val body = buildString {
+            appendLine("Survey call from your R1.")
+            appendLine()
+            appendLine("Contact:  $displayContact")
+            appendLine("Phone:    ${rec.contact.phone}")
+            appendLine("Survey:   $surveyName")
+            appendLine("Status:   ${rec.status.name.lowercase()}")
+            appendLine("Ended:    ${rec.endReason ?: "—"}")
+            appendLine("Duration: ${"%d:%02d".format(mins, secs)}")
+            rec.sentiment?.let { appendLine("Sentiment: $it") }
+            appendLine("Completeness: ${(rec.completeness * 100).toInt()}%")
+            appendLine()
+            rec.summary?.takeIf { it.isNotBlank() }?.let {
+                appendLine("--- Summary ---")
+                appendLine(it)
+                appendLine()
+            }
+            if (rec.structuredAnswers.isNotEmpty()) {
+                appendLine("--- Answers ---")
+                rec.structuredAnswers.forEach { (qid, ans) ->
+                    val qprompt = survey?.questions?.firstOrNull { it.id == qid }?.prompt
+                    if (qprompt != null) appendLine("$qprompt")
+                    appendLine("  → $ans")
+                }
+                appendLine()
+            }
+            appendLine("Audio recording + full transcript + JSON answers attached.")
+        }
+
+        val atts = buildList<SmtpSender.Attachment> {
+            val audio = java.io.File(rec.audioPath)
+            if (audio.exists() && audio.length() > 0) {
+                add(SmtpSender.Attachment.FileAttachment(
+                    filename = "${rec.id}.wav",
+                    file = audio,
+                    contentType = "audio/wav",
+                ))
+            }
+            val transcript = rec.transcript.orEmpty()
+            if (transcript.isNotBlank()) {
+                add(SmtpSender.Attachment.TextAttachment(
+                    filename = "${rec.id}.txt",
+                    text = transcript,
+                ))
+            }
+            add(SmtpSender.Attachment.TextAttachment(
+                filename = "${rec.id}.json",
+                text = encodeAnswersJson(rec),
+                mime = "application/json; charset=utf-8",
+            ))
+        }
+        return SmtpSender.EmailPayload(
+            recipient = recipient,
+            subject = "Survey call — $displayContact — $surveyName",
+            body = body,
+            attachments = atts,
+        )
+    }
+
+    private fun encodeAnswersJson(rec: com.r1.launcher.survey.CallRecord): String {
+        val obj = kotlinx.serialization.json.buildJsonObject {
+            put("record_id", rec.id)
+            put("campaign_id", rec.campaignId)
+            put("survey_id", rec.surveyId)
+            put("contact_name", rec.contact.name)
+            put("contact_phone", rec.contact.phone)
+            put("status", rec.status.name.lowercase())
+            put("end_reason", rec.endReason)
+            put("duration_ms", rec.durationMs)
+            put("sentiment", rec.sentiment)
+            put("completeness", rec.completeness)
+            put("summary", rec.summary)
+            put("answers", kotlinx.serialization.json.buildJsonObject {
+                rec.structuredAnswers.forEach { (k, v) -> put(k, v) }
+            })
+        }
+        return kotlinx.serialization.json.Json { prettyPrint = true }.encodeToString(
+            kotlinx.serialization.json.JsonObject.serializer(),
+            obj,
+        )
+    }
+
+    override fun surveyPlayAudio(callRecordId: String) {
+        state.showToast("playback pending (task #11 polish)", com.r1.launcher.ToastKind.INFO)
+    }
+
+    override fun surveyStopAudio() {
+        // No-op until playback lands.
+    }
+
+    override fun surveyOpenSettings() {
+        refreshSurveyDisplayState()
+        state.openSurveySettings()
+    }
+
+    override fun surveySettingsRowActivate(idx: Int) {
+        when (idx) {
+            0 -> { state.back(); backTone() }
+            1 -> {
+                // openai key — keyboard entry lands with task #11 polish.
+                state.showToast("paste openai key via web companion for now", com.r1.launcher.ToastKind.INFO)
+            }
+            2, 3, 4, 5 -> {
+                state.showToast("sip creds via web companion (task #12)", com.r1.launcher.ToastKind.INFO)
+            }
+            6 -> {
+                state.showToast("edit consent in web companion", com.r1.launcher.ToastKind.INFO)
+            }
+            7 -> surveyCycleVoice()
+            8 -> surveyCycleSummarizerModel()
+            9 -> {
+                state.showToast("email recipient via web companion", com.r1.launcher.ToastKind.INFO)
+            }
+            10 -> {
+                surveyPrefs.clearAll()
+                refreshSurveyDisplayState()
+                state.showToast("survey settings cleared", com.r1.launcher.ToastKind.SUCCESS)
+            }
+        }
+    }
+
+    override fun surveyCampaignRowActivate(idx: Int) {
+        when (idx) {
+            0 -> { state.back(); backTone() }
+            1 -> {
+                state.showToast("pick survey via web companion", com.r1.launcher.ToastKind.INFO)
+            }
+            2 -> {
+                state.showToast("pick contacts via web companion", com.r1.launcher.ToastKind.INFO)
+            }
+            3 -> {
+                val sid = state.currentSurveyId
+                if (sid == null) {
+                    state.showToast("no survey selected", com.r1.launcher.ToastKind.FAIL)
+                } else {
+                    state.showToast("start campaign pending (task #10)", com.r1.launcher.ToastKind.INFO)
+                }
+            }
+        }
+    }
+
+    override fun surveyListRowActivate(idx: Int) {
+        when (idx) {
+            0 -> { state.back(); backTone() }
+            1 -> surveyOpenSettings()
+            2 -> surveyOpenCampaign()
+            else -> {
+                val campaignIdx = idx - 3
+                val c = state.campaigns.getOrNull(campaignIdx) ?: return
+                when (c.status) {
+                    com.r1.launcher.survey.CampaignStatus.PENDING,
+                    com.r1.launcher.survey.CampaignStatus.PAUSED ->
+                        surveyStartCampaignById(c.id)
+                    com.r1.launcher.survey.CampaignStatus.RUNNING -> {
+                        state.currentCampaignId = c.id
+                        state.openSurveyLive()
+                    }
+                    com.r1.launcher.survey.CampaignStatus.COMPLETED,
+                    com.r1.launcher.survey.CampaignStatus.CANCELLED -> {
+                        val recent = surveyStore.listCallRecordsForCampaign(c.id).firstOrNull()
+                        if (recent != null) surveyOpenDetail(recent.id)
+                        else state.showToast("no call records yet for this campaign", com.r1.launcher.ToastKind.INFO)
+                    }
+                }
+            }
+        }
+    }
+
+    override fun surveySaveOpenAiKey(key: String) {
+        surveyPrefs.openAiKey = key.trim().ifBlank { null }
+        refreshSurveyDisplayState()
+    }
+
+    override fun surveyPasteOpenAiKey() {
+        val cb = getSystemService(android.content.ClipboardManager::class.java)
+        val txt = cb?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()?.trim()
+        if (txt.isNullOrBlank()) {
+            state.showToast("clipboard empty", com.r1.launcher.ToastKind.FAIL)
+            return
+        }
+        surveySaveOpenAiKey(txt)
+        state.showToast("openai key saved", com.r1.launcher.ToastKind.SUCCESS)
+    }
+
+    override fun surveyClearOpenAiKey() {
+        surveyPrefs.openAiKey = null
+        refreshSurveyDisplayState()
+    }
+
+    override fun surveyCycleVoice() {
+        val voices = com.r1.launcher.survey.SurveyPrefs.REALTIME_VOICES
+        val curIdx = voices.indexOf(surveyPrefs.realtimeVoice).coerceAtLeast(0)
+        val next = voices[(curIdx + 1) % voices.size]
+        surveyPrefs.realtimeVoice = next
+        refreshSurveyDisplayState()
+    }
+
+    override fun surveyCycleSummarizerModel() {
+        val models = com.r1.launcher.survey.SurveyPrefs.SUMMARIZER_MODELS.map { it.second }
+        val curIdx = models.indexOf(surveyPrefs.summarizerModel).coerceAtLeast(0)
+        val next = models[(curIdx + 1) % models.size]
+        surveyPrefs.summarizerModel = next
+        refreshSurveyDisplayState()
+    }
+
+    // ---- Web companion CRUD ----
+
+    override fun surveyUpsertSurvey(survey: com.r1.launcher.survey.Survey): String {
+        val now = System.currentTimeMillis()
+        val sid = survey.id.ifBlank { "s_" + java.util.UUID.randomUUID().toString().take(8) }
+        val existing = if (survey.id.isBlank()) null else surveyStore.loadSurvey(survey.id)
+        val created = existing?.createdAtMs ?: now
+        val toSave = survey.copy(id = sid, createdAtMs = created, updatedAtMs = now)
+        surveyStore.saveSurvey(toSave)
+        reloadSurveysAndCampaigns()
+        return sid
+    }
+
+    override fun surveyDeleteSurveyById(surveyId: String) {
+        surveyStore.deleteSurvey(surveyId)
+        if (state.currentSurveyId == surveyId) state.currentSurveyId = null
+        reloadSurveysAndCampaigns()
+    }
+
+    override fun surveyCreateCampaign(
+        surveyId: String,
+        contacts: List<com.r1.launcher.survey.Contact>,
+    ): String {
+        val now = System.currentTimeMillis()
+        val cid = "c_" + java.util.UUID.randomUUID().toString().take(8)
+        val campaign = com.r1.launcher.survey.Campaign(
+            id = cid,
+            surveyId = surveyId,
+            contacts = contacts,
+            status = com.r1.launcher.survey.CampaignStatus.PENDING,
+            nextContactIdx = 0,
+            createdAtMs = now,
+            updatedAtMs = now,
+        )
+        surveyStore.saveCampaign(campaign)
+        reloadSurveysAndCampaigns()
+        return cid
+    }
+
+    override fun surveyCancelCampaignById(campaignId: String) {
+        val c = surveyStore.loadCampaign(campaignId) ?: return
+        surveyStore.saveCampaign(c.copy(
+            status = com.r1.launcher.survey.CampaignStatus.CANCELLED,
+            updatedAtMs = System.currentTimeMillis(),
+        ))
+        reloadSurveysAndCampaigns()
+    }
+
+    override fun surveyStartCampaignById(campaignId: String) {
+        if (!surveyPrefs.hasOpenAiKey()) { toastFail("set openai key first"); return }
+        if (!surveyPrefs.hasSipCreds()) { toastFail("set sip credentials first"); return }
+        val c = surveyStore.loadCampaign(campaignId) ?: run {
+            toastFail("campaign not found"); return
+        }
+        if (c.contacts.isEmpty()) { toastFail("campaign has no contacts"); return }
+        if (surveyActiveSession != null) { toastFail("a call is already live"); return }
+        val survey = surveyStore.loadSurvey(c.surveyId) ?: run {
+            toastFail("survey missing: ${c.surveyId}"); return
+        }
+        // Mark running so progress is visible in lists.
+        val running = c.copy(
+            status = com.r1.launcher.survey.CampaignStatus.RUNNING,
+            updatedAtMs = System.currentTimeMillis(),
+        )
+        surveyStore.saveCampaign(running)
+        reloadSurveysAndCampaigns()
+        state.currentCampaignId = campaignId
+        state.openSurveyLive()
+        runSurveyNextContact(running, survey)
+    }
+
+    /** A reference to the live session — non-null while a call is in flight.
+     *  Reset to null in onCompleted so [surveyHangup] and the campaign loop
+     *  can tell whether anything is up. */
+    @Volatile private var surveyActiveSession: com.r1.launcher.survey.SurveyCallSession? = null
+
+    /** Dial the contact at [Campaign.nextContactIdx]. Builds the [CallRecord],
+     *  bumps the campaign index, kicks the session, and lets its Listener
+     *  drive the rest. */
+    private fun runSurveyNextContact(
+        c: com.r1.launcher.survey.Campaign,
+        survey: com.r1.launcher.survey.Survey,
+    ) {
+        val idx = c.nextContactIdx
+        if (idx >= c.contacts.size) {
+            // Campaign complete.
+            surveyStore.saveCampaign(c.copy(
+                status = com.r1.launcher.survey.CampaignStatus.COMPLETED,
+                updatedAtMs = System.currentTimeMillis(),
+            ))
+            reloadSurveysAndCampaigns()
+            state.surveyCallActive = false
+            state.surveyCallStatus = "campaign done"
+            state.showToast("campaign complete", com.r1.launcher.ToastKind.SUCCESS)
+            return
+        }
+        if (c.status != com.r1.launcher.survey.CampaignStatus.RUNNING) {
+            // Paused / cancelled — bail out without dialing the next contact.
+            return
+        }
+        val contact = c.contacts[idx]
+        val recordId = "r_" + java.util.UUID.randomUUID().toString().take(8)
+        val audioFile = surveyStore.audioFile(c.id, recordId)
+        val now = System.currentTimeMillis()
+        val rec = com.r1.launcher.survey.CallRecord(
+            id = recordId,
+            campaignId = c.id,
+            surveyId = c.surveyId,
+            contact = contact,
+            createdAtMs = now,
+            status = com.r1.launcher.survey.CallRecordStatus.DIALING,
+            audioPath = audioFile.absolutePath,
+        )
+        surveyStore.saveCallRecord(rec)
+
+        // Wire up live UI state.
+        state.surveyCallActive = true
+        state.currentCallRecordId = recordId
+        state.surveyCallContactName = contact.name.ifBlank { contact.phone }
+        state.surveyCallStatus = "starting"
+        state.surveyCallElapsedMs = 0L
+        state.surveyCallCurrentQuestion = ""
+
+        val creds = com.r1.launcher.survey.SurveyCallSession.SipCreds(
+            host = surveyPrefs.sipHost!!,
+            port = 5060,
+            user = surveyPrefs.sipUser!!,
+            password = surveyPrefs.sipPassword!!,
+            fromNumber = surveyPrefs.sipFromNumber,
+        )
+        val session = com.r1.launcher.survey.SurveyCallSession(
+            openAiKey = surveyPrefs.openAiKey!!,
+            voice = surveyPrefs.realtimeVoice,
+            survey = survey,
+            contact = contact,
+            consentText = survey.consentText?.takeIf { it.isNotBlank() } ?: surveyPrefs.consentText,
+            sipPrefs = creds,
+            wavFile = audioFile,
+            listener = SurveyCallListener(c, survey, recordId),
+        )
+        surveyActiveSession = session
+        session.start()
+    }
+
+    /** Listener that the live SurveyCallSession invokes — wires events back
+     *  to [state], the web companion, the call-record store, and the campaign
+     *  loop. */
+    private inner class SurveyCallListener(
+        private val campaign: com.r1.launcher.survey.Campaign,
+        private val survey: com.r1.launcher.survey.Survey,
+        private val recordId: String,
+    ) : com.r1.launcher.survey.SurveyCallSession.Listener {
+
+        private val tickRunnable = object : Runnable {
+            override fun run() {
+                if (state.surveyCallActive && callStartMs > 0) {
+                    state.surveyCallElapsedMs = System.currentTimeMillis() - callStartMs
+                    broadcastSurveyLive()
+                    ui.postDelayed(this, 500L)
+                }
+            }
+        }
+        private var callStartMs: Long = 0L
+
+        override fun onStatus(status: String) {
+            state.surveyCallStatus = status
+            broadcastSurveyLive()
+        }
+        override fun onCallEstablished() {
+            callStartMs = System.currentTimeMillis()
+            state.surveyCallStatus = "live"
+            updateCallRecordStatus(com.r1.launcher.survey.CallRecordStatus.LIVE)
+            ui.post(tickRunnable)
+        }
+        override fun onLiveStateChanged(s: com.r1.launcher.survey.SurveyOrchestrator.LiveState) {
+            state.surveyCallCurrentQuestion = s.currentQuestionPrompt
+            broadcastSurveyLive()
+        }
+        override fun onAssistantTextDelta(text: String) {
+            webServer?.broadcastSurveyTranscriptDelta("bot", text)
+        }
+        override fun onUserTextFinal(text: String) {
+            webServer?.broadcastSurveyTranscriptDelta("user", text)
+        }
+        override fun onCompleted(
+            reason: String,
+            consentGranted: Boolean,
+            transcript: String,
+            answers: Map<String, String>,
+            durationMs: Long,
+        ) {
+            ui.removeCallbacks(tickRunnable)
+            state.surveyCallActive = false
+            state.surveyCallStatus = "ended: $reason"
+            surveyActiveSession = null
+
+            // Persist final CallRecord with whatever we captured.
+            val existing = surveyStore.loadCallRecord(recordId) ?: return
+            val finalStatus = when {
+                reason == "consent_denied" -> com.r1.launcher.survey.CallRecordStatus.CONSENT_DENIED
+                reason == "register_failed" -> com.r1.launcher.survey.CallRecordStatus.FAILED
+                reason.startsWith("INVITE 486") -> com.r1.launcher.survey.CallRecordStatus.BUSY
+                reason.startsWith("INVITE 487")
+                    || reason.startsWith("INVITE 408") -> com.r1.launcher.survey.CallRecordStatus.NO_ANSWER
+                reason.startsWith("INVITE ") -> com.r1.launcher.survey.CallRecordStatus.FAILED
+                else -> com.r1.launcher.survey.CallRecordStatus.COMPLETED
+            }
+            val updated = existing.copy(
+                status = finalStatus,
+                durationMs = durationMs,
+                transcript = transcript.takeIf { it.isNotBlank() },
+                structuredAnswers = answers,
+                endReason = reason,
+            )
+            surveyStore.saveCallRecord(updated)
+
+            // Broadcast call.done.
+            webServer?.broadcastSurveyCallDone(kotlinx.serialization.json.buildJsonObject {
+                put("recordId", recordId)
+                put("reason", reason)
+                put("consentGranted", consentGranted)
+                put("durationMs", durationMs)
+            })
+
+            // Auto-run summary + email (best-effort; failures toast but don't
+            // halt the campaign).
+            runSurveyPostCallPipeline(recordId, forceSummary = false, email = true)
+
+            // Advance the campaign (bump nextContactIdx, pace).
+            val freshCampaign = surveyStore.loadCampaign(campaign.id) ?: return
+            if (freshCampaign.status != com.r1.launcher.survey.CampaignStatus.RUNNING) {
+                reloadSurveysAndCampaigns()
+                return
+            }
+            val nextIdx = freshCampaign.nextContactIdx + 1
+            val bumped = freshCampaign.copy(
+                nextContactIdx = nextIdx,
+                callRecordIds = freshCampaign.callRecordIds + recordId,
+                updatedAtMs = System.currentTimeMillis(),
+            )
+            surveyStore.saveCampaign(bumped)
+            reloadSurveysAndCampaigns()
+            val delay = surveyPrefs.betweenCallsDelayMs
+            ui.postDelayed({
+                val cur = surveyStore.loadCampaign(bumped.id) ?: return@postDelayed
+                if (cur.status == com.r1.launcher.survey.CampaignStatus.RUNNING) {
+                    runSurveyNextContact(cur, survey)
+                }
+            }, delay)
+        }
+        override fun onError(message: String) {
+            android.util.Log.w("SurveyCall", "session error: $message")
+            state.surveyCallStatus = "error: ${message.take(40)}"
+            broadcastSurveyLive()
+        }
+
+        private fun updateCallRecordStatus(s: com.r1.launcher.survey.CallRecordStatus) {
+            val rec = surveyStore.loadCallRecord(recordId) ?: return
+            surveyStore.saveCallRecord(rec.copy(status = s))
+        }
+
+        private fun broadcastSurveyLive() {
+            webServer?.broadcastSurveyCallState(kotlinx.serialization.json.buildJsonObject {
+                put("active", state.surveyCallActive)
+                put("campaignId", state.currentCampaignId)
+                put("recordId", state.currentCallRecordId)
+                put("status", state.surveyCallStatus)
+                put("contactName", state.surveyCallContactName)
+                put("currentQuestion", state.surveyCallCurrentQuestion)
+                put("elapsedMs", state.surveyCallElapsedMs)
+            })
+        }
+    }
+
+    override fun surveySaveSettingsField(field: String, value: String) {
+        val trimmed = value.trim()
+        when (field) {
+            "openai_key"        -> surveyPrefs.openAiKey = trimmed.ifBlank { null }
+            "claude_key"        -> surveyPrefs.claudeKey = trimmed.ifBlank { null }
+            "sip_host"          -> surveyPrefs.sipHost = trimmed.ifBlank { null }
+            "sip_user"          -> surveyPrefs.sipUser = trimmed.ifBlank { null }
+            "sip_password"      -> surveyPrefs.sipPassword = trimmed.ifBlank { null }
+            "sip_from"          -> surveyPrefs.sipFromNumber = trimmed.ifBlank { null }
+            "consent_text"      -> surveyPrefs.consentText =
+                trimmed.ifBlank { com.r1.launcher.survey.SurveyPrefs.DEFAULT_CONSENT_TEXT }
+            "voice"             -> surveyPrefs.realtimeVoice =
+                trimmed.ifBlank { com.r1.launcher.survey.SurveyPrefs.DEFAULT_REALTIME_VOICE }
+            "summarizer_model"  -> surveyPrefs.summarizerModel =
+                trimmed.ifBlank { com.r1.launcher.survey.SurveyPrefs.DEFAULT_SUMMARIZER_MODEL }
+            "email_recipient"   -> surveyPrefs.emailRecipient = trimmed.ifBlank { null }
+            else -> android.util.Log.w("SurveyPrefs", "unknown settings field: $field")
+        }
+        refreshSurveyDisplayState()
     }
 }
