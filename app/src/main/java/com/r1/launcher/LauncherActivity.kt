@@ -333,18 +333,31 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
         ensurePhonePerm()
 
+        // UI click cues live on STREAM_SYSTEM so the "speaker" slider (which
+        // governs STREAM_MUSIC for TTS / media) doesn't bleed into them. The
+        // "ui sound" slider is a software gain on soundPool.play(), so we want
+        // STREAM_SYSTEM held at max — otherwise we'd be attenuating twice.
         tone = runCatching {
-            ToneGenerator(AudioManager.STREAM_MUSIC, 45)
+            ToneGenerator(AudioManager.STREAM_SYSTEM, 100)
         }.getOrNull()
 
         val attrs = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
             .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
             .build()
         soundPool = SoundPool.Builder()
             .setMaxStreams(4)
             .setAudioAttributes(attrs)
             .build()
+        runCatching {
+            audioManager?.let { am ->
+                am.setStreamVolume(
+                    AudioManager.STREAM_SYSTEM,
+                    am.getStreamMaxVolume(AudioManager.STREAM_SYSTEM),
+                    0,
+                )
+            }
+        }
         runCatching {
             val afd = assets.openFd("moving.mp3")
             movingSoundId = soundPool?.load(afd, 1) ?: 0
@@ -3482,10 +3495,13 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
      *  moving.mp3 if the dedicated cue isn't loaded yet. */
     private fun playRecordStartTone() {
         val sid = if (recordStartSoundId != 0) recordStartSoundId else movingSoundId
-        if (sid != 0) {
-            soundPool?.play(sid, 1f, 1f, 0, 0, 1f)
+        val g = uiSoundGain()
+        if (sid != 0 && g > 0f) {
+            soundPool?.play(sid, g, g, 0, 0, 1f)
         }
-        runCatching { tone?.startTone(ToneGenerator.TONE_PROP_BEEP, 60) }
+        if (g > 0f) {
+            runCatching { tone?.startTone(ToneGenerator.TONE_PROP_BEEP, 60) }
+        }
     }
 
     /** Recording-stop cue — release-record.mp3, mirrored shape of start. Same
@@ -3494,10 +3510,13 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
      *  for "released / sending" versus "recording started". */
     private fun playRecordStopTone() {
         val sid = if (recordStopSoundId != 0) recordStopSoundId else movingSoundId
-        if (sid != 0) {
-            soundPool?.play(sid, 1f, 1f, 0, 0, 1f)
+        val g = uiSoundGain()
+        if (sid != 0 && g > 0f) {
+            soundPool?.play(sid, g, g, 0, 0, 1f)
         }
-        runCatching { tone?.startTone(ToneGenerator.TONE_PROP_PROMPT, 60) }
+        if (g > 0f) {
+            runCatching { tone?.startTone(ToneGenerator.TONE_PROP_PROMPT, 60) }
+        }
     }
     
     override fun backTone() {
