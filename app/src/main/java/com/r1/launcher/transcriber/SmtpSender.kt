@@ -31,8 +31,7 @@ import javax.mail.internet.MimeMultipart
  *
  * Two send paths share the SMTP machinery:
  *   - [send] (meeting-typed) — used by the Meetings/Transcriber feature.
- *   - [sendGeneric] (EmailPayload) — used by the Survey Call Bot post-call
- *     pipeline (and any future feature) to deliver arbitrary attachments.
+ *   - [sendGeneric] (EmailPayload) — generic path for arbitrary attachments.
  */
 class SmtpSender(private val prefs: TranscriberPrefs) {
 
@@ -94,8 +93,7 @@ class SmtpSender(private val prefs: TranscriberPrefs) {
         ))
     }
 
-    /** Generic SMTP send. The Survey Call Bot post-call pipeline calls this
-     *  with a WAV recording + transcript.txt + answers.json. */
+    /** Generic SMTP send for arbitrary attachments. */
     fun sendGeneric(payload: EmailPayload): Result {
         val user = prefs.smtpUser ?: return Result.Failure("SMTP user not configured")
         val pass = prefs.smtpPassword ?: return Result.Failure("SMTP password not configured")

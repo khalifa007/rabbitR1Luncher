@@ -17,6 +17,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
@@ -24,6 +26,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -135,27 +138,38 @@ fun TileRow(
 }
 
 /**
- * Back pill — rounded-999dp translucent chip, used as the header "←Home" on
- * Apps and Store panels. Mirrors drawable/back_pill_bg.xml.
+ * Three-dot overflow icon used to open in-panel drawer menus. Lives in Common
+ * so both OpenClaw and Hermes chat headers can share it. Color tracks the
+ * caller's theme; [focused] inverts colors to give visual feedback while the
+ * menu is expanded.
  */
 @Composable
-fun BackPill(
-    label: String = "Home",
+fun MenuDot(
+    themeColor: Color,
+    focused: Boolean = false,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier,
 ) {
-    val type = LocalR1Type.current
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = modifier
-            .background(Color.Transparent)
+    val bg = if (focused) themeColor else Color.Transparent
+    val dotColor = if (focused) Color.Black else themeColor
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(bg)
             .clickable(onClick = onClick)
-            .padding(horizontal = 4.dp, vertical = 4.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = "< $label",
-            style = type.appCard,
-            color = Color(0xFFFF4500)
-        )
+        Column(
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            repeat(3) {
+                Box(
+                    modifier = Modifier
+                        .size(4.dp)
+                        .background(dotColor, CircleShape),
+                )
+            }
+        }
     }
 }

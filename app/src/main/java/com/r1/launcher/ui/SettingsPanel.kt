@@ -135,18 +135,54 @@ fun SettingsSoundPanel(state: LauncherState, onRowClick: (Int) -> Unit) {
         enter = fadeIn(tween(ANIM_OPEN_MS)) + slideInVertically(tween(ANIM_OPEN_MS)) { it },
         exit = fadeOut(tween(ANIM_CLOSE_MS)) + slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
     ) {
-        SettingsCategoryBody(
-            iconRes = R.drawable.ic_sound,
-            title = stringResource(R.string.settings_sound_title),
-            backFocused = state.settingsSoundFocus == 0,
-            onBackClick = { onRowClick(0) },
-            rows = listOf(
-                stringResource(R.string.settings_sound_row_ui) to R.drawable.ic_sound,
-                stringResource(R.string.settings_sound_row_speaker) to R.drawable.ic_sound,
-            ),
-            focus = state.settingsSoundFocus,
-            onRowClick = onRowClick,
-        )
+        val listState = rememberLazyListState()
+        val rows = 3 // toggle + system volume + sound
+        LaunchedEffect(state.settingsSoundFocus) {
+            listState.animateScrollToItem(state.settingsSoundFocus.coerceIn(0, rows))
+        }
+        Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+            LazyColumn(
+                state = listState,
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 32.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                item(key = "header") {
+                    AppPageHeader(
+                        titleIconRes = R.drawable.ic_sound,
+                        title = stringResource(R.string.settings_sound_title),
+                        backFocused = state.settingsSoundFocus == 0,
+                        onBack = { onRowClick(0) },
+                        themeColor = AppThemes.Settings,
+                    )
+                }
+                item(key = "system_toggle") {
+                    SettingsRow(
+                        label = stringResource(R.string.settings_sound_row_system_toggle),
+                        focused = state.settingsSoundFocus == 1,
+                        toggleChecked = state.uiSoundEnabled,
+                        leadingIcon = R.drawable.ic_sound,
+                        onClick = { onRowClick(1) },
+                    )
+                }
+                item(key = "system_volume") {
+                    SettingsRow(
+                        label = stringResource(R.string.settings_sound_row_ui),
+                        focused = state.settingsSoundFocus == 2,
+                        leadingIcon = R.drawable.ic_sound,
+                        onClick = { onRowClick(2) },
+                    )
+                }
+                item(key = "speaker") {
+                    SettingsRow(
+                        label = stringResource(R.string.settings_sound_row_speaker),
+                        focused = state.settingsSoundFocus == 3,
+                        leadingIcon = R.drawable.ic_sound,
+                        onClick = { onRowClick(3) },
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -167,6 +203,7 @@ fun SettingsDevicePanel(state: LauncherState, onRowClick: (Int) -> Unit) {
                 stringResource(R.string.settings_device_row_language) to R.drawable.ic_language,
                 stringResource(R.string.settings_device_row_reboot) to R.drawable.ic_reboot,
                 stringResource(R.string.settings_device_row_power_off) to R.drawable.ic_power,
+                stringResource(R.string.settings_device_row_reset_camera) to R.drawable.ic_device,
                 stringResource(R.string.settings_device_row_factory_reset) to R.drawable.ic_factory_reset,
             ),
             focus = state.settingsDeviceFocus,
@@ -190,11 +227,12 @@ fun SettingsAboutPanel(state: LauncherState, onRowClick: (Int) -> Unit) {
         }
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
             Column(modifier = Modifier.fillMaxSize()) {
-                SettingsHeader(
-                    iconRes = R.drawable.ic_settings,
+                AppPageHeader(
+                    titleIconRes = R.drawable.ic_settings,
                     title = stringResource(R.string.settings_about_title),
                     backFocused = state.settingsAboutFocus == 0,
-                    onBackClick = { onRowClick(0) },
+                    onBack = { onRowClick(0) },
+                    themeColor = AppThemes.Settings,
                 )
                 Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                     AboutRow(
@@ -232,11 +270,12 @@ private fun SettingsCategoryBody(
                 modifier = Modifier.fillMaxSize(),
             ) {
                 item(key = "header") {
-                    SettingsHeader(
-                        iconRes = iconRes,
+                    AppPageHeader(
+                        titleIconRes = iconRes,
                         title = title,
                         backFocused = backFocused,
-                        onBackClick = onBackClick,
+                        onBack = onBackClick,
+                        themeColor = AppThemes.Settings,
                     )
                 }
                 itemsIndexed(
@@ -253,56 +292,6 @@ private fun SettingsCategoryBody(
                     )
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun SettingsHeader(
-    iconRes: Int,
-    title: String,
-    backFocused: Boolean,
-    onBackClick: () -> Unit,
-) {
-    val type = LocalR1Type.current
-    val accent = Color(0xFFFF6B00)
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 14.dp, bottom = 8.dp),
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .clip(RoundedCornerShape(6.dp))
-                .background(if (backFocused) HIGHLIGHT_BG else Color.Transparent)
-                .clickable { onBackClick() }
-                .padding(horizontal = 6.dp, vertical = 2.dp),
-        ) {
-            Text(
-                text = stringResource(R.string.back),
-                color = if (backFocused) Color.Black else accent,
-                fontSize = 24.sp,
-                fontFamily = type.appCard.fontFamily,
-                fontWeight = FontWeight.Bold,
-            )
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Image(
-                painter = painterResource(iconRes),
-                contentDescription = null,
-                colorFilter = ColorFilter.tint(accent),
-                modifier = Modifier.size(28.dp),
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = title,
-                color = accent,
-                fontSize = 32.sp,
-                fontFamily = type.appCard.fontFamily,
-                fontWeight = FontWeight.Bold,
-            )
         }
     }
 }

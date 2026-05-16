@@ -7,22 +7,17 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.r1.launcher.claude.ClaudeMessage
+import com.r1.launcher.hermes.HermesMessage
 import com.r1.launcher.messages.SmsConversation
 import com.r1.launcher.messages.SmsItem
 import com.r1.launcher.openclaw.ChatMessage
 import com.r1.launcher.openclaw.SessionEntry
-import com.r1.launcher.survey.CallRecordIndexEntry
-import com.r1.launcher.survey.CampaignIndexEntry
-import com.r1.launcher.survey.SurveyIndexEntry
 import com.r1.launcher.transcriber.MeetingIndexEntry
 import com.r1.launcher.transcriber.TranscriberDetailAction
 
-enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, CLAUDE, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS, SURVEY_LIST, SURVEY_CAMPAIGN, SURVEY_CONSENT, SURVEY_LIVE, SURVEY_DETAIL, SURVEY_SETTINGS }
+enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, CLAUDE, HERMES_CHAT, HERMES_CONFIG, HERMES_QR, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS }
 
 enum class WifiShareEditTarget { SSID, PASSWORD }
-
-/** What the OPENCLAW_QR scanner is currently looking for. */
-enum class QrScanMode { GATEWAY_PAIRING, OPENAI_KEY }
 
 /** Kind of toast — drives the edge color in [com.r1.launcher.ui.ToastOverlay]. */
 enum class ToastKind { INFO, SUCCESS, FAIL }
@@ -73,7 +68,7 @@ class LauncherState {
     var settingsFocus by mutableIntStateOf(0)
     /** Display category: 0=back, 1=brightness. */
     var settingsDisplayFocus by mutableIntStateOf(0)
-    /** Sound category: 0=back, 1=ui sound, 2=speaker. */
+    /** Sound category: 0=back, 1=system sound toggle, 2=system volume, 3=sound. */
     var settingsSoundFocus by mutableIntStateOf(0)
     /** Device category: 0=back, 1=updates, 2=factory reset. */
     var settingsDeviceFocus by mutableIntStateOf(0)
@@ -114,6 +109,9 @@ class LauncherState {
      *  playMovingSound / playUiClickSound; persisted via SoundPrefs. */
     var uiVolumeLevel by mutableIntStateOf(5)
     var uiVolumeMax by mutableIntStateOf(15)
+    /** Master on/off for UI-feedback sounds. When false, every click/tick/beep
+     *  is suppressed regardless of uiVolumeLevel. Persisted via SoundPrefs. */
+    var uiSoundEnabled by mutableStateOf(true)
 
     // --- clock / date ---
     var clockText by mutableStateOf("00:00")
@@ -159,8 +157,6 @@ class LauncherState {
     var chatPartialText by mutableStateOf("")
     /** Last QR-decode error to surface in the QR panel. Null = no error shown. */
     var qrError by mutableStateOf<String?>(null)
-    /** Drives the QR scanner's behaviour on a successful decode. */
-    var qrScanMode by mutableStateOf(QrScanMode.GATEWAY_PAIRING)
     /** True between "stop recording" and either transcript-back or error. */
     var chatTranscribing by mutableStateOf(false)
     /** Buffer for the Settings → Voice keyboard input field (key entry). */
@@ -309,6 +305,44 @@ class LauncherState {
      *  QR redirect was a setup affordance, not a recurring detour. */
     var claudeAuthed by mutableStateOf(false)
 
+    // --- hermes agent (Panel.HERMES_CHAT / HERMES_CONFIG) ---
+    /** Hermes chat scrollback — orange-right user / gray-left assistant bubbles.
+     *  Stateless on the Hermes server; this client owns the full history and
+     *  POSTs it every turn to /v1/chat/completions. */
+    val hermesMessages = mutableStateListOf<HermesMessage>()
+    val hermesMessagesMax = 500
+    /** Live assistant streaming preview — populated per SSE delta. Cleared and
+     *  replaced by a committed [HermesMessage] when the stream ends. */
+    var hermesStreamingText by mutableStateOf("")
+    /** Live STT transcript while recording. Cleared on commit. */
+    var hermesPartialText by mutableStateOf("")
+    /** "idle" | "live" | "streaming" | "error: <msg>". Drives header status dot. */
+    var hermesStatus by mutableStateOf("idle")
+    var hermesRecording by mutableStateOf(false)
+    var hermesBusy by mutableStateOf(false)
+    var hermesTranscribing by mutableStateOf(false)
+    var hermesScrollIndex by mutableIntStateOf(0)
+    var hermesInputLevel by mutableIntStateOf(0)
+    /** HERMES_CONFIG row focus: 0=back, 1=url, 2=key, 3=scan QR, 4=speak, 5=hide input, 6=test. */
+    var hermesConfigFocus by mutableIntStateOf(0)
+    /** Buffer for the URL row's RetroKeyboard. */
+    var hermesServerUrlInput by mutableStateOf("")
+    /** Buffer for the API-key row's RetroKeyboard. */
+    var hermesApiKeyInput by mutableStateOf("")
+    /** Display-mirrors of HermesPrefs so config rows can show current values
+     *  reactively. Activity hydrates these on start + after each save. */
+    var hermesServerUrl by mutableStateOf("")
+    var hermesApiKeyTail by mutableStateOf("")
+    var hermesModel by mutableStateOf("hermes-agent")
+    var hermesFontSize by mutableIntStateOf(14)
+    /** When true, the chat panel hides its text input + send pill — voice-only mode. */
+    var hermesHideChat by mutableStateOf(false)
+    /** Error string shown above the Hermes QR scanner viewport when a scanned
+     *  payload didn't decode cleanly. Null while the scanner is healthy. */
+    var hermesQrError by mutableStateOf<String?>(null)
+    /** True when entering HERMES_CONFIG from HERMES_CHAT; controls back routing. */
+    var hermesConfigCameFromChat by mutableStateOf(false)
+
     // --- meetings (transcriber) ---
     /** Index of saved meetings, newest first. Hydrated from MeetingStore on
      *  panel entry; updated in-place after start/stop/transcribe/delete. */
@@ -357,57 +391,6 @@ class LauncherState {
     /** The action set currently shown in the ⋮ menu. Host populates it on
      *  open based on the meeting's status; nav reads it for wheel max + dispatch. */
     val transcriberDetailMenuActions = mutableStateListOf<TranscriberDetailAction>()
-
-    // --- survey call bot ---
-    /** Index of saved surveys (templates). Hydrated from SurveyStore on entry. */
-    val surveys = mutableStateListOf<SurveyIndexEntry>()
-    /** Index of saved call records (one per completed call). */
-    val callRecords = mutableStateListOf<CallRecordIndexEntry>()
-    /** Index of campaigns (a survey + a contact list + status). */
-    val campaigns = mutableStateListOf<CampaignIndexEntry>()
-    /** Focus on SURVEY_LIST: 0=back, 1=settings gear, 2="+ new campaign",
-     *  3..=campaigns rows. */
-    var surveyListFocus by mutableIntStateOf(0)
-    /** Focus on SURVEY_CAMPAIGN composer: 0=back, 1=pick survey, 2=pick contacts,
-     *  3=start. Author the survey + contacts on the web companion. */
-    var surveyCampaignFocus by mutableIntStateOf(0)
-    /** Two-row pre-dial confirm: 0=cancel, 1=confirm + dial. */
-    var surveyConsentFocus by mutableIntStateOf(0)
-    /** Detail panel: 0=back, 1=⋮ (mirror transcriber detail). */
-    var surveyDetailFocus by mutableIntStateOf(0)
-    /** Settings rows: 0=back, 1=openai key, 2=sip host, 3=sip user,
-     *  4=sip password, 5=sip from-number, 6=consent text, 7=voice cycle,
-     *  8=summarizer model, 9=email recipient, 10=clear all. */
-    var surveySettingsFocus by mutableIntStateOf(0)
-    /** Currently selected campaign (for SURVEY_LIVE + post-call). */
-    var currentCampaignId by mutableStateOf<String?>(null)
-    /** Currently selected survey (for the campaign composer). */
-    var currentSurveyId by mutableStateOf<String?>(null)
-    /** Currently selected call record (for SURVEY_DETAIL). */
-    var currentCallRecordId by mutableStateOf<String?>(null)
-    /** Live state mirrored from SurveyOrchestrator while a call is in flight. */
-    var surveyCallActive by mutableStateOf(false)
-    var surveyCallElapsedMs by mutableStateOf(0L)
-    var surveyCallPeak by mutableIntStateOf(0)
-    var surveyCallContactName by mutableStateOf("")
-    /** "dialing" / "ringing" / "live" / "wrapping up" / "ended" / "failed". */
-    var surveyCallStatus by mutableStateOf("")
-    var surveyCallCurrentQuestion by mutableStateOf("")
-    /** Running answer count for the live UI. */
-    var surveyCallAnswered by mutableIntStateOf(0)
-    /** Total questions in the active survey (for the "x of N" indicator). */
-    var surveyCallTotal by mutableIntStateOf(0)
-    /** Cached display values for SURVEY_SETTINGS rows (no secrets in plain state). */
-    var hasOpenAiKey by mutableStateOf(false)
-    var openAiKeyTail by mutableStateOf("")
-    var hasSipCreds by mutableStateOf(false)
-    var sipHostDisplay by mutableStateOf("")
-    var sipUserDisplay by mutableStateOf("")
-    var sipFromDisplay by mutableStateOf("")
-    var realtimeVoiceDisplay by mutableStateOf("alloy")
-    var summarizerModelDisplay by mutableStateOf("claude-haiku-4-5-20251001")
-    var surveyConsentTextDisplay by mutableStateOf("")
-    var surveyEmailRecipientDisplay by mutableStateOf("")
 
     // --- toast overlay ---
     /** Currently visible toast, or null when hidden. Set via [showToast];
@@ -547,14 +530,6 @@ class LauncherState {
         // sets the error message and then opens this panel; clearing would
         // erase it before the user sees it. User-initiated entry from the
         // apps grid resets qrError explicitly.
-        qrScanMode = QrScanMode.GATEWAY_PAIRING
-        panel = Panel.OPENCLAW_QR
-    }
-
-    /** Open the same camera panel but treat the next decode as an OpenAI key. */
-    fun openOpenAiKeyQr() {
-        qrError = null
-        qrScanMode = QrScanMode.OPENAI_KEY
         panel = Panel.OPENCLAW_QR
     }
 
@@ -642,6 +617,22 @@ class LauncherState {
         panel = Panel.OPENCLAW_SETTINGS
     }
 
+    fun openHermesChat() {
+        hermesScrollIndex = 0
+        panel = Panel.HERMES_CHAT
+    }
+
+    fun openHermesConfig(fromChat: Boolean = false) {
+        hermesConfigFocus = 0
+        hermesConfigCameFromChat = fromChat
+        panel = Panel.HERMES_CONFIG
+    }
+
+    fun openHermesQr() {
+        hermesQrError = null
+        panel = Panel.HERMES_QR
+    }
+
     fun openTranscriberList() {
         transcriberListFocus = 0
         detailStatus = ""
@@ -671,43 +662,6 @@ class LauncherState {
         panel = Panel.TRANSCRIBER_SETTINGS
     }
 
-    fun openSurveyList() {
-        surveyListFocus = 0
-        panel = Panel.SURVEY_LIST
-    }
-
-    fun openSurveyCampaign() {
-        surveyCampaignFocus = 0
-        panel = Panel.SURVEY_CAMPAIGN
-    }
-
-    fun openSurveyConsent(campaignId: String) {
-        currentCampaignId = campaignId
-        surveyConsentFocus = 0
-        panel = Panel.SURVEY_CONSENT
-    }
-
-    fun openSurveyLive() {
-        surveyCallActive = true
-        surveyCallElapsedMs = 0L
-        surveyCallPeak = 0
-        surveyCallAnswered = 0
-        surveyCallStatus = "dialing"
-        surveyCallCurrentQuestion = ""
-        panel = Panel.SURVEY_LIVE
-    }
-
-    fun openSurveyDetail(callRecordId: String) {
-        currentCallRecordId = callRecordId
-        surveyDetailFocus = 0
-        panel = Panel.SURVEY_DETAIL
-    }
-
-    fun openSurveySettings() {
-        surveySettingsFocus = 0
-        panel = Panel.SURVEY_SETTINGS
-    }
-
     fun goHome() {
         panel = Panel.HOME
     }
@@ -733,7 +687,7 @@ class LauncherState {
             Panel.ONBOARDING -> Panel.ONBOARDING
             Panel.SETTINGS -> Panel.APPS
             Panel.APPS -> Panel.HOME
-            Panel.OPENCLAW_QR -> if (qrScanMode == QrScanMode.OPENAI_KEY) Panel.OPENCLAW_SETTINGS else Panel.APPS
+            Panel.OPENCLAW_QR -> Panel.APPS
             Panel.OPENCLAW_CHAT -> Panel.APPS
             Panel.OPENCLAW_CAMERA -> Panel.OPENCLAW_CHAT
             Panel.OPENCLAW_SETTINGS, Panel.OPENCLAW_SESSIONS -> Panel.OPENCLAW_CHAT
@@ -741,18 +695,15 @@ class LauncherState {
             Panel.MESSAGES_THREAD -> Panel.MESSAGES
             Panel.TERMINAL -> Panel.APPS
             Panel.CLAUDE -> Panel.APPS
+            Panel.HERMES_CHAT -> Panel.APPS
+            Panel.HERMES_CONFIG -> if (hermesConfigCameFromChat) Panel.HERMES_CHAT else Panel.APPS
+            Panel.HERMES_QR -> Panel.HERMES_CONFIG
             Panel.TRANSCRIBER_LIST -> Panel.APPS
             // Recording-stop side-effect is fired by LauncherActivity's
             // backPressed handling; here we just unwind the panel.
             Panel.TRANSCRIBER_RECORDING -> Panel.TRANSCRIBER_LIST
             Panel.TRANSCRIBER_DETAIL -> Panel.TRANSCRIBER_LIST
             Panel.TRANSCRIBER_SETTINGS -> Panel.TRANSCRIBER_LIST
-            Panel.SURVEY_LIST -> Panel.APPS
-            Panel.SURVEY_CAMPAIGN -> Panel.SURVEY_LIST
-            Panel.SURVEY_CONSENT -> Panel.SURVEY_CAMPAIGN
-            Panel.SURVEY_LIVE -> Panel.SURVEY_LIST
-            Panel.SURVEY_DETAIL -> Panel.SURVEY_LIST
-            Panel.SURVEY_SETTINGS -> Panel.SURVEY_LIST
             Panel.HOME -> Panel.HOME
         }
     }

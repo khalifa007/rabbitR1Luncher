@@ -60,17 +60,18 @@ fun MessagesPanel(
             LazyColumn(
                 state = listState,
                 contentPadding = PaddingValues(
-                    start = 16.dp, end = 16.dp, top = 32.dp, bottom = 32.dp,
+                    start = 16.dp, end = 16.dp, top = 0.dp, bottom = 32.dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
-                item {
-                    SettingsRow(
-                        label = stringResource(R.string.back_short),
-                        focused = state.messagesFocus == 0,
-                        toggleChecked = null,
-                        onClick = { onRowClick(0) },
+                item(key = "header") {
+                    AppPageHeader(
+                        titleIconRes = R.drawable.ic_messages,
+                        title = "messages",
+                        backFocused = state.messagesFocus == 0,
+                        onBack = { onRowClick(0) },
+                        themeColor = AppThemes.Messages,
                     )
                 }
                 if (total == 0) {
@@ -150,17 +151,18 @@ fun MessagesThreadPanel(
             LazyColumn(
                 state = listState,
                 contentPadding = PaddingValues(
-                    start = 16.dp, end = 16.dp, top = 32.dp, bottom = 32.dp,
+                    start = 16.dp, end = 16.dp, top = 0.dp, bottom = 32.dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
-                item {
-                    SettingsRow(
-                        label = "< ${state.smsThreadName.ifBlank { state.smsThreadAddress }}",
-                        focused = state.smsThreadFocus == 0,
-                        toggleChecked = null,
-                        onClick = { onBack() },
+                item(key = "header") {
+                    AppPageHeader(
+                        titleIconRes = R.drawable.ic_messages,
+                        title = state.smsThreadName.ifBlank { state.smsThreadAddress },
+                        backFocused = state.smsThreadFocus == 0,
+                        onBack = onBack,
+                        themeColor = AppThemes.Messages,
                     )
                 }
                 if (items.isEmpty()) {

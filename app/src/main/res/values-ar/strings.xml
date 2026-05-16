@@ -22,7 +22,6 @@
     <string name="app_label_terminal">الطرفية</string>
     <string name="app_label_claude">Claude Code</string>
     <string name="app_label_meetings">الاجتماعات</string>
-    <string name="app_label_survey">المسوّق</string>
 
     <!-- Settings root -->
     <string name="settings_title">الإعدادات</string>
@@ -38,8 +37,9 @@
     <string name="settings_display_title">الشاشة</string>
     <string name="settings_display_row_brightness">السطوع</string>
     <string name="settings_sound_title">الصوت</string>
-    <string name="settings_sound_row_ui">صوت الواجهة</string>
-    <string name="settings_sound_row_speaker">السماعة</string>
+    <string name="settings_sound_row_system_toggle">صوت النظام</string>
+    <string name="settings_sound_row_ui">مستوى صوت النظام</string>
+    <string name="settings_sound_row_speaker">الصوت</string>
     <string name="settings_device_title">الجهاز</string>
     <string name="settings_device_row_check_updates">البحث عن تحديثات</string>
     <string name="settings_device_row_language">اللغة</string>
@@ -100,8 +100,8 @@
 
     <!-- Brightness / volume / ui-volume -->
     <string name="panel_brightness_title">السطوع</string>
-    <string name="panel_volume_title">السماعة</string>
-    <string name="panel_uivolume_title">صوت الواجهة</string>
+    <string name="panel_volume_title">الصوت</string>
+    <string name="panel_uivolume_title">مستوى صوت النظام</string>
     <string name="panel_volume_hint">العجلة ↑↓   اضغط OK</string>
 
     <!-- Factory reset -->
@@ -141,7 +141,6 @@
     <string name="voice_row_toggle_on">الصوت: مفعّل</string>
     <string name="voice_row_toggle_off">الصوت: متوقف</string>
     <string name="voice_row_key">مفتاح ElevenLabs</string>
-    <string name="voice_row_scan_qr">مسح المفتاح من QR</string>
     <string name="voice_row_clear_key">مسح المفتاح</string>
     <string name="voice_kb_hint">اكتب sk_… أو الصق</string>
     <string name="voice_row_custom_id">معرّف صوت مخصص</string>
@@ -252,7 +251,6 @@
     <!-- OpenClaw QR -->
     <string name="openclaw_qr_back_home">الرئيسية</string>
     <string name="openclaw_qr_title_gateway">مسح QR للبوابة</string>
-    <string name="openclaw_qr_title_openai">اعرض QR لرمز إعداد البوابة</string>
 
     <!-- Home hotspot status -->
     <string name="home_hotspot_zero">نقطة الاتصال مفعّلة · 0 أجهزة</string>

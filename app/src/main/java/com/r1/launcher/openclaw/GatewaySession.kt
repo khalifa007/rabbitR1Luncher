@@ -364,8 +364,13 @@ class GatewaySession(
      * thread alive. SDK signature is `session.compact({ maxLines })`. Refreshes
      * `chat.history` on success so the panel shows the post-compaction state.
      *
-     * Falls back to `node.event(sessions.compact)` on permission errors,
-     * mirroring the listSessions / chat.subscribe pattern.
+     * `sessions.compact` is `operator.admin`-scoped upstream (core-descriptors
+     * line 143); the bootstrap pairing profile we use only grants read/write/
+     * talk.secrets, so this RPC fails unless the gateway operator has
+     * post-pair-elevated the device. Surface the real gateway error in that
+     * case — the old `node.event(sessions.compact)` fallback can never
+     * succeed for an operator-role client (`node.event` is `node`-scope)
+     * and only ever produced a misleading "unauthorized role: operator" toast.
      */
     fun compactSession(targetKey: String = sessionKey, maxLines: Int = 200, onDone: (Boolean, String?) -> Unit = { _, _ -> }) {
         scope.launch {
@@ -374,17 +379,8 @@ class GatewaySession(
                     put("sessionKey", JsonPrimitive(targetKey))
                     put("maxLines", JsonPrimitive(maxLines))
                 }
-                var res = runCatching { request("sessions.compact", params, timeoutMs = 30_000L) }.getOrNull()
-                var ok = res?.get("ok")?.jsonPrimitive?.booleanOrNull ?: false
-                if (!ok) {
-                    res = runCatching {
-                        request("node.event", buildJsonObject {
-                            put("event", JsonPrimitive("sessions.compact"))
-                            put("payloadJSON", JsonPrimitive(params.toString()))
-                        }, timeoutMs = 30_000L)
-                    }.getOrNull()
-                    ok = res?.get("ok")?.jsonPrimitive?.booleanOrNull ?: false
-                }
+                val res = runCatching { request("sessions.compact", params, timeoutMs = 30_000L) }.getOrNull()
+                val ok = res?.get("ok")?.jsonPrimitive?.booleanOrNull ?: false
                 val errMsg = (res?.get("error") as? JsonObject)
                     ?.get("message")?.jsonPrimitive?.contentOrNull
                 if (ok) {
@@ -412,6 +408,12 @@ class GatewaySession(
      * (the gateway's `sessions.reset` maintenance op). Destructive: the
      * conversation is gone after this. Refreshes `chat.history` so the
      * panel reflects the empty state.
+     *
+     * Same admin-scope caveat as `compactSession`: `sessions.reset` is
+     * `operator.admin` upstream, unreachable from a bootstrap-paired
+     * operator client unless the gateway elevates the device. The launcher's
+     * "clear context" button avoids calling this in normal cases by
+     * switching to a fresh thread key instead (see `openClawClearContext`).
      */
     fun resetSession(targetKey: String = sessionKey, onDone: (Boolean, String?) -> Unit = { _, _ -> }) {
         scope.launch {
@@ -419,17 +421,8 @@ class GatewaySession(
                 val params = buildJsonObject {
                     put("sessionKey", JsonPrimitive(targetKey))
                 }
-                var res = runCatching { request("sessions.reset", params, timeoutMs = 15_000L) }.getOrNull()
-                var ok = res?.get("ok")?.jsonPrimitive?.booleanOrNull ?: false
-                if (!ok) {
-                    res = runCatching {
-                        request("node.event", buildJsonObject {
-                            put("event", JsonPrimitive("sessions.reset"))
-                            put("payloadJSON", JsonPrimitive(params.toString()))
-                        }, timeoutMs = 15_000L)
-                    }.getOrNull()
-                    ok = res?.get("ok")?.jsonPrimitive?.booleanOrNull ?: false
-                }
+                val res = runCatching { request("sessions.reset", params, timeoutMs = 15_000L) }.getOrNull()
+                val ok = res?.get("ok")?.jsonPrimitive?.booleanOrNull ?: false
                 val errMsg = (res?.get("error") as? JsonObject)
                     ?.get("message")?.jsonPrimitive?.contentOrNull
                 if (ok) {
@@ -550,8 +543,8 @@ class GatewaySession(
             }
 
             val params = buildJsonObject {
-                put("minProtocol", JsonPrimitive(3))
-                put("maxProtocol", JsonPrimitive(3))
+                put("minProtocol", JsonPrimitive(4))
+                put("maxProtocol", JsonPrimitive(4))
                 put("client", buildJsonObject {
                     put("id", JsonPrimitive(clientId))
                     put("displayName", JsonPrimitive("R1 Launcher"))

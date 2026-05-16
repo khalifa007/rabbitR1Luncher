@@ -75,23 +75,15 @@ fun SettingsVoiceSubscriptionPanel(
 
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
             Column(
-                modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 24.dp),
+                modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                // Back row — focused row 0
-                SubRowButton(
-                    label = "< back",
-                    focused = state.voiceSubFocus == 0,
-                    color = orange,
-                    onClick = onBack,
-                )
-
-                Text(
-                    text = stringResource(R.string.voice_sub_title),
-                    color = orange,
-                    fontSize = 22.sp,
-                    fontFamily = type.appCard.fontFamily,
-                    fontWeight = FontWeight.Bold,
+                AppPageHeader(
+                    titleIconRes = R.drawable.ic_voice,
+                    title = "subscription",
+                    backFocused = state.voiceSubFocus == 0,
+                    onBack = onBack,
+                    themeColor = AppThemes.Settings,
                 )
 
                 when {

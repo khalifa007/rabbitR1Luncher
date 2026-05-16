@@ -75,19 +75,14 @@ fun TranscriberRecordingPanel(state: LauncherState, onBack: () -> Unit, onStop: 
         ) {
             // Back affordance in top-left for touch users; side-button-tap is
             // the canonical stop gesture.
-            Box(
+            PageBackPill(
+                focused = false,
+                themeColor = AppThemes.Meetings,
+                onClick = onBack,
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(16.dp)
-                    .clickable { onBack() },
-            ) {
-                Text(
-                    text = "< back",
-                    color = orange,
-                    fontSize = 16.sp,
-                    fontFamily = type.appCard.fontFamily,
-                )
-            }
+                    .padding(12.dp),
+            )
 
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,

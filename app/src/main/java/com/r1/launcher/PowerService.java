@@ -7,9 +7,6 @@ import android.os.SystemClock;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityEvent;
-import android.view.accessibility.AccessibilityNodeInfo;
-
-import java.util.List;
 
 public class PowerService extends AccessibilityService {
     private static final String TAG = "R1Power";
@@ -22,66 +19,12 @@ public class PowerService extends AccessibilityService {
     private long lastDownTime = 0L;
     private int lastDownCode = -1;
 
-    // Words we'll click while Updater.autoClickInstallUntil is in the future.
-    // Ordered: install/update first, then post-install dismiss buttons.
-    private static final String[] CLICK_WORDS = {
-        "Install", "INSTALL", "install",
-        "Update", "UPDATE", "update",
-        "Done", "DONE", "done",
-        "Open", "OPEN", "open",
-        "Got it", "OK", "Ok"
-    };
-
-    private static final String[] INSTALLER_HINTS = {
-        "packageinstaller", "packageinstall", "installer"
-    };
-
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (event == null) return;
-        if (System.currentTimeMillis() > Updater.autoClickInstallUntil) return;
-
-        int type = event.getEventType();
-        if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
-            && type != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) return;
-
-        CharSequence pkgCs = event.getPackageName();
-        String pkg = pkgCs == null ? "" : pkgCs.toString();
-        boolean isInstaller = false;
-        for (String hint : INSTALLER_HINTS) {
-            if (pkg.toLowerCase().contains(hint)) { isInstaller = true; break; }
-        }
-        if (!isInstaller) return;
-
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) return;
-        for (String w : CLICK_WORDS) {
-            if (clickByText(root, w)) return;
-        }
-    }
-
-    private boolean clickByText(AccessibilityNodeInfo root, String text) {
-        List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(text);
-        if (nodes == null) return false;
-        for (AccessibilityNodeInfo n : nodes) {
-            if (n == null) continue;
-            // exact or near-exact match to avoid clicking "Cancel"
-            CharSequence t = n.getText();
-            if (t == null) continue;
-            String got = t.toString().trim();
-            if (!got.equalsIgnoreCase(text)) continue;
-
-            AccessibilityNodeInfo target = n;
-            while (target != null && !target.isClickable()) target = target.getParent();
-            if (target != null && target.isClickable() && target.isEnabled()) {
-                boolean ok = target.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-                if (ok) {
-                    Log.d(TAG, "auto-clicked: " + got);
-                    return true;
-                }
-            }
-        }
-        return false;
+        // No-op: OTAUpdater installs silently via root (`pm install -r`) so there's
+        // no system installer dialog to auto-tap. The accessibility service still
+        // exists for its key-event handling (double-press home) and the static
+        // power/lock helpers below.
     }
 
     @Override

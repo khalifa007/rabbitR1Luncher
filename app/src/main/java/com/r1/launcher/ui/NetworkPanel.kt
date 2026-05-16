@@ -37,7 +37,10 @@ fun NetworkPanel(
             slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
     ) {
         val items = listOf(
-            SettingsItem.Standard(stringResource(R.string.back_short)),
+            // Placeholder for header — item idx 0 is rendered as the page
+            // header below, not a row. Keep it in the list so focus indices
+            // stay stable with existing nav code (0=back, 1..=rows).
+            SettingsItem.Standard("__header__"),
             SettingsItem.Toggle(stringResource(R.string.network_row_wifi), state.wifiEnabled, subtitle = if (state.wifiEnabled) state.wifiConnectedSsid else ""),
             SettingsItem.Toggle(stringResource(R.string.network_row_cellular), state.cellularOn),
             SettingsItem.Toggle(stringResource(R.string.network_row_bluetooth), state.btOn),
@@ -74,22 +77,32 @@ fun NetworkPanel(
             LazyColumn(
                 state = listState,
                 contentPadding = PaddingValues(
-                    start = 16.dp, end = 16.dp, top = 32.dp, bottom = 32.dp,
+                    start = 16.dp, end = 16.dp, top = 0.dp, bottom = 32.dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
                 itemsIndexed(
                     items = items,
-                    key = { _, item -> item.label },
+                    key = { idx, item -> if (idx == 0) "header" else item.label },
                 ) { idx, item ->
-                    SettingsRow(
-                        label = item.label,
-                        focused = idx == state.networkFocus,
-                        toggleChecked = (item as? SettingsItem.Toggle)?.checked,
-                        subtitle = (item as? SettingsItem.Toggle)?.subtitle ?: "",
-                        onClick = { onRowClick(idx) },
-                    )
+                    if (idx == 0) {
+                        AppPageHeader(
+                            titleIconRes = R.drawable.ic_network,
+                            title = "network",
+                            backFocused = state.networkFocus == 0,
+                            onBack = { onRowClick(0) },
+                            themeColor = AppThemes.Settings,
+                        )
+                    } else {
+                        SettingsRow(
+                            label = item.label,
+                            focused = idx == state.networkFocus,
+                            toggleChecked = (item as? SettingsItem.Toggle)?.checked,
+                            subtitle = (item as? SettingsItem.Toggle)?.subtitle ?: "",
+                            onClick = { onRowClick(idx) },
+                        )
+                    }
                 }
             }
         }

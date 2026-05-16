@@ -134,7 +134,7 @@ fun AppsPanel(
                     AppCard(
                         entry = entry,
                         focused = idx == state.appsFocus,
-                        background = APP_PALETTE[idx % APP_PALETTE.size],
+                        background = cardBackground(entry, idx),
                         activateTick = state.appsPressTrigger,
                         onClick = { onAppClick(idx) },
                     )
@@ -172,23 +172,23 @@ private fun AppCard(
         AppEntry.Messages -> "_r1_messages"
         AppEntry.Terminal -> "_r1_terminal"
         AppEntry.Claude -> "_r1_claude"
+        AppEntry.Hermes -> "_r1_hermes"
         AppEntry.Meetings -> "_r1_meetings"
-        AppEntry.Survey -> "_r1_survey"
     }
     val isSettings = entry is AppEntry.Settings
     val isOpenClaw = entry is AppEntry.OpenClaw
     val isMessages = entry is AppEntry.Messages
     val isTerminal = entry is AppEntry.Terminal
     val isClaude = entry is AppEntry.Claude
+    val isHermes = entry is AppEntry.Hermes
     val isMeetings = entry is AppEntry.Meetings
-    val isSurvey = entry is AppEntry.Survey
     val settingsPainter = if (isSettings) painterResource(R.drawable.ic_settings) else null
     val openClawPainter = if (isOpenClaw) painterResource(R.drawable.ic_wifi_arc) else null
     val messagesPainter = if (isMessages) painterResource(R.drawable.ic_messages) else null
     val terminalPainter = if (isTerminal) painterResource(R.drawable.ic_terminal) else null
     val claudePainter = if (isClaude) painterResource(R.drawable.ic_claude) else null
+    val hermesPainter = if (isHermes) painterResource(R.drawable.ic_hermes) else null
     val meetingsPainter = if (isMeetings) painterResource(R.drawable.ic_meetings) else null
-    val surveyPainter = if (isSurvey) painterResource(R.drawable.ic_survey) else null
 
     var iconPainter by remember(pkg) {
         val cached = iconCache.get(pkg)
@@ -201,8 +201,8 @@ private fun AppCard(
         AppEntry.Messages -> stringResource(R.string.app_label_messages)
         AppEntry.Terminal -> stringResource(R.string.app_label_terminal)
         AppEntry.Claude -> stringResource(R.string.app_label_claude)
+        AppEntry.Hermes -> stringResource(R.string.app_label_hermes)
         AppEntry.Meetings -> stringResource(R.string.app_label_meetings)
-        AppEntry.Survey -> stringResource(R.string.app_label_survey)
     }
     var label by remember(pkg, syntheticLabel) {
         mutableStateOf(
@@ -305,7 +305,16 @@ private fun AppCard(
                 .fillMaxWidth()
                 .padding(start = 16.dp, end = 16.dp, top = 16.dp),
         ) {
-            val effectivePainter = settingsPainter ?: openClawPainter ?: messagesPainter ?: terminalPainter ?: claudePainter ?: meetingsPainter ?: surveyPainter ?: iconPainter
+            val effectivePainter = settingsPainter ?: openClawPainter ?: messagesPainter ?: terminalPainter ?: claudePainter ?: hermesPainter ?: meetingsPainter ?: iconPainter
+            Text(
+                text = label.replaceFirstChar { it.titlecase() },
+                color = Color.Black,
+                style = LocalR1Type.current.appCard,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.size(8.dp))
             if (effectivePainter != null) {
                 Image(
                     painter = effectivePainter,
@@ -315,16 +324,19 @@ private fun AppCard(
             } else {
                 Box(modifier = Modifier.size(24.dp))
             }
-            Spacer(Modifier.weight(1f))
-            Text(
-                text = label,
-                color = Color.Black,
-                style = LocalR1Type.current.appCard,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
         }
     }
+}
+
+private fun cardBackground(entry: AppEntry, idx: Int): Color = when (entry) {
+    is AppEntry.Real -> APP_PALETTE[idx % APP_PALETTE.size]
+    AppEntry.Settings -> AppThemes.Settings
+    AppEntry.OpenClaw -> AppThemes.OpenClaw
+    AppEntry.Messages -> AppThemes.Messages
+    AppEntry.Terminal -> AppThemes.Terminal
+    AppEntry.Claude -> AppThemes.Claude
+    AppEntry.Hermes -> AppThemes.Hermes
+    AppEntry.Meetings -> AppThemes.Meetings
 }
 
 private fun appKey(entry: AppEntry): String = when (entry) {
@@ -334,8 +346,8 @@ private fun appKey(entry: AppEntry): String = when (entry) {
     AppEntry.Messages -> "messages/messages"
     AppEntry.Terminal -> "terminal/terminal"
     AppEntry.Claude -> "claude/claude"
+    AppEntry.Hermes -> "hermes/hermes"
     AppEntry.Meetings -> "meetings/meetings"
-    AppEntry.Survey -> "survey/survey"
 }
 
 private fun appContentType(entry: AppEntry): String = when (entry) {
@@ -345,8 +357,8 @@ private fun appContentType(entry: AppEntry): String = when (entry) {
     AppEntry.Messages -> "messages"
     AppEntry.Terminal -> "terminal"
     AppEntry.Claude -> "claude"
+    AppEntry.Hermes -> "hermes"
     AppEntry.Meetings -> "meetings"
-    AppEntry.Survey -> "survey"
 }
 
 class FolderShape : androidx.compose.ui.graphics.Shape {
@@ -363,24 +375,24 @@ class FolderShape : androidx.compose.ui.graphics.Shape {
         val tabH = h * 0.22f
 
         val path = androidx.compose.ui.graphics.Path().apply {
-            moveTo(0f, r)
+            moveTo(0f, tabH + r)
             arcTo(
-                rect = androidx.compose.ui.geometry.Rect(0f, 0f, r * 2, r * 2),
+                rect = androidx.compose.ui.geometry.Rect(0f, tabH, r * 2, tabH + r * 2),
                 startAngleDegrees = 180f,
                 sweepAngleDegrees = 90f,
                 forceMoveTo = false,
             )
-            lineTo(tabW - tr, 0f)
+            lineTo(w - tabW, tabH)
+            lineTo(w - tabW, tr)
             arcTo(
-                rect = androidx.compose.ui.geometry.Rect(tabW - tr * 2, 0f, tabW, tr * 2),
-                startAngleDegrees = 270f,
+                rect = androidx.compose.ui.geometry.Rect(w - tabW, 0f, w - tabW + tr * 2, tr * 2),
+                startAngleDegrees = 180f,
                 sweepAngleDegrees = 90f,
                 forceMoveTo = false,
             )
-            lineTo(tabW, tabH)
-            lineTo(w - r, tabH)
+            lineTo(w - r, 0f)
             arcTo(
-                rect = androidx.compose.ui.geometry.Rect(w - r * 2, tabH, w, tabH + r * 2),
+                rect = androidx.compose.ui.geometry.Rect(w - r * 2, 0f, w, r * 2),
                 startAngleDegrees = 270f,
                 sweepAngleDegrees = 90f,
                 forceMoveTo = false,
@@ -418,9 +430,9 @@ fun FolderTray(modifier: Modifier = Modifier) {
     ) {
         androidx.compose.foundation.layout.Column(
             verticalArrangement = Arrangement.spacedBy(2.dp),
-            horizontalAlignment = Alignment.Start,
+            horizontalAlignment = Alignment.End,
             modifier = Modifier
-                .align(Alignment.BottomStart)
+                .align(Alignment.BottomEnd)
                 .padding(start = 18.dp, bottom = 18.dp, end = 18.dp),
         ) {
             Text(

@@ -111,6 +111,15 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private var audioManager: AudioManager? = null
 
     private val openClawPrefs by lazy { OpenClawPrefs.get(this) }
+    private val hermesPrefs by lazy { com.r1.launcher.hermes.HermesPrefs.get(this) }
+    private val hermesClient by lazy { com.r1.launcher.hermes.HermesClient(hermesPrefs) }
+    /** In-flight Hermes TTS download/playback — separate slot from the OpenClaw
+     *  TTS pipeline so the two apps don't fight over playback state. */
+    private var hermesTtsCall: okhttp3.Call? = null
+    private var hermesSpeechPlayer: MediaPlayer? = null
+    private var hermesSpeechCurrentFile: File? = null
+    private var hermesSpeakNextAssistant = false
+    private var hermesLastSpokenKey = ""
     private val soundPrefs by lazy { com.r1.launcher.sound.SoundPrefs.get(this) }
     private val wifiSharePrefs by lazy { com.r1.launcher.wifishare.WifiSharePrefs.get(this) }
     private var wifiShareTimerEndMs: Long = 0L
@@ -161,16 +170,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private var voiceCapture: com.r1.launcher.voice.StreamingAudioCapture? = null
     private var voiceSession: com.r1.launcher.voice.ElevenLabsRealtimeClient? = null
     /** Which sink to deliver the STT transcript to. */
-    private enum class VoiceSink { CHAT, TERMINAL, CLAUDE }
+    private enum class VoiceSink { CHAT, TERMINAL, CLAUDE, HERMES_CHAT }
     private var voiceSink: VoiceSink? = null
 
     // --- meetings (transcriber) ---
     private val transcriberPrefs by lazy { TranscriberPrefs.get(this) }
     private val meetingStore by lazy { MeetingStore.get(this) }
-
-    // --- survey call bot ---
-    private val surveyPrefs by lazy { com.r1.launcher.survey.SurveyPrefs.get(this) }
-    private val surveyStore by lazy { com.r1.launcher.survey.SurveyStore.get(this) }
     private var transcriberBinder: TranscriberRecordingService.LocalBinder? = null
     private var transcriberServiceBound: Boolean = false
     private var transcriberCurrentMeeting: Meeting? = null
@@ -284,6 +289,30 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
     }
 
+    // adb-installable Hermes URL + bearer receiver:
+    //   adb shell "am broadcast -a com.r1.launcher.SET_HERMES_CONFIG \
+    //     --es url 'https://hermes.example/v1' --es key 'sk-r1-...'"
+    // Both extras optional — pass one or both. The bearer token is 70 chars
+    // and pasting it via the round-screen RetroKeyboard is impractical.
+    private val hermesConfigRx = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent?) {
+            val url = i?.getStringExtra("url")?.trim().orEmpty()
+            val key = i?.getStringExtra("key")?.trim().orEmpty()
+            if (url.isEmpty() && key.isEmpty()) {
+                toastFail("hermes: pass --es url and/or --es key")
+                return
+            }
+            if (url.isNotEmpty()) hermesPrefs.serverUrl = url
+            if (key.isNotEmpty()) hermesPrefs.apiKey = key
+            hydrateHermesStateFromPrefs()
+            val parts = buildList {
+                if (url.isNotEmpty()) add("url")
+                if (key.isNotEmpty()) add("key")
+            }
+            toastSuccess("hermes ${parts.joinToString("+")} saved")
+        }
+    }
+
     // SmsReceiver writes incoming SMS to SmsCache and fires this local broadcast
     // so the messages panel can refresh without polling.
     private val smsLocalRx = object : BroadcastReceiver() {
@@ -334,12 +363,20 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         ensurePhonePerm()
 
         // UI click cues live on STREAM_SYSTEM so the "speaker" slider (which
-        // governs STREAM_MUSIC for TTS / media) doesn't bleed into them. The
-        // "ui sound" slider is a software gain on soundPool.play(), so we want
-        // STREAM_SYSTEM held at max — otherwise we'd be attenuating twice.
-        tone = runCatching {
-            ToneGenerator(AudioManager.STREAM_SYSTEM, 100)
-        }.getOrNull()
+        // governs STREAM_MUSIC for TTS / media) doesn't bleed into them.
+        // STREAM_SYSTEM is held at max below; the per-call ToneGenerator volume
+        // (0-100) is rebuilt from the user's "system sound" slider via
+        // rebuildTone(), called here and again from setUiVolume /
+        // toggleUiSoundEnabled. The PTT recording cue used to fire this at
+        // hardcoded max on top of the slider-scaled mp3, which is what made
+        // long-press side-button beeps louder than every other UI sound.
+        // Hydrate UI-sound prefs first so the very first rebuildTone() picks
+        // up the user's saved level (seedSettingsLevels only runs on Settings
+        // open, which can be after the user's first long-press).
+        state.uiVolumeMax = com.r1.launcher.sound.SoundPrefs.MAX_UI_LEVEL
+        state.uiVolumeLevel = soundPrefs.uiVolumeLevel
+        state.uiSoundEnabled = soundPrefs.uiSoundEnabled
+        rebuildTone()
 
         val attrs = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
@@ -400,6 +437,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
         state.openClawHideChat = openClawPrefs.hideChat
         state.chatFontSize = openClawPrefs.chatFontSize
+        hydrateHermesStateFromPrefs()
         // Hydrate global voice state from prefs.
         state.voiceEnabled = voicePrefs.enabled
         state.voiceId = voicePrefs.voiceId
@@ -459,8 +497,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.apps.add(AppEntry.OpenClaw)
         state.apps.add(AppEntry.Terminal)
         state.apps.add(AppEntry.Claude)
+        state.apps.add(AppEntry.Hermes)
         state.apps.add(AppEntry.Meetings)
-        state.apps.add(AppEntry.Survey)
         state.apps.add(AppEntry.Settings)
         state.appsLoaded = true
         if (state.appsFocus >= state.apps.size) state.appsFocus = 0
@@ -504,6 +542,13 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             registerReceiver(voiceKeyRx, keyFilter)
         }
 
+        val hermesCfgFilter = IntentFilter("com.r1.launcher.SET_HERMES_CONFIG")
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(hermesConfigRx, hermesCfgFilter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(hermesConfigRx, hermesCfgFilter)
+        }
+
         val smsLocalFilter = IntentFilter(com.r1.launcher.messages.SmsReceiver.ACTION_NEW_SMS_LOCAL)
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(smsLocalRx, smsLocalFilter, Context.RECEIVER_NOT_EXPORTED)
@@ -537,11 +582,13 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         // automatically, which would otherwise complete and send after
         // the user has left the app.
         if (state.chatRecording) runCatching { openClawRecordStop() }
+        if (state.hermesRecording) runCatching { hermesRecordStop() }
         ui.removeCallbacks(tick)
         runCatching { unregisterReceiver(netRx) }
         runCatching { unregisterReceiver(batteryRx) }
         runCatching { unregisterReceiver(packageRx) }
         runCatching { unregisterReceiver(voiceKeyRx) }
+        runCatching { unregisterReceiver(hermesConfigRx) }
         runCatching { unregisterReceiver(smsLocalRx) }
         runCatching { unregisterReceiver(webToggleRx) }
         runCatching { telephony?.listen(phoneListener, PhoneStateListener.LISTEN_NONE) }
@@ -566,6 +613,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         openClawTtsCall = null
         runCatching { openClawSpeechPlayer?.release() }
         openClawSpeechPlayer = null
+        runCatching { cancelHermesSpeech() }
+        runCatching { hermesClient.cancel() }
         // Stop transcriber playback but DO NOT stop the FGS — if a meeting is
         // recording when the user kills the launcher, we want it to keep going
         // until they explicitly stop it. Just unbind from our side.
@@ -737,16 +786,43 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 // a background thread.
                 refreshClaudeAuthFlag()
             }
+            AppEntry.Hermes -> {
+                selectTone()
+                hydrateHermesStateFromPrefs()
+                if (hermesPrefs.hasConfig()) {
+                    state.openHermesChat()
+                    hermesTestConnection()
+                } else {
+                    state.openHermesConfig(fromChat = false)
+                }
+            }
             AppEntry.Meetings -> {
                 selectTone()
                 transcriberOpen()
             }
-            AppEntry.Survey -> {
-                selectTone()
-                surveyOpen()
-            }
             null -> Unit
         }
+    }
+
+    private fun hydrateHermesStateFromPrefs() {
+        state.hermesServerUrl = hermesPrefs.serverUrl
+        val key = hermesPrefs.apiKey
+        state.hermesApiKeyTail = if (key.length > 6) "…" + key.takeLast(4) else if (key.isNotEmpty()) "set" else ""
+        state.hermesModel = hermesPrefs.model
+        state.hermesFontSize = hermesPrefs.fontSize
+        state.hermesHideChat = hermesPrefs.hideChat
+        state.hermesServerUrlInput = hermesPrefs.serverUrl
+        state.hermesApiKeyInput = ""
+        if (state.hermesMessages.isEmpty()) {
+            val persisted = com.r1.launcher.hermes.HermesHistoryStore.load(this)
+            if (persisted.isNotEmpty()) {
+                state.hermesMessages.addAll(persisted)
+            }
+        }
+    }
+
+    private fun persistHermesHistory() {
+        com.r1.launcher.hermes.HermesHistoryStore.save(this, state.hermesMessages.toList())
     }
 
     private fun openClawStartSession() {
@@ -1304,6 +1380,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         // UI feedback volume comes from our own pref — independent of STREAM_MUSIC.
         state.uiVolumeMax = com.r1.launcher.sound.SoundPrefs.MAX_UI_LEVEL
         state.uiVolumeLevel = soundPrefs.uiVolumeLevel
+        state.uiSoundEnabled = soundPrefs.uiSoundEnabled
     }
 
     private fun ensureWriteSettingsGrant(): Boolean {
@@ -1352,6 +1429,13 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         val clamped = level.coerceIn(0, com.r1.launcher.sound.SoundPrefs.MAX_UI_LEVEL)
         state.uiVolumeLevel = clamped
         soundPrefs.uiVolumeLevel = clamped
+        rebuildTone()
+    }
+
+    override fun toggleUiSoundEnabled(enabled: Boolean) {
+        state.uiSoundEnabled = enabled
+        soundPrefs.uiSoundEnabled = enabled
+        rebuildTone()
     }
 
     override fun lockScreen() {
@@ -1828,6 +1912,16 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }.start()
     }
 
+    override fun resetCameraMotor() {
+        // Uses R1Motor.calibrateMotorToHome — a deliberately-slow ladder
+        // with 250 ms settles and a double-write at FACE, the same pattern
+        // we know works manually. The fast chunked path used by regular
+        // motor writes isn't reliable enough to recover an already-drifted
+        // lens.
+        toast("resetting camera…")
+        com.r1.launcher.ui.calibrateMotorToHome()
+    }
+
     private fun sendToCarroot(cmd: String): Boolean = try {
         Socket().use { s ->
             s.connect(InetSocketAddress("127.0.0.1", 1337), 1500)
@@ -1995,6 +2089,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         // also save credits depending on ElevenLabs' refund behavior for
         // cancelled streams).
         cancelOpenClawSpeech()
+        cancelHermesSpeech()
         voiceSink = sink
         when (sink) {
             VoiceSink.CHAT -> {
@@ -2010,6 +2105,11 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 state.claudeRecording = true
                 state.claudePartial = ""
             }
+            VoiceSink.HERMES_CHAT -> {
+                state.hermesRecording = true
+                state.hermesPartialText = ""
+                state.hermesInputLevel = 0
+            }
         }
         playRecordStartTone()
 
@@ -2021,6 +2121,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                         VoiceSink.CHAT -> state.chatPartialText = text
                         VoiceSink.TERMINAL -> state.terminalPartial = text
                         VoiceSink.CLAUDE -> state.claudePartial = text
+                        VoiceSink.HERMES_CHAT -> state.hermesPartialText = text
                     }
                 }
             },
@@ -2051,6 +2152,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 }
                 override fun onLevel(levelPct: Int) {
                     if (sink == VoiceSink.CHAT) state.chatInputLevel = levelPct
+                    else if (sink == VoiceSink.HERMES_CHAT) state.hermesInputLevel = levelPct
                 }
                 override fun onError(msg: String) {
                     ui.post {
@@ -2077,6 +2179,10 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             }
             VoiceSink.TERMINAL -> state.terminalRecording = false
             VoiceSink.CLAUDE -> state.claudeRecording = false
+            VoiceSink.HERMES_CHAT -> {
+                state.hermesRecording = false
+                state.hermesInputLevel = 0
+            }
             null -> {}
         }
         playRecordStopTone()
@@ -2101,6 +2207,11 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             VoiceSink.CLAUDE -> {
                 state.claudeRecording = false
                 state.claudePartial = ""
+            }
+            VoiceSink.HERMES_CHAT -> {
+                state.hermesRecording = false
+                state.hermesPartialText = ""
+                state.hermesInputLevel = 0
             }
             null -> {}
         }
@@ -2127,6 +2238,10 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     state.claudeInput = if (state.claudeInput.isBlank()) clean
                         else state.claudeInput.trimEnd() + " " + clean
                 }
+            }
+            VoiceSink.HERMES_CHAT -> {
+                state.hermesPartialText = ""
+                if (clean.isNotEmpty()) hermesSendText(clean)
             }
         }
         voiceSession = null
@@ -2743,24 +2858,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     // --- LauncherHost: openclaw ---
 
     override fun openClawScanned(raw: String) {
-        if (state.qrScanMode == QrScanMode.OPENAI_KEY) {
-            // Note: enum name kept for back-compat; this branch now scans the
-            // ElevenLabs voice key from QR.
-            val k = raw.trim()
-            if (!isValidElevenKey(k)) {
-                state.qrError = "Not an elevenlabs key"
-                return
-            }
-            voicePrefs.elevenlabsKey = k
-            refreshVoiceKeyState()
-            state.qrError = null
-            selectTone()
-            toast("voice key saved via QR")
-            // Bounce back to the Settings → Voice panel where the user came from.
-            state.qrScanMode = QrScanMode.GATEWAY_PAIRING
-            state.openSettingsVoice()
-            return
-        }
         val code = decodeGatewaySetupCode(raw) ?: run {
             state.qrError = "QR not recognised"
             return
@@ -2852,6 +2949,295 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.chatScrollIndex--
     }
 
+    // -------- Hermes Agent --------
+
+    override fun hermesSendText(text: String) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
+        if (!hermesPrefs.hasConfig()) {
+            toastFail("hermes: configure server url first")
+            return
+        }
+        val userMsg = com.r1.launcher.hermes.HermesMessage(role = "user", text = trimmed)
+        state.hermesMessages.add(userMsg)
+        trimHermesMessages()
+        persistHermesHistory()
+        state.hermesScrollIndex = 0
+        state.hermesStreamingText = ""
+        state.hermesBusy = true
+        state.hermesStatus = "streaming"
+
+        // Arm TTS auto-readback so the next committed assistant message reads aloud
+        // (matches the OpenClaw chat pattern). Cancel any prior playback so back-to-back
+        // turns don't stack audio.
+        if (state.voiceEnabled && state.panel == Panel.HERMES_CHAT) {
+            cancelHermesSpeech()
+            hermesSpeakNextAssistant = true
+        }
+
+        val history = state.hermesMessages.toList()
+        hermesClient.streamChat(
+            history = history,
+            onDelta = { delta ->
+                ui.post {
+                    state.hermesStreamingText = state.hermesStreamingText + delta
+                }
+            },
+            onDone = { full ->
+                ui.post {
+                    state.hermesStreamingText = ""
+                    state.hermesBusy = false
+                    if (full.isNotBlank()) {
+                        state.hermesMessages.add(
+                            com.r1.launcher.hermes.HermesMessage(role = "assistant", text = full)
+                        )
+                        trimHermesMessages()
+                        persistHermesHistory()
+                        state.hermesScrollIndex = 0
+                        state.hermesStatus = "live"
+                        speakLatestHermesAssistantIfNeeded()
+                    } else {
+                        state.hermesStatus = "idle"
+                    }
+                }
+            },
+            onError = { msg ->
+                ui.post {
+                    state.hermesStreamingText = ""
+                    state.hermesBusy = false
+                    state.hermesStatus = "error: $msg"
+                    state.hermesMessages.add(
+                        com.r1.launcher.hermes.HermesMessage(role = "error", text = msg)
+                    )
+                    trimHermesMessages()
+                    persistHermesHistory()
+                    state.hermesScrollIndex = 0
+                }
+            },
+        )
+    }
+
+    private fun trimHermesMessages() {
+        val over = state.hermesMessages.size - state.hermesMessagesMax
+        if (over > 0) repeat(over) { state.hermesMessages.removeAt(0) }
+    }
+
+    override fun hermesRecordStart() {
+        if (!hermesPrefs.hasConfig()) {
+            toastFail("hermes: configure server url first")
+            return
+        }
+        startVoiceCapture(VoiceSink.HERMES_CHAT)
+    }
+
+    override fun hermesRecordStop() = stopVoiceCapture()
+
+    override fun hermesScrollUp() {
+        state.hermesScrollIndex++
+    }
+
+    override fun hermesScrollDown() {
+        state.hermesScrollIndex--
+    }
+
+    override fun hermesClearHistory() {
+        cancelHermesSpeech()
+        hermesClient.cancel()
+        state.hermesMessages.clear()
+        com.r1.launcher.hermes.HermesHistoryStore.clear(this)
+        state.hermesStreamingText = ""
+        state.hermesBusy = false
+        state.hermesStatus = "idle"
+        hermesPrefs.rotateSessionId()
+    }
+
+    override fun hermesTestConnection() {
+        if (!hermesPrefs.hasConfig()) {
+            state.hermesStatus = "error: no url"
+            toastFail("hermes: configure server url first")
+            return
+        }
+        state.hermesStatus = "connecting"
+        hermesClient.testConnection { ok, msg ->
+            ui.post {
+                state.hermesStatus = if (ok) "live" else "error: $msg"
+                if (!ok) toastFail("hermes: $msg")
+            }
+        }
+    }
+
+    override fun hermesConfigRowActivate(idx: Int) {
+        // 0=back, 1=url, 2=key, 3=scan QR, 4=speak replies, 5=hide text input, 6=test
+        when (idx) {
+            0 -> {
+                state.back()
+                backTone()
+            }
+            1 -> {
+                state.hermesServerUrlInput = hermesPrefs.serverUrl
+                // RetroKeyboard is rendered inline in HermesConfigPanel; tapping
+                // the row toggles the keyboard. This is just feedback.
+                popTone()
+            }
+            2 -> {
+                state.hermesApiKeyInput = ""
+                popTone()
+            }
+            3 -> {
+                openHermesQr()
+                popTone()
+            }
+            4 -> {
+                // Shared with the global "speak replies" flag in Settings → Voice
+                // and the OpenClaw inline toggle; same VoicePrefs.enabled.
+                voiceToggleEnabled()
+                popTone()
+            }
+            5 -> {
+                val newHide = !state.hermesHideChat
+                state.hermesHideChat = newHide
+                hermesPrefs.hideChat = newHide
+                popTone()
+            }
+            6 -> {
+                hermesTestConnection()
+                popTone()
+            }
+        }
+    }
+
+    override fun openHermesQr() {
+        ensureCameraPerm()
+        state.openHermesQr()
+    }
+
+    override fun hermesScanned(raw: String) {
+        val code = com.r1.launcher.hermes.decodeHermesSetupCode(raw) ?: run {
+            state.hermesQrError = "QR not recognised"
+            return
+        }
+        hermesPrefs.serverUrl = code.url
+        code.key?.let { hermesPrefs.apiKey = it }
+        hydrateHermesStateFromPrefs()
+        state.back()                  // HERMES_QR → HERMES_CONFIG
+        hermesTestConnection()         // green dot updates without an extra tap
+        toastSuccess("hermes paired")
+    }
+
+    override fun hermesSetServerUrl(value: String) {
+        hermesPrefs.serverUrl = value
+        hydrateHermesStateFromPrefs()
+        toast("hermes: url saved")
+    }
+
+    override fun hermesSetApiKey(value: String) {
+        hermesPrefs.apiKey = value
+        hydrateHermesStateFromPrefs()
+        toast(if (value.isBlank()) "hermes: key cleared" else "hermes: key saved")
+    }
+
+override fun hermesPasteServerUrlFromClipboard() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val raw = cm?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()?.trim().orEmpty()
+        if (raw.isBlank()) {
+            toastFail("clipboard empty")
+            return
+        }
+        state.hermesServerUrlInput = raw
+        hermesSetServerUrl(raw)
+    }
+
+    override fun hermesPasteApiKeyFromClipboard() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val raw = cm?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()?.trim().orEmpty()
+        if (raw.isBlank()) {
+            toastFail("clipboard empty")
+            return
+        }
+        state.hermesApiKeyInput = raw
+        hermesSetApiKey(raw)
+    }
+
+    private fun speakLatestHermesAssistantIfNeeded() {
+        if (!state.voiceEnabled || state.panel != Panel.HERMES_CHAT || !hermesSpeakNextAssistant) return
+        val msg = state.hermesMessages.lastOrNull { it.role == "assistant" && it.text.isNotBlank() } ?: return
+        val key = "${msg.timestamp}:${msg.text.hashCode()}"
+        if (key == hermesLastSpokenKey) return
+        val apiKey = voicePrefs.elevenlabsKey
+        if (apiKey.isNullOrBlank()) {
+            toastFail("voice: set elevenlabs key in settings → voice")
+            hermesSpeakNextAssistant = false
+            return
+        }
+        hermesLastSpokenKey = key
+        hermesSpeakNextAssistant = false
+        cancelHermesSpeech()
+        val cleanText = stripMarkdownForTts(msg.text)
+        if (cleanText.isBlank()) return
+        val outFile = File(File(cacheDir, "hermes-voice").apply { mkdirs() }, "assistant.mp3")
+        hermesTtsCall = com.r1.launcher.voice.ElevenLabsTtsClient.synthesize(
+            text = cleanText,
+            apiKey = apiKey,
+            voiceId = voicePrefs.effectiveVoiceId(),
+            model = voicePrefs.model,
+            tuning = voicePrefs.tuning(),
+            outFile = outFile,
+        ) { mp3Bytes, err ->
+            hermesTtsCall = null
+            if (err == "canceled") return@synthesize
+            if (err != null || mp3Bytes == null) {
+                toastFail("voice: ${err ?: "no audio"}")
+                return@synthesize
+            }
+            playHermesSpeech(outFile)
+        }
+    }
+
+    private fun playHermesSpeech(file: File) {
+        runCatching { hermesSpeechPlayer?.release() }
+        val mp = MediaPlayer()
+        runCatching {
+            mp.setAudioAttributes(
+                android.media.AudioAttributes.Builder()
+                    .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            mp.setDataSource(file.absolutePath)
+            mp.setOnCompletionListener {
+                runCatching { it.release() }
+                if (hermesSpeechPlayer === mp) hermesSpeechPlayer = null
+                if (hermesSpeechCurrentFile === file) {
+                    runCatching { file.delete() }
+                    hermesSpeechCurrentFile = null
+                }
+            }
+            mp.setOnErrorListener { player, _, _ ->
+                runCatching { player.release() }
+                if (hermesSpeechPlayer === player) hermesSpeechPlayer = null
+                true
+            }
+            mp.prepare()
+            hermesSpeechPlayer = mp
+            hermesSpeechCurrentFile = file
+            mp.start()
+        }.onFailure {
+            runCatching { mp.release() }
+            hermesSpeechPlayer = null
+            hermesSpeechCurrentFile = null
+        }
+    }
+
+    private fun cancelHermesSpeech() {
+        runCatching { hermesTtsCall?.cancel() }
+        hermesTtsCall = null
+        runCatching { hermesSpeechPlayer?.stop() }
+        runCatching { hermesSpeechPlayer?.release() }
+        hermesSpeechPlayer = null
+        runCatching { hermesSpeechCurrentFile?.delete() }
+        hermesSpeechCurrentFile = null
+    }
+
     override fun openClawCloseSession() {
         openClawCloseSessionInternal()
     }
@@ -2921,34 +3307,28 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         //   0  back
         //   1  voice on/off
         //   2  elevenlabs key  (handled inline by the panel's keyboard overlay)
-        //   3  scan key from qr
-        //   4  subscription (tap = force-refresh balance)
-        //   5  voice picker (cycle catalog)
-        //   6  custom voice id (handled inline by the panel's keyboard overlay)
-        //   7  test voice
-        //   8  tuning (opens SETTINGS_VOICE_TUNING)
-        //   9  clear key
+        //   3  subscription (tap = force-refresh balance)
+        //   4  voice picker (cycle catalog)
+        //   5  custom voice id (handled inline by the panel's keyboard overlay)
+        //   6  test voice
+        //   7  tuning (opens SETTINGS_VOICE_TUNING)
+        //   8  clear key
         when (idx) {
             0 -> { state.back(); backTone() }
             1 -> voiceToggleEnabled()
             // 2 handled by the panel's keyboard overlay
             3 -> {
-                ensureCameraPerm()
-                state.openOpenAiKeyQr() // QR scan path is reused — see openClawScanned
-                selectTone()
-            }
-            4 -> {
                 state.openSettingsVoiceSubscription()
                 // Auto-fetch on entry; honors the 60s cache so re-entering
                 // the page in quick succession doesn't re-hit the API.
                 voiceFetchSubscription(force = false)
                 selectTone()
             }
-            5 -> voiceCycleVoiceId()
-            // 6 handled by the panel's keyboard overlay
-            7 -> voiceTestSynthesize()
-            8 -> { state.openSettingsVoiceTuning(); selectTone() }
-            9 -> voiceClearKey()
+            4 -> voiceCycleVoiceId()
+            // 5 handled by the panel's keyboard overlay
+            6 -> voiceTestSynthesize()
+            7 -> { state.openSettingsVoiceTuning(); selectTone() }
+            8 -> voiceClearKey()
         }
     }
 
@@ -3196,22 +3576,18 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     override fun openClawClearContext() {
-        val session = openClawSession ?: run { toastFail("not connected"); return }
-        val key = state.selectedSessionKey
-        if (key.isBlank()) { toastFail("no session"); return }
-        // Optimistic local clear so the UI flips empty immediately. The
-        // gateway round-trip refreshes via onHistory if it succeeds, or
-        // we'll see a toast if it fails (server still has the messages).
-        state.chatMessages.clear()
-        state.chatStreamingText = ""
-        state.chatScrollIndex = 0
-        toast("clearing context…")
-        session.resetSession(key) { ok, err ->
-            ui.post {
-                if (ok) toastSuccess("context cleared")
-                else toastFail(err ?: "clear failed")
-            }
-        }
+        if (openClawSession == null) { toastFail("not connected"); return }
+        // Upstream `sessions.reset` is operator.admin-scoped (core-descriptors
+        // line 141), which the bootstrap pairing profile doesn't grant — the
+        // RPC always returns "unauthorized role" / "missing scope" for this
+        // client class. Mirror the "+ new thread" flow instead: pick a fresh
+        // unused thread key and switch to it. chat.subscribe lazy-creates
+        // server-side (operator.write, allowed). The previous thread lingers
+        // on the gateway but the user gets the empty-transcript UX they
+        // expected from "clear".
+        val newKey = "thread-${System.currentTimeMillis()}"
+        openClawSwitchSession(newKey)
+        toastSuccess("context cleared")
     }
 
     override fun openClawSessionsRowActivate(idx: Int) {
@@ -3543,6 +3919,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     private fun uiSoundGain(): Float {
+        if (!state.uiSoundEnabled) return 0f
         val max = state.uiVolumeMax.coerceAtLeast(1).toFloat()
         return (state.uiVolumeLevel.toFloat() / max).coerceIn(0f, 1f)
     }
@@ -3566,11 +3943,26 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     private fun playTone(type: Int, durationMs: Int) {
+        if (!state.uiSoundEnabled) return
         val t = tone ?: return
         runCatching {
             t.stopTone()
             t.startTone(type, durationMs)
         }
+    }
+
+    /** Rebuild `tone` with a volume scaled to the user's system-sound slider.
+     *  ToneGenerator volume is set at construction (0-100) and immutable
+     *  thereafter, so any slider/toggle change has to swap the instance. Called
+     *  from onCreate, setUiVolume, and toggleUiSoundEnabled. */
+    private fun rebuildTone() {
+        runCatching { tone?.release() }
+        tone = null
+        if (!state.uiSoundEnabled) return
+        val max = state.uiVolumeMax.coerceAtLeast(1)
+        val pct = (state.uiVolumeLevel * 100 / max).coerceIn(0, 100)
+        if (pct == 0) return
+        tone = runCatching { ToneGenerator(AudioManager.STREAM_SYSTEM, pct) }.getOrNull()
     }
 
 
@@ -3581,6 +3973,9 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
         if (state.panel == Panel.OPENCLAW_CHAT && isOpenClawPttKey(code)) {
             return handleOpenClawPttKey(event)
+        }
+        if (state.panel == Panel.HERMES_CHAT && isOpenClawPttKey(code)) {
+            return handleHermesPttKey(event)
         }
 
         // Side button is remapped from KEY_POWER (116) → BUTTON_1 in the keylayout
@@ -3708,6 +4103,29 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 if (openClawPttKeyCode == event.keyCode) {
                     openClawPttKeyCode = KeyEvent.KEYCODE_UNKNOWN
                     if (!canceled) openClawRecordStop()
+                }
+                return true
+            }
+        }
+        return true
+    }
+
+    private var hermesPttKeyCode: Int = KeyEvent.KEYCODE_UNKNOWN
+
+    private fun handleHermesPttKey(event: KeyEvent): Boolean {
+        val canceled = (event.flags and KeyEvent.FLAG_CANCELED) != 0
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0) {
+                    hermesPttKeyCode = event.keyCode
+                    hermesRecordStart()
+                }
+                return true
+            }
+            KeyEvent.ACTION_UP -> {
+                if (hermesPttKeyCode == event.keyCode) {
+                    hermesPttKeyCode = KeyEvent.KEYCODE_UNKNOWN
+                    if (!canceled) hermesRecordStop()
                 }
                 return true
             }
@@ -4173,712 +4591,4 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
     }
 
-    // --- survey call bot ---
-
-    private fun refreshSurveyDisplayState() {
-        state.hasOpenAiKey = surveyPrefs.hasOpenAiKey()
-        state.openAiKeyTail = surveyPrefs.openAiKey?.takeLast(4) ?: ""
-        state.hasSipCreds = surveyPrefs.hasSipCreds()
-        state.sipHostDisplay = surveyPrefs.sipHost.orEmpty()
-        state.sipUserDisplay = surveyPrefs.sipUser.orEmpty()
-        state.sipFromDisplay = surveyPrefs.sipFromNumber.orEmpty()
-        state.realtimeVoiceDisplay = surveyPrefs.realtimeVoice
-        state.summarizerModelDisplay = surveyPrefs.summarizerModel
-        state.surveyConsentTextDisplay = surveyPrefs.consentText
-        state.surveyEmailRecipientDisplay = surveyPrefs.emailRecipient.orEmpty()
-    }
-
-    private fun reloadSurveysAndCampaigns() {
-        val s = surveyStore.listSurveys()
-        state.surveys.clear(); state.surveys.addAll(s)
-        val c = surveyStore.listCampaigns()
-        state.campaigns.clear(); state.campaigns.addAll(c)
-        val r = surveyStore.listCallRecords()
-        state.callRecords.clear(); state.callRecords.addAll(r)
-    }
-
-    override fun surveyOpen() {
-        refreshSurveyDisplayState()
-        reloadSurveysAndCampaigns()
-        state.openSurveyList()
-    }
-
-    override fun surveyOpenCampaign() {
-        state.currentSurveyId = state.surveys.firstOrNull()?.id
-        state.openSurveyCampaign()
-    }
-
-    override fun surveyConfirmCampaignAndDial() {
-        val cid = state.currentCampaignId ?: run {
-            toastFail("no campaign selected")
-            return
-        }
-        surveyStartCampaignById(cid)
-    }
-
-    override fun surveyHangup() {
-        val sess = surveyActiveSession
-        if (sess != null) {
-            sess.hangup()
-        } else {
-            state.surveyCallActive = false
-            state.surveyCallStatus = "ended"
-        }
-        // Pause the campaign so the loop doesn't dial the next contact after
-        // the user explicitly hung up.
-        state.currentCampaignId?.let { cid ->
-            surveyStore.loadCampaign(cid)?.let {
-                if (it.status == com.r1.launcher.survey.CampaignStatus.RUNNING) {
-                    surveyStore.saveCampaign(it.copy(
-                        status = com.r1.launcher.survey.CampaignStatus.PAUSED,
-                        updatedAtMs = System.currentTimeMillis(),
-                    ))
-                    reloadSurveysAndCampaigns()
-                }
-            }
-        }
-    }
-
-    override fun surveyOpenDetail(callRecordId: String) {
-        state.openSurveyDetail(callRecordId)
-    }
-
-    override fun surveyDeleteCallRecord(callRecordId: String) {
-        surveyStore.deleteCallRecord(callRecordId)
-        reloadSurveysAndCampaigns()
-    }
-
-    override fun surveyEmailCallRecord(callRecordId: String) {
-        runSurveyPostCallPipeline(callRecordId, forceSummary = false, email = true)
-    }
-
-    override fun surveyRetrySummary(callRecordId: String) {
-        runSurveyPostCallPipeline(callRecordId, forceSummary = true, email = false)
-    }
-
-    override fun surveyHandleCallComplete(callRecordId: String) {
-        // Entry from the SIP / orchestrator path once the call ends. Auto-runs
-        // summary + email so the user gets the artifact without touching the UI.
-        runSurveyPostCallPipeline(callRecordId, forceSummary = false, email = true)
-    }
-
-    /**
-     * Post-call pipeline. Runs on the shared [transcriberExecutor] (single
-     * thread is fine — survey calls are sequential):
-     *   1. Load the record.
-     *   2. If [forceSummary] or no summary on file → call [SummaryGenerator],
-     *      persist the result back to the record.
-     *   3. If [email] → SMTP-send the call as an audio + transcript + answers
-     *      attachment trio, using the survey-specific recipient when set,
-     *      falling back to the transcriber default recipient.
-     *
-     * All toasts are dispatched back to the UI thread; the executor itself
-     * never touches Compose state directly.
-     */
-    private fun runSurveyPostCallPipeline(
-        recordId: String,
-        forceSummary: Boolean,
-        email: Boolean,
-    ) {
-        val rec0 = surveyStore.loadCallRecord(recordId) ?: run {
-            toastFail("call record missing")
-            return
-        }
-        val recipient = surveyPrefs.emailRecipient
-            ?.takeIf { it.isNotBlank() }
-            ?: transcriberPrefs.defaultRecipient.takeIf { it.isNotBlank() }
-            .orEmpty()
-        if (email && !transcriberPrefs.hasSmtp()) {
-            toastFail("set smtp creds in meetings → settings")
-            return
-        }
-        if (email && recipient.isBlank()) {
-            toastFail("set survey email recipient first")
-            return
-        }
-        if (email) state.showToast("emailing survey…", com.r1.launcher.ToastKind.INFO)
-        else state.showToast("summarizing…", com.r1.launcher.ToastKind.INFO)
-        transcriberExecutor.submit {
-            // ---- summary ----
-            val rec = if (forceSummary || rec0.summary.isNullOrBlank()) {
-                runSurveySummary(rec0)
-            } else rec0
-
-            // ---- email ----
-            if (!email) {
-                ui.post {
-                    if (rec.summary.isNullOrBlank()) toastFail("summary failed")
-                    else state.showToast("summary updated", com.r1.launcher.ToastKind.SUCCESS)
-                }
-                return@submit
-            }
-            val survey = surveyStore.loadSurvey(rec.surveyId)
-            val payload = buildSurveyEmailPayload(rec, survey, recipient)
-            val sender = SmtpSender(transcriberPrefs)
-            val result = sender.sendGeneric(payload)
-            ui.post {
-                when (result) {
-                    is SmtpSender.Result.Success ->
-                        state.showToast(
-                            "emailed survey to ${recipient.take(28)}",
-                            com.r1.launcher.ToastKind.SUCCESS,
-                        )
-                    is SmtpSender.Result.Failure ->
-                        toastFail("email failed: ${result.message.take(60)}")
-                }
-            }
-        }
-    }
-
-    /** Runs [SummaryGenerator] for one [CallRecord] and writes the result back
-     *  to the store. Returns the record (updated if the summary succeeded,
-     *  original on any failure — the email still goes out either way). */
-    private fun runSurveySummary(rec: com.r1.launcher.survey.CallRecord): com.r1.launcher.survey.CallRecord {
-        val model = surveyPrefs.summarizerModel
-        val key = when {
-            model.startsWith("claude") -> surveyPrefs.claudeKey
-            model.startsWith("gpt") -> surveyPrefs.openAiKey
-            else -> null
-        }?.takeIf { it.isNotBlank() } ?: run {
-            android.util.Log.w("SurveyPostProc", "no api key for $model; skipping summary")
-            return rec
-        }
-        val survey = surveyStore.loadSurvey(rec.surveyId)
-        val gen = com.r1.launcher.survey.SummaryGenerator.forModel(model, key)
-        return when (val r = gen.generate(rec, survey)) {
-            is com.r1.launcher.survey.SummaryGenerator.Result.Success -> {
-                val updated = rec.copy(
-                    summary = r.data.summary,
-                    sentiment = r.data.sentiment,
-                    completeness = r.data.completeness,
-                )
-                surveyStore.saveCallRecord(updated)
-                ui.post {
-                    // If the user is currently viewing this record, reload it.
-                    if (state.currentCallRecordId == updated.id) {
-                        state.currentCallRecordId = null
-                        state.currentCallRecordId = updated.id
-                    }
-                }
-                updated
-            }
-            is com.r1.launcher.survey.SummaryGenerator.Result.Failure -> {
-                android.util.Log.w("SurveyPostProc", "summary failed: ${r.message}")
-                ui.post { toastFail("summary failed: ${r.message.take(60)}") }
-                rec
-            }
-        }
-    }
-
-    /** Assemble the SMTP payload for one call record: human-readable body,
-     *  WAV audio (if present), transcript .txt, and answers .json. */
-    private fun buildSurveyEmailPayload(
-        rec: com.r1.launcher.survey.CallRecord,
-        survey: com.r1.launcher.survey.Survey?,
-        recipient: String,
-    ): SmtpSender.EmailPayload {
-        val durationS = rec.durationMs / 1000
-        val mins = durationS / 60
-        val secs = durationS % 60
-        val surveyName = survey?.name ?: "(missing survey)"
-        val displayContact = rec.contact.name.ifBlank { rec.contact.phone }
-        val body = buildString {
-            appendLine("Survey call from your R1.")
-            appendLine()
-            appendLine("Contact:  $displayContact")
-            appendLine("Phone:    ${rec.contact.phone}")
-            appendLine("Survey:   $surveyName")
-            appendLine("Status:   ${rec.status.name.lowercase()}")
-            appendLine("Ended:    ${rec.endReason ?: "—"}")
-            appendLine("Duration: ${"%d:%02d".format(mins, secs)}")
-            rec.sentiment?.let { appendLine("Sentiment: $it") }
-            appendLine("Completeness: ${(rec.completeness * 100).toInt()}%")
-            appendLine()
-            rec.summary?.takeIf { it.isNotBlank() }?.let {
-                appendLine("--- Summary ---")
-                appendLine(it)
-                appendLine()
-            }
-            if (rec.structuredAnswers.isNotEmpty()) {
-                appendLine("--- Answers ---")
-                rec.structuredAnswers.forEach { (qid, ans) ->
-                    val qprompt = survey?.questions?.firstOrNull { it.id == qid }?.prompt
-                    if (qprompt != null) appendLine("$qprompt")
-                    appendLine("  → $ans")
-                }
-                appendLine()
-            }
-            appendLine("Audio recording + full transcript + JSON answers attached.")
-        }
-
-        val atts = buildList<SmtpSender.Attachment> {
-            val audio = java.io.File(rec.audioPath)
-            if (audio.exists() && audio.length() > 0) {
-                add(SmtpSender.Attachment.FileAttachment(
-                    filename = "${rec.id}.wav",
-                    file = audio,
-                    contentType = "audio/wav",
-                ))
-            }
-            val transcript = rec.transcript.orEmpty()
-            if (transcript.isNotBlank()) {
-                add(SmtpSender.Attachment.TextAttachment(
-                    filename = "${rec.id}.txt",
-                    text = transcript,
-                ))
-            }
-            add(SmtpSender.Attachment.TextAttachment(
-                filename = "${rec.id}.json",
-                text = encodeAnswersJson(rec),
-                mime = "application/json; charset=utf-8",
-            ))
-        }
-        return SmtpSender.EmailPayload(
-            recipient = recipient,
-            subject = "Survey call — $displayContact — $surveyName",
-            body = body,
-            attachments = atts,
-        )
-    }
-
-    private fun encodeAnswersJson(rec: com.r1.launcher.survey.CallRecord): String {
-        val obj = kotlinx.serialization.json.buildJsonObject {
-            put("record_id", rec.id)
-            put("campaign_id", rec.campaignId)
-            put("survey_id", rec.surveyId)
-            put("contact_name", rec.contact.name)
-            put("contact_phone", rec.contact.phone)
-            put("status", rec.status.name.lowercase())
-            put("end_reason", rec.endReason)
-            put("duration_ms", rec.durationMs)
-            put("sentiment", rec.sentiment)
-            put("completeness", rec.completeness)
-            put("summary", rec.summary)
-            put("answers", kotlinx.serialization.json.buildJsonObject {
-                rec.structuredAnswers.forEach { (k, v) -> put(k, v) }
-            })
-        }
-        return kotlinx.serialization.json.Json { prettyPrint = true }.encodeToString(
-            kotlinx.serialization.json.JsonObject.serializer(),
-            obj,
-        )
-    }
-
-    override fun surveyPlayAudio(callRecordId: String) {
-        state.showToast("playback pending (task #11 polish)", com.r1.launcher.ToastKind.INFO)
-    }
-
-    override fun surveyStopAudio() {
-        // No-op until playback lands.
-    }
-
-    override fun surveyOpenSettings() {
-        refreshSurveyDisplayState()
-        state.openSurveySettings()
-    }
-
-    override fun surveySettingsRowActivate(idx: Int) {
-        when (idx) {
-            0 -> { state.back(); backTone() }
-            1 -> {
-                // openai key — keyboard entry lands with task #11 polish.
-                state.showToast("paste openai key via web companion for now", com.r1.launcher.ToastKind.INFO)
-            }
-            2, 3, 4, 5 -> {
-                state.showToast("sip creds via web companion (task #12)", com.r1.launcher.ToastKind.INFO)
-            }
-            6 -> {
-                state.showToast("edit consent in web companion", com.r1.launcher.ToastKind.INFO)
-            }
-            7 -> surveyCycleVoice()
-            8 -> surveyCycleSummarizerModel()
-            9 -> {
-                state.showToast("email recipient via web companion", com.r1.launcher.ToastKind.INFO)
-            }
-            10 -> {
-                surveyPrefs.clearAll()
-                refreshSurveyDisplayState()
-                state.showToast("survey settings cleared", com.r1.launcher.ToastKind.SUCCESS)
-            }
-        }
-    }
-
-    override fun surveyCampaignRowActivate(idx: Int) {
-        when (idx) {
-            0 -> { state.back(); backTone() }
-            1 -> {
-                state.showToast("pick survey via web companion", com.r1.launcher.ToastKind.INFO)
-            }
-            2 -> {
-                state.showToast("pick contacts via web companion", com.r1.launcher.ToastKind.INFO)
-            }
-            3 -> {
-                val sid = state.currentSurveyId
-                if (sid == null) {
-                    state.showToast("no survey selected", com.r1.launcher.ToastKind.FAIL)
-                } else {
-                    state.showToast("start campaign pending (task #10)", com.r1.launcher.ToastKind.INFO)
-                }
-            }
-        }
-    }
-
-    override fun surveyListRowActivate(idx: Int) {
-        when (idx) {
-            0 -> { state.back(); backTone() }
-            1 -> surveyOpenSettings()
-            2 -> surveyOpenCampaign()
-            else -> {
-                val campaignIdx = idx - 3
-                val c = state.campaigns.getOrNull(campaignIdx) ?: return
-                when (c.status) {
-                    com.r1.launcher.survey.CampaignStatus.PENDING,
-                    com.r1.launcher.survey.CampaignStatus.PAUSED ->
-                        surveyStartCampaignById(c.id)
-                    com.r1.launcher.survey.CampaignStatus.RUNNING -> {
-                        state.currentCampaignId = c.id
-                        state.openSurveyLive()
-                    }
-                    com.r1.launcher.survey.CampaignStatus.COMPLETED,
-                    com.r1.launcher.survey.CampaignStatus.CANCELLED -> {
-                        val recent = surveyStore.listCallRecordsForCampaign(c.id).firstOrNull()
-                        if (recent != null) surveyOpenDetail(recent.id)
-                        else state.showToast("no call records yet for this campaign", com.r1.launcher.ToastKind.INFO)
-                    }
-                }
-            }
-        }
-    }
-
-    override fun surveySaveOpenAiKey(key: String) {
-        surveyPrefs.openAiKey = key.trim().ifBlank { null }
-        refreshSurveyDisplayState()
-    }
-
-    override fun surveyPasteOpenAiKey() {
-        val cb = getSystemService(android.content.ClipboardManager::class.java)
-        val txt = cb?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()?.trim()
-        if (txt.isNullOrBlank()) {
-            state.showToast("clipboard empty", com.r1.launcher.ToastKind.FAIL)
-            return
-        }
-        surveySaveOpenAiKey(txt)
-        state.showToast("openai key saved", com.r1.launcher.ToastKind.SUCCESS)
-    }
-
-    override fun surveyClearOpenAiKey() {
-        surveyPrefs.openAiKey = null
-        refreshSurveyDisplayState()
-    }
-
-    override fun surveyCycleVoice() {
-        val voices = com.r1.launcher.survey.SurveyPrefs.REALTIME_VOICES
-        val curIdx = voices.indexOf(surveyPrefs.realtimeVoice).coerceAtLeast(0)
-        val next = voices[(curIdx + 1) % voices.size]
-        surveyPrefs.realtimeVoice = next
-        refreshSurveyDisplayState()
-    }
-
-    override fun surveyCycleSummarizerModel() {
-        val models = com.r1.launcher.survey.SurveyPrefs.SUMMARIZER_MODELS.map { it.second }
-        val curIdx = models.indexOf(surveyPrefs.summarizerModel).coerceAtLeast(0)
-        val next = models[(curIdx + 1) % models.size]
-        surveyPrefs.summarizerModel = next
-        refreshSurveyDisplayState()
-    }
-
-    // ---- Web companion CRUD ----
-
-    override fun surveyUpsertSurvey(survey: com.r1.launcher.survey.Survey): String {
-        val now = System.currentTimeMillis()
-        val sid = survey.id.ifBlank { "s_" + java.util.UUID.randomUUID().toString().take(8) }
-        val existing = if (survey.id.isBlank()) null else surveyStore.loadSurvey(survey.id)
-        val created = existing?.createdAtMs ?: now
-        val toSave = survey.copy(id = sid, createdAtMs = created, updatedAtMs = now)
-        surveyStore.saveSurvey(toSave)
-        reloadSurveysAndCampaigns()
-        return sid
-    }
-
-    override fun surveyDeleteSurveyById(surveyId: String) {
-        surveyStore.deleteSurvey(surveyId)
-        if (state.currentSurveyId == surveyId) state.currentSurveyId = null
-        reloadSurveysAndCampaigns()
-    }
-
-    override fun surveyCreateCampaign(
-        surveyId: String,
-        contacts: List<com.r1.launcher.survey.Contact>,
-    ): String {
-        val now = System.currentTimeMillis()
-        val cid = "c_" + java.util.UUID.randomUUID().toString().take(8)
-        val campaign = com.r1.launcher.survey.Campaign(
-            id = cid,
-            surveyId = surveyId,
-            contacts = contacts,
-            status = com.r1.launcher.survey.CampaignStatus.PENDING,
-            nextContactIdx = 0,
-            createdAtMs = now,
-            updatedAtMs = now,
-        )
-        surveyStore.saveCampaign(campaign)
-        reloadSurveysAndCampaigns()
-        return cid
-    }
-
-    override fun surveyCancelCampaignById(campaignId: String) {
-        val c = surveyStore.loadCampaign(campaignId) ?: return
-        surveyStore.saveCampaign(c.copy(
-            status = com.r1.launcher.survey.CampaignStatus.CANCELLED,
-            updatedAtMs = System.currentTimeMillis(),
-        ))
-        reloadSurveysAndCampaigns()
-    }
-
-    override fun surveyStartCampaignById(campaignId: String) {
-        if (!surveyPrefs.hasOpenAiKey()) { toastFail("set openai key first"); return }
-        if (!surveyPrefs.hasSipCreds()) { toastFail("set sip credentials first"); return }
-        val c = surveyStore.loadCampaign(campaignId) ?: run {
-            toastFail("campaign not found"); return
-        }
-        if (c.contacts.isEmpty()) { toastFail("campaign has no contacts"); return }
-        if (surveyActiveSession != null) { toastFail("a call is already live"); return }
-        val survey = surveyStore.loadSurvey(c.surveyId) ?: run {
-            toastFail("survey missing: ${c.surveyId}"); return
-        }
-        // Mark running so progress is visible in lists.
-        val running = c.copy(
-            status = com.r1.launcher.survey.CampaignStatus.RUNNING,
-            updatedAtMs = System.currentTimeMillis(),
-        )
-        surveyStore.saveCampaign(running)
-        reloadSurveysAndCampaigns()
-        state.currentCampaignId = campaignId
-        state.openSurveyLive()
-        runSurveyNextContact(running, survey)
-    }
-
-    /** A reference to the live session — non-null while a call is in flight.
-     *  Reset to null in onCompleted so [surveyHangup] and the campaign loop
-     *  can tell whether anything is up. */
-    @Volatile private var surveyActiveSession: com.r1.launcher.survey.SurveyCallSession? = null
-
-    /** Dial the contact at [Campaign.nextContactIdx]. Builds the [CallRecord],
-     *  bumps the campaign index, kicks the session, and lets its Listener
-     *  drive the rest. */
-    private fun runSurveyNextContact(
-        c: com.r1.launcher.survey.Campaign,
-        survey: com.r1.launcher.survey.Survey,
-    ) {
-        val idx = c.nextContactIdx
-        if (idx >= c.contacts.size) {
-            // Campaign complete.
-            surveyStore.saveCampaign(c.copy(
-                status = com.r1.launcher.survey.CampaignStatus.COMPLETED,
-                updatedAtMs = System.currentTimeMillis(),
-            ))
-            reloadSurveysAndCampaigns()
-            state.surveyCallActive = false
-            state.surveyCallStatus = "campaign done"
-            state.showToast("campaign complete", com.r1.launcher.ToastKind.SUCCESS)
-            return
-        }
-        if (c.status != com.r1.launcher.survey.CampaignStatus.RUNNING) {
-            // Paused / cancelled — bail out without dialing the next contact.
-            return
-        }
-        val contact = c.contacts[idx]
-        val recordId = "r_" + java.util.UUID.randomUUID().toString().take(8)
-        val audioFile = surveyStore.audioFile(c.id, recordId)
-        val now = System.currentTimeMillis()
-        val rec = com.r1.launcher.survey.CallRecord(
-            id = recordId,
-            campaignId = c.id,
-            surveyId = c.surveyId,
-            contact = contact,
-            createdAtMs = now,
-            status = com.r1.launcher.survey.CallRecordStatus.DIALING,
-            audioPath = audioFile.absolutePath,
-        )
-        surveyStore.saveCallRecord(rec)
-
-        // Wire up live UI state.
-        state.surveyCallActive = true
-        state.currentCallRecordId = recordId
-        state.surveyCallContactName = contact.name.ifBlank { contact.phone }
-        state.surveyCallStatus = "starting"
-        state.surveyCallElapsedMs = 0L
-        state.surveyCallCurrentQuestion = ""
-
-        val creds = com.r1.launcher.survey.SurveyCallSession.SipCreds(
-            host = surveyPrefs.sipHost!!,
-            port = 5060,
-            user = surveyPrefs.sipUser!!,
-            password = surveyPrefs.sipPassword!!,
-            fromNumber = surveyPrefs.sipFromNumber,
-        )
-        val session = com.r1.launcher.survey.SurveyCallSession(
-            openAiKey = surveyPrefs.openAiKey!!,
-            voice = surveyPrefs.realtimeVoice,
-            survey = survey,
-            contact = contact,
-            consentText = survey.consentText?.takeIf { it.isNotBlank() } ?: surveyPrefs.consentText,
-            sipPrefs = creds,
-            wavFile = audioFile,
-            listener = SurveyCallListener(c, survey, recordId),
-        )
-        surveyActiveSession = session
-        session.start()
-    }
-
-    /** Listener that the live SurveyCallSession invokes — wires events back
-     *  to [state], the web companion, the call-record store, and the campaign
-     *  loop. */
-    private inner class SurveyCallListener(
-        private val campaign: com.r1.launcher.survey.Campaign,
-        private val survey: com.r1.launcher.survey.Survey,
-        private val recordId: String,
-    ) : com.r1.launcher.survey.SurveyCallSession.Listener {
-
-        private val tickRunnable = object : Runnable {
-            override fun run() {
-                if (state.surveyCallActive && callStartMs > 0) {
-                    state.surveyCallElapsedMs = System.currentTimeMillis() - callStartMs
-                    broadcastSurveyLive()
-                    ui.postDelayed(this, 500L)
-                }
-            }
-        }
-        private var callStartMs: Long = 0L
-
-        override fun onStatus(status: String) {
-            state.surveyCallStatus = status
-            broadcastSurveyLive()
-        }
-        override fun onCallEstablished() {
-            callStartMs = System.currentTimeMillis()
-            state.surveyCallStatus = "live"
-            updateCallRecordStatus(com.r1.launcher.survey.CallRecordStatus.LIVE)
-            ui.post(tickRunnable)
-        }
-        override fun onLiveStateChanged(s: com.r1.launcher.survey.SurveyOrchestrator.LiveState) {
-            state.surveyCallCurrentQuestion = s.currentQuestionPrompt
-            broadcastSurveyLive()
-        }
-        override fun onAssistantTextDelta(text: String) {
-            webServer?.broadcastSurveyTranscriptDelta("bot", text)
-        }
-        override fun onUserTextFinal(text: String) {
-            webServer?.broadcastSurveyTranscriptDelta("user", text)
-        }
-        override fun onCompleted(
-            reason: String,
-            consentGranted: Boolean,
-            transcript: String,
-            answers: Map<String, String>,
-            durationMs: Long,
-        ) {
-            ui.removeCallbacks(tickRunnable)
-            state.surveyCallActive = false
-            state.surveyCallStatus = "ended: $reason"
-            surveyActiveSession = null
-
-            // Persist final CallRecord with whatever we captured.
-            val existing = surveyStore.loadCallRecord(recordId) ?: return
-            val finalStatus = when {
-                reason == "consent_denied" -> com.r1.launcher.survey.CallRecordStatus.CONSENT_DENIED
-                reason == "register_failed" -> com.r1.launcher.survey.CallRecordStatus.FAILED
-                reason.startsWith("INVITE 486") -> com.r1.launcher.survey.CallRecordStatus.BUSY
-                reason.startsWith("INVITE 487")
-                    || reason.startsWith("INVITE 408") -> com.r1.launcher.survey.CallRecordStatus.NO_ANSWER
-                reason.startsWith("INVITE ") -> com.r1.launcher.survey.CallRecordStatus.FAILED
-                else -> com.r1.launcher.survey.CallRecordStatus.COMPLETED
-            }
-            val updated = existing.copy(
-                status = finalStatus,
-                durationMs = durationMs,
-                transcript = transcript.takeIf { it.isNotBlank() },
-                structuredAnswers = answers,
-                endReason = reason,
-            )
-            surveyStore.saveCallRecord(updated)
-
-            // Broadcast call.done.
-            webServer?.broadcastSurveyCallDone(kotlinx.serialization.json.buildJsonObject {
-                put("recordId", recordId)
-                put("reason", reason)
-                put("consentGranted", consentGranted)
-                put("durationMs", durationMs)
-            })
-
-            // Auto-run summary + email (best-effort; failures toast but don't
-            // halt the campaign).
-            runSurveyPostCallPipeline(recordId, forceSummary = false, email = true)
-
-            // Advance the campaign (bump nextContactIdx, pace).
-            val freshCampaign = surveyStore.loadCampaign(campaign.id) ?: return
-            if (freshCampaign.status != com.r1.launcher.survey.CampaignStatus.RUNNING) {
-                reloadSurveysAndCampaigns()
-                return
-            }
-            val nextIdx = freshCampaign.nextContactIdx + 1
-            val bumped = freshCampaign.copy(
-                nextContactIdx = nextIdx,
-                callRecordIds = freshCampaign.callRecordIds + recordId,
-                updatedAtMs = System.currentTimeMillis(),
-            )
-            surveyStore.saveCampaign(bumped)
-            reloadSurveysAndCampaigns()
-            val delay = surveyPrefs.betweenCallsDelayMs
-            ui.postDelayed({
-                val cur = surveyStore.loadCampaign(bumped.id) ?: return@postDelayed
-                if (cur.status == com.r1.launcher.survey.CampaignStatus.RUNNING) {
-                    runSurveyNextContact(cur, survey)
-                }
-            }, delay)
-        }
-        override fun onError(message: String) {
-            android.util.Log.w("SurveyCall", "session error: $message")
-            state.surveyCallStatus = "error: ${message.take(40)}"
-            broadcastSurveyLive()
-        }
-
-        private fun updateCallRecordStatus(s: com.r1.launcher.survey.CallRecordStatus) {
-            val rec = surveyStore.loadCallRecord(recordId) ?: return
-            surveyStore.saveCallRecord(rec.copy(status = s))
-        }
-
-        private fun broadcastSurveyLive() {
-            webServer?.broadcastSurveyCallState(kotlinx.serialization.json.buildJsonObject {
-                put("active", state.surveyCallActive)
-                put("campaignId", state.currentCampaignId)
-                put("recordId", state.currentCallRecordId)
-                put("status", state.surveyCallStatus)
-                put("contactName", state.surveyCallContactName)
-                put("currentQuestion", state.surveyCallCurrentQuestion)
-                put("elapsedMs", state.surveyCallElapsedMs)
-            })
-        }
-    }
-
-    override fun surveySaveSettingsField(field: String, value: String) {
-        val trimmed = value.trim()
-        when (field) {
-            "openai_key"        -> surveyPrefs.openAiKey = trimmed.ifBlank { null }
-            "claude_key"        -> surveyPrefs.claudeKey = trimmed.ifBlank { null }
-            "sip_host"          -> surveyPrefs.sipHost = trimmed.ifBlank { null }
-            "sip_user"          -> surveyPrefs.sipUser = trimmed.ifBlank { null }
-            "sip_password"      -> surveyPrefs.sipPassword = trimmed.ifBlank { null }
-            "sip_from"          -> surveyPrefs.sipFromNumber = trimmed.ifBlank { null }
-            "consent_text"      -> surveyPrefs.consentText =
-                trimmed.ifBlank { com.r1.launcher.survey.SurveyPrefs.DEFAULT_CONSENT_TEXT }
-            "voice"             -> surveyPrefs.realtimeVoice =
-                trimmed.ifBlank { com.r1.launcher.survey.SurveyPrefs.DEFAULT_REALTIME_VOICE }
-            "summarizer_model"  -> surveyPrefs.summarizerModel =
-                trimmed.ifBlank { com.r1.launcher.survey.SurveyPrefs.DEFAULT_SUMMARIZER_MODEL }
-            "email_recipient"   -> surveyPrefs.emailRecipient = trimmed.ifBlank { null }
-            else -> android.util.Log.w("SurveyPrefs", "unknown settings field: $field")
-        }
-        refreshSurveyDisplayState()
-    }
 }

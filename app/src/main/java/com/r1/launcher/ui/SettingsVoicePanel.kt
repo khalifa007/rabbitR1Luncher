@@ -56,13 +56,12 @@ import com.r1.launcher.voice.VoicePrefs
  *   0  < back
  *   1  voice: on/off    (toggles auto-speak of assistant replies)
  *   2  elevenlabs key   (status pill; on click opens RetroKeyboard overlay)
- *   3  scan key from qr (jumps to the QR scan panel with mode = OPENAI_KEY)
- *   4  subscription     (live credit balance from /v1/user/subscription; tap to refresh)
- *   5  voice: <name>    (cycles through 4 hardcoded ElevenLabs voices)
- *   6  custom voice id  (status pill; on click opens RetroKeyboard overlay)
- *   7  test voice       (synthesize a short sample with current settings)
- *   8  tuning           (opens SETTINGS_VOICE_TUNING)
- *   9  clear key
+ *   3  subscription     (live credit balance from /v1/user/subscription; tap to refresh)
+ *   4  voice: <name>    (cycles through 4 hardcoded ElevenLabs voices)
+ *   5  custom voice id  (status pill; on click opens RetroKeyboard overlay)
+ *   6  test voice       (synthesize a short sample with current settings)
+ *   7  tuning           (opens SETTINGS_VOICE_TUNING)
+ *   8  clear key
  */
 @Composable
 fun SettingsVoicePanel(
@@ -124,10 +123,9 @@ fun SettingsVoicePanel(
         val subStatus = "view balance & plan"
         val subOk = false
         val items = listOf(
-            SettingsItem.Standard(stringResource(R.string.back_short)),
+            SettingsItem.Standard("__header__"),
             SettingsItem.Toggle(toggleLabel, state.voiceEnabled),
             SettingsItem.Standard(stringResource(R.string.voice_row_key)),  // subtitle injected below
-            SettingsItem.Standard(stringResource(R.string.voice_row_scan_qr)),
             SettingsItem.Standard("subscription"),                          // subtitle injected below
             SettingsItem.Standard("voice: $voiceLabel"),
             SettingsItem.Standard(stringResource(R.string.voice_row_custom_id)),
@@ -145,37 +143,47 @@ fun SettingsVoicePanel(
             LazyColumn(
                 state = listState,
                 contentPadding = PaddingValues(
-                    start = 16.dp, end = 16.dp, top = 32.dp, bottom = 32.dp,
+                    start = 16.dp, end = 16.dp, top = 0.dp, bottom = 32.dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
                 itemsIndexed(
                     items = items,
-                    key = { _, item -> item.label },
+                    key = { idx, item -> if (idx == 0) "header" else item.label },
                 ) { idx, item ->
-                    val (subtitle, subtitleOk) = when (idx) {
-                        2 -> keyStatus to state.hasVoiceKey
-                        4 -> subStatus to subOk
-                        6 -> customStatus to state.voiceCustomId.isNotBlank()
-                        else -> "" to false
+                    if (idx == 0) {
+                        AppPageHeader(
+                            titleIconRes = R.drawable.ic_voice,
+                            title = "voice",
+                            backFocused = state.voiceFocus == 0,
+                            onBack = { onRowClick(0) },
+                            themeColor = AppThemes.Settings,
+                        )
+                    } else {
+                        val (subtitle, subtitleOk) = when (idx) {
+                            2 -> keyStatus to state.hasVoiceKey
+                            4 -> subStatus to subOk
+                            6 -> customStatus to state.voiceCustomId.isNotBlank()
+                            else -> "" to false
+                        }
+                        val subtitleColor = if (subtitleOk)
+                            Color(0xFF35D26F) else Color(0xFFFF4500)
+                        SettingsRow(
+                            label = item.label,
+                            focused = idx == state.voiceFocus,
+                            toggleChecked = (item as? SettingsItem.Toggle)?.checked,
+                            subtitle = subtitle,
+                            subtitleColor = subtitleColor,
+                            onClick = {
+                                when (idx) {
+                                    2 -> { input = ""; kbTarget = KeyboardTarget.KEY }
+                                    6 -> { input = ""; kbTarget = KeyboardTarget.CUSTOM_VOICE }
+                                    else -> onRowClick(idx)
+                                }
+                            },
+                        )
                     }
-                    val subtitleColor = if (subtitleOk)
-                        Color(0xFF35D26F) else Color(0xFFFF4500)
-                    SettingsRow(
-                        label = item.label,
-                        focused = idx == state.voiceFocus,
-                        toggleChecked = (item as? SettingsItem.Toggle)?.checked,
-                        subtitle = subtitle,
-                        subtitleColor = subtitleColor,
-                        onClick = {
-                            when (idx) {
-                                2 -> { input = ""; kbTarget = KeyboardTarget.KEY }
-                                6 -> { input = ""; kbTarget = KeyboardTarget.CUSTOM_VOICE }
-                                else -> onRowClick(idx)
-                            }
-                        },
-                    )
                 }
             }
 

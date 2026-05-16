@@ -18,7 +18,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
@@ -37,7 +36,7 @@ fun WifiScanPanel(
             slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
     ) {
         val items = mutableListOf<String>()
-        items.add(stringResource(R.string.back_short))
+        items.add("header")
         items.addAll(state.wifiScanResults)
 
         val listState = rememberLazyListState()
@@ -51,21 +50,31 @@ fun WifiScanPanel(
             LazyColumn(
                 state = listState,
                 contentPadding = PaddingValues(
-                    start = 16.dp, end = 16.dp, top = 32.dp, bottom = 32.dp,
+                    start = 16.dp, end = 16.dp, top = 0.dp, bottom = 32.dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
                 itemsIndexed(
                     items = items,
-                    key = { _, item -> item },
+                    key = { idx, item -> if (idx == 0) "header" else item },
                 ) { idx, item ->
-                    SettingsRow(
-                        label = item,
-                        focused = idx == state.wifiScanFocus,
-                        toggleChecked = null,
-                        onClick = { onRowClick(idx) },
-                    )
+                    if (idx == 0) {
+                        AppPageHeader(
+                            titleIconRes = R.drawable.ic_network,
+                            title = "wi-fi",
+                            backFocused = state.wifiScanFocus == 0,
+                            onBack = { onRowClick(0) },
+                            themeColor = AppThemes.Settings,
+                        )
+                    } else {
+                        SettingsRow(
+                            label = item,
+                            focused = idx == state.wifiScanFocus,
+                            toggleChecked = null,
+                            onClick = { onRowClick(idx) },
+                        )
+                    }
                 }
             }
         }

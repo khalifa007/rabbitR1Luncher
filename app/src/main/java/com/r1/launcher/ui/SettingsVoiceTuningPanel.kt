@@ -78,7 +78,7 @@ fun SettingsVoiceTuningPanel(
         val modelLabel = VoicePrefs.MODELS.firstOrNull { it.second == state.voiceModel }
             ?.first ?: "flash"
         val rows = listOf(
-            TuningRowSpec.Action(0, stringResource(R.string.back_short)),
+            TuningRowSpec.Action(0, "__header__"),
             TuningRowSpec.Action(1, stringResource(R.string.voice_tuning_row_model, modelLabel)),
             TuningRowSpec.Slider(
                 idx = 2,
@@ -135,26 +135,33 @@ fun SettingsVoiceTuningPanel(
             LazyColumn(
                 state = listState,
                 contentPadding = PaddingValues(
-                    start = 16.dp, end = 16.dp, top = 32.dp, bottom = 32.dp,
+                    start = 16.dp, end = 16.dp, top = 0.dp, bottom = 32.dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
                 items(items = rows, key = { it.idx }) { spec ->
                     val focused = spec.idx == state.voiceTuningFocus
-                    when (spec) {
-                        is TuningRowSpec.Action -> SettingsRow(
+                    when {
+                        spec.idx == 0 -> AppPageHeader(
+                            titleIconRes = R.drawable.ic_voice,
+                            title = "voice tuning",
+                            backFocused = state.voiceTuningFocus == 0,
+                            onBack = { onRowClick(0) },
+                            themeColor = AppThemes.Settings,
+                        )
+                        spec is TuningRowSpec.Action -> SettingsRow(
                             label = spec.label,
                             focused = focused,
                             onClick = { onRowClick(spec.idx) },
                         )
-                        is TuningRowSpec.Toggle -> SettingsRow(
+                        spec is TuningRowSpec.Toggle -> SettingsRow(
                             label = spec.label,
                             focused = focused,
                             toggleChecked = spec.checked,
                             onClick = { onRowClick(spec.idx) },
                         )
-                        is TuningRowSpec.Slider -> SliderRow(
+                        spec is TuningRowSpec.Slider -> SliderRow(
                             label = spec.label,
                             value = spec.value,
                             min = spec.min,

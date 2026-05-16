@@ -101,8 +101,6 @@ class R1WebServer(
                     serveTranscriberAudio(uri.removePrefix("/api/transcriber/audio/"))
                 uri.startsWith("/api/transcriber/transcript/") ->
                     serveTranscriberTranscript(uri.removePrefix("/api/transcriber/transcript/"))
-                uri.startsWith("/api/survey/audio/") ->
-                    serveSurveyAudio(uri.removePrefix("/api/survey/audio/"))
                 else -> notFound()
             }
         }.getOrElse { e ->
@@ -128,29 +126,6 @@ class R1WebServer(
         return resp
     }
 
-    /** Stream the survey-call WAV. Path is `<campaignId>/<recordId>.wav`;
-     *  matches the on-disk layout in [com.r1.launcher.survey.SurveyStore.audioFile]. */
-    private fun serveSurveyAudio(pathWithExt: String): Response {
-        val cleaned = pathWithExt.removeSuffix(".wav")
-        val parts = cleaned.split('/')
-        if (parts.size != 2) return notFound()
-        val campaignId = parts[0]
-        val recordId = parts[1]
-        // Defense in depth: only the characters we issue in our own ids.
-        val idPat = Regex("[A-Za-z0-9_-]+")
-        if (!campaignId.matches(idPat) || !recordId.matches(idPat)) return notFound()
-        val store = com.r1.launcher.survey.SurveyStore.get(ctx)
-        val file = store.audioFile(campaignId, recordId)
-        if (!file.exists() || file.length() == 0L) return notFound()
-        val resp = newChunkedResponse(
-            Response.Status.OK,
-            "audio/wav",
-            java.io.FileInputStream(file),
-        )
-        resp.addHeader("Content-Disposition", "attachment; filename=\"$recordId.wav\"")
-        resp.addHeader("Cache-Control", "no-store")
-        return resp
-    }
 
     /** `<uuid>.txt` returns the rendered transcript; `<uuid>.json` returns the
      *  raw Scribe response (suitable for re-rendering with renamed speakers). */
@@ -394,29 +369,4 @@ class R1WebServer(
         sockets.toList().forEach { it.sendEvent("claude.setup.done", payload) }
     }
 
-    // --- survey broadcasts (wired up by SipDialer / SurveyOrchestrator in task #10) ---
-
-    /** Push a live-call state tick — caller name, current question prompt,
-     *  status, elapsed ms. Web companion's live view renders this. */
-    fun broadcastSurveyCallState(payload: JsonObject) {
-        if (sockets.isEmpty()) return
-        sockets.toList().forEach { it.sendEvent("survey.call.state", payload) }
-    }
-
-    /** Append a transcript delta to the live view. `role` is "bot" or "user". */
-    fun broadcastSurveyTranscriptDelta(role: String, text: String) {
-        if (sockets.isEmpty()) return
-        val payload = buildJsonObject {
-            put("role", role)
-            put("text", text)
-        }
-        sockets.toList().forEach { it.sendEvent("survey.call.transcript", payload) }
-    }
-
-    /** Final summary + answers landed — web companion should refresh its
-     *  call list and (if the live view was open) show the result. */
-    fun broadcastSurveyCallDone(payload: JsonObject) {
-        if (sockets.isEmpty()) return
-        sockets.toList().forEach { it.sendEvent("survey.call.done", payload) }
-    }
 }

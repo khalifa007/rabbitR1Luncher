@@ -94,43 +94,42 @@ fun ClaudePanel(
             Column(modifier = Modifier.fillMaxSize()) {
 
                 // --- header ---
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 4.dp),
-                ) {
-                    BackPill(label = stringResource(R.string.claude_back_label), onClick = onBack)
-                    Spacer(Modifier.weight(1f))
-                    when {
-                        state.claudeRecording -> Text(
-                            text = stringResource(R.string.terminal_status_rec),
+                AppPageHeader(
+                    backFocused = false,
+                    onBack = onBack,
+                    themeColor = AppThemes.Claude,
+                    compact = true,
+                    trailingContent = {
+                        when {
+                            state.claudeRecording -> Text(
+                                text = stringResource(R.string.terminal_status_rec),
+                                style = type.appCard.copy(fontSize = 14.sp),
+                                color = Color(0xFFFF4500),
+                            )
+                            state.claudeTranscribing -> Text(
+                                text = stringResource(R.string.terminal_status_stt),
+                                style = type.appCard.copy(fontSize = 14.sp),
+                                color = Color(0xFFFFC107),
+                            )
+                            state.claudeBusy -> Text(
+                                text = stringResource(R.string.common_thinking_dots),
+                                style = type.appCard.copy(fontSize = 14.sp),
+                                color = Color.White,
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        StatusDot(state)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = stringResource(R.string.terminal_short_clear),
                             style = type.appCard.copy(fontSize = 14.sp),
-                            color = Color(0xFFFF4500),
+                            color = colors.muted,
+                            modifier = Modifier
+                                .clickable(onClick = onClear)
+                                .padding(horizontal = 4.dp, vertical = 4.dp),
                         )
-                        state.claudeTranscribing -> Text(
-                            text = stringResource(R.string.terminal_status_stt),
-                            style = type.appCard.copy(fontSize = 14.sp),
-                            color = Color(0xFFFFC107),
-                        )
-                        state.claudeBusy -> Text(
-                            text = stringResource(R.string.common_thinking_dots),
-                            style = type.appCard.copy(fontSize = 14.sp),
-                            color = Color.White,
-                        )
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    StatusDot(state)
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = stringResource(R.string.terminal_short_clear),
-                        style = type.appCard.copy(fontSize = 14.sp),
-                        color = colors.muted,
-                        modifier = Modifier
-                            .clickable(onClick = onClear)
-                            .padding(horizontal = 4.dp, vertical = 4.dp),
-                    )
-                }
+                    },
+                )
 
                 // --- chat scrollback ---
                 val listState = rememberLazyListState()
@@ -303,13 +302,12 @@ private fun ClaudeWebHint(
         modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            BackPill(label = stringResource(R.string.claude_back_label), onClick = onBack)
-            Spacer(Modifier.weight(1f))
-        }
+        AppPageHeader(
+            backFocused = false,
+            onBack = onBack,
+            themeColor = AppThemes.Claude,
+            compact = true,
+        )
 
         Spacer(Modifier.height(6.dp))
 

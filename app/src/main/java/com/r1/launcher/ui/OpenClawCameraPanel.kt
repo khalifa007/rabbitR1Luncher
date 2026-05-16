@@ -147,54 +147,48 @@ fun OpenClawCameraPanel(
                     .background(Color.Black.copy(alpha = 0.16f)),
             )
 
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 4.dp),
-            ) {
-                BackPill(label = stringResource(R.string.openclaw_back_chat), onClick = onBack)
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    text = stringResource(
-                        if (capturedBitmap == null) R.string.openclaw_camera_snap_ask
-                        else R.string.openclaw_camera_review_ask
-                    ),
-                    style = type.appCard.copy(fontSize = 20.sp),
-                    color = accent,
-                )
-                Spacer(Modifier.weight(1f))
-                if (capturedBitmap == null) {
-                    val angle = state.openClawCameraMotor
-                    val motorTxt = stringResource(
-                        when {
-                            angle <= 15 -> R.string.openclaw_camera_motor_face
-                            angle in 75..105 -> R.string.openclaw_camera_motor_idle
-                            angle >= 165 -> R.string.openclaw_camera_motor_back
-                            angle < 90 -> R.string.openclaw_camera_motor_to_face
-                            else -> R.string.openclaw_camera_motor_to_back
+            AppPageHeader(
+                backFocused = false,
+                onBack = onBack,
+                themeColor = AppThemes.OpenClaw,
+                compact = true,
+                subtitle = stringResource(
+                    if (capturedBitmap == null) R.string.openclaw_camera_snap_ask
+                    else R.string.openclaw_camera_review_ask
+                ),
+                trailingContent = {
+                    if (capturedBitmap == null) {
+                        val angle = state.openClawCameraMotor
+                        val motorTxt = stringResource(
+                            when {
+                                angle <= 15 -> R.string.openclaw_camera_motor_face
+                                angle in 75..105 -> R.string.openclaw_camera_motor_idle
+                                angle >= 165 -> R.string.openclaw_camera_motor_back
+                                angle < 90 -> R.string.openclaw_camera_motor_to_face
+                                else -> R.string.openclaw_camera_motor_to_back
+                            },
+                            angle,
+                        )
+                        Text(
+                            text = motorTxt,
+                            style = type.appCard.copy(fontSize = 14.sp),
+                            color = Color.White.copy(alpha = 0.85f),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color.Black.copy(alpha = 0.55f))
+                                .padding(horizontal = 8.dp, vertical = 3.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    CameraStatusDot(
+                        color = when {
+                            state.openClawCameraBusy -> Color(0xFFFFC107)
+                            capturedBitmap != null -> Color(0xFF35D26F)
+                            else -> AppThemes.OpenClaw
                         },
-                        angle,
                     )
-                    Text(
-                        text = motorTxt,
-                        style = type.appCard.copy(fontSize = 14.sp),
-                        color = Color.White.copy(alpha = 0.85f),
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color.Black.copy(alpha = 0.55f))
-                            .padding(horizontal = 8.dp, vertical = 3.dp),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                }
-                CameraStatusDot(
-                    color = when {
-                        state.openClawCameraBusy -> Color(0xFFFFC107)
-                        capturedBitmap != null -> Color(0xFF35D26F)
-                        else -> accent
-                    },
-                )
-            }
+                },
+            )
 
             Column(
                 modifier = Modifier

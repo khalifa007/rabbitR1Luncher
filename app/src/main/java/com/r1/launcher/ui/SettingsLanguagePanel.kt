@@ -73,45 +73,13 @@ fun SettingsLanguagePanel(state: LauncherState, onRowClick: (Int) -> Unit) {
                     modifier = Modifier.fillMaxSize(),
                 ) {
                     item(key = "header") {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(top = 14.dp, bottom = 8.dp),
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(if (state.settingsLanguageFocus == 0) HIGHLIGHT_BG else Color.Transparent)
-                                    .clickable { onRowClick(0) }
-                                    .padding(horizontal = 6.dp, vertical = 2.dp),
-                            ) {
-                                Text(
-                                    text = stringResource(R.string.back),
-                                    color = if (state.settingsLanguageFocus == 0) Color.Black else ACCENT,
-                                    fontSize = 24.sp,
-                                    fontFamily = type.appCard.fontFamily,
-                                    fontWeight = FontWeight.Bold,
-                                )
-                            }
-                            Spacer(Modifier.height(10.dp))
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Image(
-                                    painter = painterResource(R.drawable.ic_settings),
-                                    contentDescription = null,
-                                    colorFilter = ColorFilter.tint(ACCENT),
-                                    modifier = Modifier.size(28.dp),
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    text = stringResource(R.string.settings_language_title),
-                                    color = ACCENT,
-                                    fontSize = 32.sp,
-                                    fontFamily = type.appCard.fontFamily,
-                                    fontWeight = FontWeight.Bold,
-                                )
-                            }
-                        }
+                        AppPageHeader(
+                            titleIconRes = R.drawable.ic_language,
+                            title = "language",
+                            backFocused = state.settingsLanguageFocus == 0,
+                            onBack = { onRowClick(0) },
+                            themeColor = AppThemes.Settings,
+                        )
                     }
                     itemsIndexed(
                         items = languages,

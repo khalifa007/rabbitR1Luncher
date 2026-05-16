@@ -9,6 +9,6 @@ sealed class AppEntry {
     object Messages : AppEntry()
     object Terminal : AppEntry()
     object Claude : AppEntry()
+    object Hermes : AppEntry()
     object Meetings : AppEntry()
-    object Survey : AppEntry()
 }

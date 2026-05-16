@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Compose-based HOME launcher for the **Rabbit R1** (480×480 round, MT6765). Ships as a system app inside the user's LineageOS-based **CarrotOS** image, source tree at `/home/khalifa/lineage` (target: `lineage_r1-userdebug`). Successor to `../mylauncher/` (Gradle-less Java + XML). Same package (`com.r1.launcher`), platform-signed (see Release compatibility) so the launcher can hold signature-only perms like `ACCESS_MESSAGES_ON_ICC`. Current v3.50.0 / vc 283.
+Compose-based HOME launcher for the **Rabbit R1** (480×480 round, MT6765). Ships as a system app inside the user's LineageOS-based **CarrotOS** image, source tree at `/home/khalifa/lineage` (target: `lineage_r1-userdebug`). Successor to `../mylauncher/` (Gradle-less Java + XML). Same package (`com.r1.launcher`), platform-signed (see Release compatibility) so the launcher can hold signature-only perms like `ACCESS_MESSAGES_ON_ICC`. Current clean-baseline chain — see `app/build.gradle.kts` for live `versionCode`/`versionName`.
 
 `../mylauncher/CLAUDE.md` has feature-level history; this file covers only the Compose rewrite + OpenClaw chat + OS-image integration.
 
@@ -24,7 +24,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell 'am force-stop com.r1.launcher; am start -n com.r1.launcher/.LauncherActivity'
 ```
 
-- **Bump `versionCode` in `app/build.gradle.kts` before every install.** The `/system/app/R1Launcher/` baked into the CarrotOS image is the floor; user installs at `/data/app/` only override when strictly higher. `INSTALL_FAILED_VERSION_DOWNGRADE` = forgot to bump.
+- **`versionCode` in `app/build.gradle.kts` is pinned to `1000` locally for debug, but the file is `git update-index --skip-worktree`**, so `git status`/commits ignore the local value. HEAD tracks the real release version (`versionCode=5` / `versionName="1.1.0"` at time of writing). `adb install -r` at the same `versionCode` is allowed — you don't need to bump per install. The `/system/app/R1Launcher/` baked into CarrotOS is the floor; if it ever passes `1000`, re-pin higher. `INSTALL_FAILED_VERSION_DOWNGRADE` = system image was rebuilt with a higher number, raise the local pin. To cut a release: `git update-index --no-skip-worktree app/build.gradle.kts`, edit to the real release version, commit, `git tag vX.Y.Z && git push --tags` (CI fires on tags, not main pushes), then re-pin and re-skip.
 - **`am start` won't replace a foreground launcher process.** "Activity not started, intent has been delivered..." means old code is still in memory. Force-stop via carroot first.
 
 ## Pinned versions — do not drift without testing
@@ -42,7 +42,7 @@ Single Activity (`LauncherActivity`) with one `setContent { R1Theme { LauncherRo
 **State** (`LauncherState`): plain Kotlin class with `mutableStateOf`/`mutableIntStateOf`/`mutableStateListOf` fields. No ViewModel — Activity has `configChanges="keyboardHidden|orientation|screenSize|uiMode"` + `launchMode=singleTask`, so it never recreates.
 
 **Panel state machine** on `state.panel`:
-`HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, CLAUDE, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS`
+`HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, CLAUDE, HERMES_CHAT, HERMES_CONFIG, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS`
 
 Each panel has its own focus int; brightness/volume use level fields. Home dock + system-tray sheet were removed in 3.16; wheel press on clock jumps straight to apps grid. `back()` unwind is intentional and asymmetric:
 
@@ -53,10 +53,11 @@ Each panel has its own focus int; brightness/volume use level fields. Home dock 
 - `OPENCLAW_QR → APPS` (or `OPENCLAW_SETTINGS` when `qrScanMode == OPENAI_KEY`)
 - `OPENCLAW_CHAT → APPS`, `OPENCLAW_SETTINGS / OPENCLAW_SESSIONS → OPENCLAW_CHAT`, `OPENCLAW_CAMERA → OPENCLAW_CHAT`
 - `MESSAGES → APPS`, `MESSAGES_THREAD → MESSAGES`, `TERMINAL → APPS`, `CLAUDE → APPS`
+- `HERMES_CHAT → APPS`, `HERMES_CONFIG → HERMES_CHAT` (if `hermesConfigCameFromChat`) else `APPS`
 - `SETTINGS_VOICE_TUNING / SETTINGS_VOICE_SUBSCRIPTION → SETTINGS_VOICE`
 - `TRANSCRIBER_LIST → APPS`, `TRANSCRIBER_RECORDING / TRANSCRIBER_DETAIL / TRANSCRIBER_SETTINGS → TRANSCRIBER_LIST` (back from RECORDING also stops the FGS via `host.transcriberStopRecording`)
 
-**Apps list is typed**: `state.apps : MutableList<AppEntry>`, sealed class with `Real(ResolveInfo)`, `Settings`, `OpenClaw`, `Messages`, `Terminal`, `Claude`, `Meetings`. `LauncherActivity.loadApps()` appends synthetics after real apps in order: `Messages`, `OpenClaw`, `Terminal`, `Claude`, `Meetings`, `Settings`. `launchApp(idx)` switches on type:
+**Apps list is typed**: `state.apps : MutableList<AppEntry>`, sealed class with `Real(ResolveInfo)`, `Settings`, `OpenClaw`, `Messages`, `Terminal`, `Claude`, `Hermes`, `Meetings`. `LauncherActivity.loadApps()` appends synthetics after real apps in order: `Messages`, `OpenClaw`, `Terminal`, `Claude`, `Hermes`, `Meetings`, `Settings`. `launchApp(idx)` switches on type:
 
 - `Real` — fires the launcher intent
 - `Settings` — `WRITE_SETTINGS` grant check, then `state.openSettings()`
@@ -64,6 +65,7 @@ Each panel has its own focus int; brightness/volume use level fields. Home dock 
 - `Messages` — `READ_SMS` grant + `openMessages()` + `loadSmsConversations()`
 - `Terminal` — `openTerminal()` (no perm; uses carroot)
 - `Claude` — `openClaude()` (routes user text → `claude --print [-c]` via carroot+chroot)
+- `Hermes` — `hydrateHermesStateFromPrefs()` + `openHermesChat()` if `hermesPrefs.hasConfig()`, else `openHermesConfig()` (no perm; pure HTTPS to a user-provided gateway)
 - `Meetings` — `RECORD_AUDIO` grant + `transcriberOpen()` (binds the microphone-typed FGS, opens `TRANSCRIBER_LIST`)
 
 Adding a synthetic: every `when` branch in `AppsPanel.kt` (key, painter, label, `appKey`, `appContentType`) needs the new case — sealed class enforces it but the icon switch is easy to miss.
@@ -285,6 +287,10 @@ Synthetic app + chat panel that turns the launcher into a Claude Code chat clien
 
 **Limitations**: `claude --print` uses subscription rate limits per turn. No tool-use UI (output folded into text). No per-token streaming animation (chunky). For full feature set (slash commands, `/resume`, plan mode), drop to terminal and run `claude --print "..."` directly.
 
+## Hermes Agent app (Panel.HERMES_CHAT / HERMES_CONFIG)
+
+See memory `project_hermes_agent_app.md` for the full implementation map. One-line recap: synthetic app that talks to a self-hosted **Hermes Agent** (`github.com/NousResearch/hermes-agent`) via its OpenAI-compatible HTTP gateway (`POST /v1/chat/completions?stream=true`, SSE deltas, `Authorization: Bearer` + `X-Hermes-Session-Id` headers). Files: `hermes/HermesPrefs.kt` / `HermesMessage.kt` / `HermesClient.kt`, panels at `ui/HermesChatPanel.kt` / `ui/HermesConfigPanel.kt`. Voice integration adds `VoiceSink.HERMES_CHAT` + `speakLatestHermesAssistantIfNeeded()` + `cancelHermesSpeech()`, parallel to the OpenClaw plumbing. Wire is **REST+SSE only**, no WebSocket — don't try to reuse `GatewaySession`. Config rows accept typed URL + bearer token; no QR pairing this round. Theme color `AppThemes.Hermes = #FFB300` (amber).
+
 ## Alpine arm64 chroot + Claude Code agent
 
 See memory `project_alpine_chroot.md` and `project_claude_agent_on_r1.md` for full setup. Quick recap:
@@ -310,7 +316,8 @@ Copied from `../mylauncher/res/` except layouts:
 - `applicationId = "com.r1.launcher"` — same as old project.
 - **Signed with the LineageOS platform key** — `platform.keystore` (PKCS12, password `android`, alias `platform`) is converted from `~/lineage/build/make/target/product/security/platform.{pk8,x509.pem}`. Both `debug` and `release` build types use it. The prebuilt at `~/lineage/device/rabbit/r1/prebuilt/app/R1Launcher/Android.mk` declares `LOCAL_CERTIFICATE := platform` so Soong re-signs at OS-build time with the same key — sigs match, `adb install -r app-debug.apk` works in-place over the system app. Required because `ACCESS_MESSAGES_ON_ICC` (signature-only) gates `SmsManager.getAllMessagesFromIcc()`. SHA-256 cert fingerprint `c8a2e9bccf597c2fb6dc66bee293fc13f2fc47ec77bc6b2b0d52c11f51192ab8`.
 - **One-time migration cost from `debug.keystore` (pre-v3.28.1) to platform key (v3.28.1+):** existing `/data/app/` installs signed with `debug.keystore` will reject upgrade with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`. After flashing the new system image, either `fastboot -w` (cleanest) or `adb uninstall com.r1.launcher` first, then reinstall.
-- **`versionCode`** starts at 100 (last Java release was 24); current 213+. Bump both `versionCode` and `versionName` in `app/build.gradle.kts` before each release.
+- **Release cuts on tag push, not main push.** `.github/workflows/release.yml` triggers on `v*` tags; building the APK uses whatever `versionCode`/`versionName` is at HEAD. Workflow: unset skip-worktree on `app/build.gradle.kts`, bump both fields, commit, `git tag vX.Y.Z && git push origin main --tags`. Re-pin debug and re-skip after.
+- **`versionCode` chain** restarted at `1` for the v1.0.x clean baseline (last legacy was 213+). Increment both fields together for every release; same `versionCode` + new `versionName` won't allow OTA upgrade.
 
 ## Do not waste time re-attempting
 
@@ -337,7 +344,9 @@ Copied from `../mylauncher/res/` except layouts:
 - **Auto-transcribing audio attachments via `chat.send`.** Gateway forwards as multimodal, no STT. Transcribe client-side first.
 - **OpenClaw role `node` for chat / direct `chat.subscribe` / self-generated connect nonce / `:18789` port suffix.** Use `operator` scopes; wrap subscribe in `node.event`; wait for `connect.challenge`; let OkHttp pick port from scheme.
 - **`adb shell cmd clipboard set`.** Not implemented. Use `com.r1.launcher.SET_OPENAI_KEY` broadcast.
-- **Forgetting to bump `versionCode`.** System app at `/system/app/R1Launcher/` is the floor → `INSTALL_FAILED_VERSION_DOWNGRADE`.
+- **Bumping `versionCode` per debug install.** File is skip-worktree pinned to `1000` locally; `adb install -r` at same version is allowed. Only bump if `/system/app/R1Launcher/` floor passes the pin.
+- **Committing local `versionCode` bumps.** File is skip-worktree — `git add app/build.gradle.kts` is a no-op until you `--no-skip-worktree` first. Don't `git checkout app/build.gradle.kts` either; it'll clobber the local pin.
+- **Pushing to main expecting a release.** Workflow trigger is `v*` tags only. `git tag vX.Y.Z && git push --tags` cuts the release; plain `git push` does not.
 - **Mapping side button to HOME or POWER.** HOME collapses DOWN/UP into one `onNewIntent`; POWER is intercepted. Use `BUTTON_1` — tradeoff: dead inside third-party apps.
 - **Delivering SMS via `content://sms` without being default SMS app.** Use legacy `SMS_RECEIVED` + own JSON cache.
 - **`SmsManager.getAllMessagesFromIcc()` direct call.** Hidden `@SystemApi`; reflect + `runCatching`.

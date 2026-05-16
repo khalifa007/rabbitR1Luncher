@@ -21,8 +21,8 @@
     <string name="app_label_messages">messages</string>
     <string name="app_label_terminal">terminal</string>
     <string name="app_label_claude">claude code</string>
+    <string name="app_label_hermes">hermes</string>
     <string name="app_label_meetings">meetings</string>
-    <string name="app_label_survey">surveyor</string>
 
     <!-- Settings root -->
     <string name="settings_title">settings</string>
@@ -38,13 +38,15 @@
     <string name="settings_display_title">display</string>
     <string name="settings_display_row_brightness">brightness</string>
     <string name="settings_sound_title">sound</string>
-    <string name="settings_sound_row_ui">ui sound</string>
-    <string name="settings_sound_row_speaker">speaker</string>
+    <string name="settings_sound_row_system_toggle">system sound</string>
+    <string name="settings_sound_row_ui">system volume</string>
+    <string name="settings_sound_row_speaker">sound</string>
     <string name="settings_device_title">device</string>
     <string name="settings_device_row_check_updates">check for updates</string>
     <string name="settings_device_row_language">language</string>
     <string name="settings_device_row_reboot">restart</string>
     <string name="settings_device_row_power_off">power off</string>
+    <string name="settings_device_row_reset_camera">reset camera</string>
     <string name="settings_device_row_factory_reset">factory reset</string>
     <string name="settings_about_title">about</string>
     <string name="settings_about_app">R1 Launcher</string>
@@ -100,8 +102,8 @@
 
     <!-- Brightness / volume / ui-volume -->
     <string name="panel_brightness_title">brightness</string>
-    <string name="panel_volume_title">speaker</string>
-    <string name="panel_uivolume_title">ui sound</string>
+    <string name="panel_volume_title">sound</string>
+    <string name="panel_uivolume_title">system volume</string>
     <string name="panel_volume_hint">wheel ↑↓   press OK</string>
 
     <!-- Factory reset -->
@@ -141,7 +143,6 @@
     <string name="voice_row_toggle_on">voice: on</string>
     <string name="voice_row_toggle_off">voice: off</string>
     <string name="voice_row_key">elevenlabs key</string>
-    <string name="voice_row_scan_qr">scan key from qr</string>
     <string name="voice_row_clear_key">clear key</string>
     <string name="voice_kb_hint">type sk_… or paste</string>
     <string name="voice_row_custom_id">custom voice id</string>
@@ -252,7 +253,6 @@
     <!-- OpenClaw QR -->
     <string name="openclaw_qr_back_home">home</string>
     <string name="openclaw_qr_title_gateway">scan gate qr</string>
-    <string name="openclaw_qr_title_openai">show your gate setup-code qr</string>
 
     <!-- Home hotspot status -->
     <string name="home_hotspot_zero">hotspot on · 0 devices</string>

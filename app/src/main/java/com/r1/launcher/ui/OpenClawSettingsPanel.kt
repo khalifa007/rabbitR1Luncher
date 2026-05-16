@@ -55,7 +55,7 @@ fun OpenClawSettingsPanel(
             slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
     ) {
         val items = listOf(
-            SettingsItem.Standard(stringResource(R.string.back_short)),
+            SettingsItem.Standard("__header__"),
             SettingsItem.Toggle(stringResource(R.string.openclaw_settings_speak), state.voiceEnabled),
             SettingsItem.Toggle(stringResource(R.string.openclaw_settings_hide_input), state.openClawHideChat),
             SettingsItem.Info(stringResource(R.string.openclaw_settings_font), "${state.chatFontSize} sp"),
@@ -74,17 +74,24 @@ fun OpenClawSettingsPanel(
             LazyColumn(
                 state = listState,
                 contentPadding = PaddingValues(
-                    start = 16.dp, end = 16.dp, top = 32.dp, bottom = 32.dp,
+                    start = 16.dp, end = 16.dp, top = 0.dp, bottom = 32.dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
                 itemsIndexed(
                     items = items,
-                    key = { _, item -> item.label },
+                    key = { idx, item -> if (idx == 0) "header" else item.label },
                 ) { idx, item ->
-                    when (item) {
-                        is SettingsItem.Info -> FontSizeRow(
+                    when {
+                        idx == 0 -> AppPageHeader(
+                            titleIconRes = R.drawable.ic_wifi_arc,
+                            title = "openclaw",
+                            backFocused = state.openClawSettingsFocus == 0,
+                            onBack = { onRowClick(0) },
+                            themeColor = AppThemes.OpenClaw,
+                        )
+                        item is SettingsItem.Info -> FontSizeRow(
                             label = item.label,
                             value = item.value,
                             focused = idx == state.openClawSettingsFocus,

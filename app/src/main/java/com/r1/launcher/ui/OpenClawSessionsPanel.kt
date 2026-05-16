@@ -62,14 +62,13 @@ fun OpenClawSessionsPanel(
         // multiple threads sharing the same displayName ("R1 Launcher" — our own
         // client name, echoed back by the gateway) stay distinguishable.
         data class Row(val label: String, val subtitle: String)
-        val backTxt = stringResource(R.string.back_short)
         val loadingTxt = stringResource(R.string.common_loading)
         val emptyTxt = stringResource(R.string.openclaw_sessions_empty)
         val refreshingTxt = stringResource(R.string.openclaw_sessions_refreshing)
         val refreshTxt = stringResource(R.string.openclaw_sessions_refresh)
         val newTxt = stringResource(R.string.openclaw_sessions_new)
         val items = buildList {
-            add(Row(backTxt, ""))
+            add(Row("__header__", ""))
             // Index 1 = create a fresh thread. Dispatch handled by
             // LauncherActivity.openClawSessionsRowActivate.
             add(Row(newTxt, ""))
@@ -95,7 +94,7 @@ fun OpenClawSessionsPanel(
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
             LazyColumn(
                 state = listState,
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 32.dp, bottom = 32.dp),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 32.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
@@ -106,15 +105,25 @@ fun OpenClawSessionsPanel(
                     // ("R1 Launcher", per the comment above). subtitle is the
                     // raw session key — unique per session, empty for back/new/
                     // refresh which all have unique labels.
-                    key = { _, row -> "${row.label}|${row.subtitle}" },
+                    key = { idx, row -> if (idx == 0) "header" else "${row.label}|${row.subtitle}" },
                 ) { idx, row ->
-                    SettingsRow(
-                        label = row.label,
-                        focused = idx == state.openClawSessionsFocus,
-                        toggleChecked = null,
-                        subtitle = row.subtitle,
-                        onClick = { onRowClick(idx) },
-                    )
+                    if (idx == 0) {
+                        AppPageHeader(
+                            titleIconRes = R.drawable.ic_wifi_arc,
+                            title = "sessions",
+                            backFocused = state.openClawSessionsFocus == 0,
+                            onBack = { onRowClick(0) },
+                            themeColor = AppThemes.OpenClaw,
+                        )
+                    } else {
+                        SettingsRow(
+                            label = row.label,
+                            focused = idx == state.openClawSessionsFocus,
+                            toggleChecked = null,
+                            subtitle = row.subtitle,
+                            onClick = { onRowClick(idx) },
+                        )
+                    }
                 }
             }
         }

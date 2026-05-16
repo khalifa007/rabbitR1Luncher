@@ -71,7 +71,7 @@ fun TranscriberSettingsPanel(
         val dim = Color(0xFFAAAAAA)
 
         val items = listOf(
-            "< back" to "",
+            "__header__" to "",
             "smtp host" to state.smtpHostDisplay.ifBlank { TranscriberPrefs.DEFAULT_HOST },
             "smtp port" to (if (state.smtpPortDisplay > 0) state.smtpPortDisplay.toString() else TranscriberPrefs.DEFAULT_PORT.toString()),
             "smtp user" to (state.smtpUserDisplay.ifBlank { "(not set)" }),
@@ -88,31 +88,33 @@ fun TranscriberSettingsPanel(
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
             LazyColumn(
                 state = listState,
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 32.dp, bottom = 32.dp),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 32.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
-                item {
-                    Text(
-                        text = stringResource(R.string.transcriber_settings_title),
-                        color = orange,
-                        fontSize = 22.sp,
-                        fontFamily = type.appCard.fontFamily,
-                    )
-                }
                 itemsIndexed(items) { idx, (label, sub) ->
-                    val subColor = when (idx) {
-                        3, 4 -> if (state.hasSmtp) ok else dim
-                        5 -> if (state.defaultRecipientDisplay.isNotBlank()) ok else dim
-                        else -> dim
+                    if (idx == 0) {
+                        AppPageHeader(
+                            titleIconRes = R.drawable.ic_meetings,
+                            title = "settings",
+                            backFocused = state.transcriberSettingsFocus == 0,
+                            onBack = { onRowClick(0) },
+                            themeColor = AppThemes.Meetings,
+                        )
+                    } else {
+                        val subColor = when (idx) {
+                            3, 4 -> if (state.hasSmtp) ok else dim
+                            5 -> if (state.defaultRecipientDisplay.isNotBlank()) ok else dim
+                            else -> dim
+                        }
+                        SettingsRow(
+                            label = label,
+                            focused = state.transcriberSettingsFocus == idx,
+                            subtitle = sub,
+                            subtitleColor = subColor,
+                            onClick = { onRowClick(idx) },
+                        )
                     }
-                    SettingsRow(
-                        label = label,
-                        focused = state.transcriberSettingsFocus == idx,
-                        subtitle = sub,
-                        subtitleColor = subColor,
-                        onClick = { onRowClick(idx) },
-                    )
                 }
             }
 

@@ -96,10 +96,18 @@ fun OpenClawChatPanel(
 
                 val listState = rememberLazyListState()
                 var lastTick by remember { mutableStateOf(state.chatScrollIndex) }
+                var lastSize by remember { mutableStateOf(state.chatMessages.size) }
 
                 // chatScrollIndex is now a relative scroll tick. 0 means "reset to bottom".
+                // We also snap-to-bottom whenever the message list grows while the user
+                // is already at the bottom — otherwise newly-sent / received bubbles
+                // land off-screen above the viewport because the prior effect only
+                // reacted to chatScrollIndex changes, not size changes.
                 LaunchedEffect(state.chatScrollIndex, state.chatMessages.size) {
-                    if (state.chatScrollIndex == 0 && lastTick != 0) {
+                    val sizeGrew = state.chatMessages.size > lastSize
+                    lastSize = state.chatMessages.size
+
+                    if (state.chatScrollIndex == 0 && (lastTick != 0 || sizeGrew)) {
                         runCatching { listState.animateScrollToItem(0) }
                         lastTick = 0
                     } else if (state.chatScrollIndex != lastTick) {
@@ -238,54 +246,50 @@ fun OpenClawChatPanel(
                 }
             }
 
-            // Gradient backdrop behind the floating header — fades from
-            // mostly-opaque black at the very top to transparent below so
-            // messages are still readable while scrolling under the header.
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .height(70.dp)
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(
-                                Color(0xCC000000),
-                                Color(0x66000000),
-                                Color.Transparent,
-                            ),
-                        ),
-                    ),
+            // Compact single-row floating header: back · status · rec/stt · gear.
+            AppPageHeader(
+                backFocused = false,
+                onBack = onBack,
+                themeColor = AppThemes.OpenClaw,
+                compact = true,
+                floating = true,
+                modifier = Modifier.align(Alignment.TopCenter),
+                trailingContent = {
+                    StatusDot(state.chatStatus)
+                    when {
+                        state.chatRecording -> {
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                stringResource(R.string.terminal_status_rec),
+                                style = type.appCard.copy(fontSize = 13.sp),
+                                color = Color(0xFFFF4500),
+                            )
+                        }
+                        state.chatTranscribing -> {
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                stringResource(R.string.terminal_status_stt),
+                                style = type.appCard.copy(fontSize = 13.sp),
+                                color = Color(0xFFFFC107),
+                            )
+                        }
+                        state.chatBusy -> {
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                stringResource(R.string.common_thinking_dots),
+                                style = type.appCard.copy(fontSize = 13.sp),
+                                color = Color.White,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    MenuDot(
+                        themeColor = AppThemes.OpenClaw,
+                        focused = menuOpen,
+                        onClick = { menuOpen = !menuOpen },
+                    )
+                },
             )
-
-            // Floating header — same row content as before, now overlaid
-            // on top of the chat list instead of pushing it down.
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 4.dp),
-            ) {
-                BackPill(label = stringResource(R.string.openclaw_back_home), onClick = onBack)
-                Spacer(Modifier.weight(1f))
-                StatusDot(state.chatStatus)
-                when {
-                    state.chatRecording -> {
-                        Spacer(Modifier.width(6.dp))
-                        Text(stringResource(R.string.terminal_status_rec), style = type.appCard, color = Color(0xFFFF4500))
-                    }
-                    state.chatTranscribing -> {
-                        Spacer(Modifier.width(6.dp))
-                        Text(stringResource(R.string.terminal_status_stt), style = type.appCard, color = Color(0xFFFFC107))
-                    }
-                    state.chatBusy -> {
-                        Spacer(Modifier.width(6.dp))
-                        Text(stringResource(R.string.common_thinking_dots), style = type.appCard, color = Color.White)
-                    }
-                }
-                Spacer(Modifier.width(8.dp))
-                MenuDot(onClick = { menuOpen = !menuOpen })
-            }
 
             // Dropdown menu overlay — rendered on top of the Column z-stack
             ChatDropdownMenu(
@@ -341,31 +345,6 @@ private fun EmptyHint(status: String) {
 }
 
 @Composable
-private fun MenuDot(onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .clip(CircleShape)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        // Vertical three-dot icon (⋮) built from 3 small circles
-        Column(
-            verticalArrangement = Arrangement.spacedBy(3.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            repeat(3) {
-                Box(
-                    modifier = Modifier
-                        .size(4.dp)
-                        .background(Color(0xFFFF4500), CircleShape),
-                )
-            }
-        }
-    }
-}
-
-@Composable
 private fun ChatDropdownMenu(
     expanded: Boolean,
     onDismiss: () -> Unit,
@@ -393,7 +372,7 @@ private fun ChatDropdownMenu(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(top = 38.dp, end = 12.dp),
+                .padding(top = 44.dp, end = 12.dp),
             contentAlignment = Alignment.TopEnd,
         ) {
             Column(

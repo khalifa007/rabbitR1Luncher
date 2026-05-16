@@ -6,7 +6,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -17,8 +16,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -26,8 +23,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -36,7 +31,6 @@ import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
 import com.r1.launcher.R
 
-private val ACCENT = Color(0xFFFF6B00)
 private val DANGER = Color(0xFFCC1F00)
 
 @Composable
@@ -57,42 +51,16 @@ fun FactoryConfirmPanel(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 18.dp),
+                    .padding(start = 16.dp, end = 16.dp, bottom = 18.dp),
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(if (backFocused) ACCENT else Color.Transparent)
-                        .clickable { onRowClick(0) }
-                        .padding(horizontal = 6.dp, vertical = 2.dp),
-                ) {
-                    Text(
-                        text = stringResource(R.string.back),
-                        color = if (backFocused) Color.Black else ACCENT,
-                        fontSize = 24.sp,
-                        fontFamily = type.appCard.fontFamily,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-                Spacer(Modifier.height(10.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Image(
-                        painter = painterResource(R.drawable.ic_settings),
-                        contentDescription = null,
-                        colorFilter = ColorFilter.tint(ACCENT),
-                        modifier = Modifier.size(28.dp),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = stringResource(R.string.factory_confirm_title),
-                        color = ACCENT,
-                        fontSize = 28.sp,
-                        fontFamily = type.appCard.fontFamily,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-                Spacer(Modifier.height(20.dp))
+                AppPageHeader(
+                    titleIconRes = R.drawable.ic_settings,
+                    title = stringResource(R.string.factory_confirm_title),
+                    backFocused = backFocused,
+                    onBack = { onRowClick(0) },
+                    themeColor = AppThemes.Settings,
+                )
+                Spacer(Modifier.height(12.dp))
                 Text(
                     text = stringResource(R.string.factory_confirm_warn),
                     color = Color(0xFFCCCCCC),

@@ -15,12 +15,14 @@ interface LauncherHost {
     fun setBrightness(level: Int)
     fun setVolume(level: Int)
     fun setUiVolume(level: Int)
+    fun toggleUiSoundEnabled(enabled: Boolean)
     fun toggleWifi(enable: Boolean)
     fun toggleCellular(enable: Boolean)
     fun toggleBluetooth(enable: Boolean)
     fun factoryReset()
     fun rebootDevice()
     fun powerOffDevice()
+    fun resetCameraMotor()
     fun startWifiScan()
     fun connectToWifi(ssid: String, pass: String)
     fun toggleWifiShare(enable: Boolean)
@@ -97,6 +99,24 @@ interface LauncherHost {
     fun claudeRecordStart()
     fun claudeRecordStop()
     fun claudePasteFromClipboard()
+    // --- hermes agent ---
+    fun hermesSendText(text: String)
+    fun hermesRecordStart()
+    fun hermesRecordStop()
+    fun hermesScrollUp()
+    fun hermesScrollDown()
+    fun hermesClearHistory()
+    fun hermesTestConnection()
+    fun hermesConfigRowActivate(idx: Int)
+    fun hermesSetServerUrl(value: String)
+    fun hermesSetApiKey(value: String)
+    fun hermesPasteServerUrlFromClipboard()
+    fun hermesPasteApiKeyFromClipboard()
+    /** Open the Hermes QR scanner (camera-perm gated, mirrors openClawScanned flow). */
+    fun openHermesQr()
+    /** Consume a raw QR scan: decode, save url/key to HermesPrefs, navigate back
+     *  to HERMES_CONFIG, auto-probe /health. */
+    fun hermesScanned(raw: String)
     /** Kick off `claude auth login --claudeai`. Returns the OAuth URL the user
      *  must open in a browser, plus a copy of the raw script log for
      *  diagnostics. Throws if the chroot or the auth helper script is missing. */
@@ -158,51 +178,6 @@ interface LauncherHost {
     /** Dispatch a single ⋮ menu action. The activity reads the current meeting
      *  uuid from state. */
     fun transcriberDetailMenuActivate(action: com.r1.launcher.transcriber.TranscriberDetailAction)
-
-    // --- survey call bot ---
-    fun surveyOpen()
-    fun surveyOpenCampaign()
-    fun surveyConfirmCampaignAndDial()
-    fun surveyHangup()
-    fun surveyOpenDetail(callRecordId: String)
-    fun surveyDeleteCallRecord(callRecordId: String)
-    fun surveyEmailCallRecord(callRecordId: String)
-    /** Re-run the LLM summary for a finished call record (overwrites any
-     *  previous summary). Used when the first summary was empty or wrong. */
-    fun surveyRetrySummary(callRecordId: String)
-    /** Post-call entry point from the SIP/orchestrator path: finalize the
-     *  record, generate the summary, and email it. Idempotent. */
-    fun surveyHandleCallComplete(callRecordId: String)
-    fun surveyPlayAudio(callRecordId: String)
-    fun surveyStopAudio()
-    fun surveyOpenSettings()
-    fun surveySettingsRowActivate(idx: Int)
-    fun surveyCampaignRowActivate(idx: Int)
-    fun surveyListRowActivate(idx: Int)
-    /** Persist the OpenAI gpt-realtime-2 API key. */
-    fun surveySaveOpenAiKey(key: String)
-    fun surveyPasteOpenAiKey()
-    fun surveyClearOpenAiKey()
-    fun surveyCycleVoice()
-    fun surveyCycleSummarizerModel()
-
-    // --- web companion CRUD ---
-    /** Persist a Survey (new if [com.r1.launcher.survey.Survey.id] is blank,
-     *  update otherwise). Returns the surveyId. */
-    fun surveyUpsertSurvey(survey: com.r1.launcher.survey.Survey): String
-    fun surveyDeleteSurveyById(surveyId: String)
-    /** Create a campaign, ready to start. Returns the new campaign id. */
-    fun surveyCreateCampaign(surveyId: String, contacts: List<com.r1.launcher.survey.Contact>): String
-    fun surveyCancelCampaignById(campaignId: String)
-    /** Kick off (or resume) calling through a campaign. Calls into the SIP
-     *  dialer when task #10 is wired; for now toasts a placeholder. */
-    fun surveyStartCampaignById(campaignId: String)
-    /** Persist a single setting from the web companion. Field names:
-     *   - `openai_key`, `claude_key`
-     *   - `sip_host`, `sip_user`, `sip_password`, `sip_from`
-     *   - `consent_text`, `voice`, `summarizer_model`, `email_recipient`
-     *  Empty string clears the field for nullable backings. */
-    fun surveySaveSettingsField(field: String, value: String)
 }
 
 fun LauncherState.wheelUp(host: LauncherHost) {
@@ -340,6 +315,7 @@ fun LauncherState.wheelUp(host: LauncherHost) {
             }
         }
         Panel.OPENCLAW_QR -> { /* camera handles input */ }
+        Panel.HERMES_QR -> { /* camera handles input */ }
         Panel.OPENCLAW_CHAT -> { host.openClawScrollUp(); host.navTone() }
         Panel.OPENCLAW_CAMERA -> { host.openClawCameraMotorNudge(-15) }
         Panel.OPENCLAW_SETTINGS -> {
@@ -372,6 +348,14 @@ fun LauncherState.wheelUp(host: LauncherHost) {
         }
         Panel.TERMINAL -> { terminalScrollIndex++; host.navTone() }
         Panel.CLAUDE -> { claudeScrollIndex++; host.navTone() }
+        Panel.HERMES_CHAT -> { host.hermesScrollUp(); host.navTone() }
+        Panel.HERMES_CONFIG -> {
+            if (hermesConfigFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                hermesConfigFocus--; host.navTone()
+            }
+        }
         Panel.TRANSCRIBER_LIST -> {
             if (transcriberListFocus <= 0) {
                 back(); host.backTone()
@@ -402,42 +386,6 @@ fun LauncherState.wheelUp(host: LauncherHost) {
                 back(); host.backTone()
             } else {
                 transcriberSettingsFocus--; host.navTone()
-            }
-        }
-        Panel.SURVEY_LIST -> {
-            if (surveyListFocus <= 0) {
-                back(); host.backTone()
-            } else {
-                surveyListFocus--; host.navTone()
-            }
-        }
-        Panel.SURVEY_CAMPAIGN -> {
-            if (surveyCampaignFocus <= 0) {
-                back(); host.backTone()
-            } else {
-                surveyCampaignFocus--; host.navTone()
-            }
-        }
-        Panel.SURVEY_CONSENT -> {
-            if (surveyConsentFocus <= 0) {
-                back(); host.backTone()
-            } else {
-                surveyConsentFocus--; host.navTone()
-            }
-        }
-        Panel.SURVEY_LIVE -> { /* side-button hangs up; no scroll target */ }
-        Panel.SURVEY_DETAIL -> {
-            if (surveyDetailFocus <= 0) {
-                back(); host.backTone()
-            } else {
-                surveyDetailFocus--; host.navTone()
-            }
-        }
-        Panel.SURVEY_SETTINGS -> {
-            if (surveySettingsFocus <= 0) {
-                back(); host.backTone()
-            } else {
-                surveySettingsFocus--; host.navTone()
             }
         }
         Panel.HOME -> { /* clock screen — no list to scroll */ }
@@ -477,13 +425,13 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.SETTINGS_SOUND -> {
             val prev = settingsSoundFocus
-            settingsSoundFocus = (settingsSoundFocus + 1).coerceAtMost(2) // back, ui sound, speaker
+            settingsSoundFocus = (settingsSoundFocus + 1).coerceAtMost(3) // back, system-toggle, system-volume, sound
             if (prev != settingsSoundFocus) host.navTone()
         }
         Panel.SETTINGS_DEVICE -> {
             val prev = settingsDeviceFocus
-            // back, updates, language, reboot, power off, factory reset
-            settingsDeviceFocus = (settingsDeviceFocus + 1).coerceAtMost(5)
+            // back, updates, language, reboot, power off, reset camera, factory reset
+            settingsDeviceFocus = (settingsDeviceFocus + 1).coerceAtMost(6)
             if (prev != settingsDeviceFocus) host.navTone()
         }
         Panel.SETTINGS_ABOUT -> {
@@ -491,8 +439,8 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.SETTINGS_VOICE -> {
             val prev = voiceFocus
-            // back, on/off, key, scan-qr, subscription, voice picker, custom-id, test, tuning, clear
-            voiceFocus = (voiceFocus + 1).coerceAtMost(9)
+            // back, on/off, key, subscription, voice picker, custom-id, test, tuning, clear
+            voiceFocus = (voiceFocus + 1).coerceAtMost(8)
             if (prev != voiceFocus) host.navTone()
         }
         Panel.SETTINGS_VOICE_TUNING -> {
@@ -562,6 +510,7 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             }
         }
         Panel.OPENCLAW_QR -> { /* camera handles input */ }
+        Panel.HERMES_QR -> { /* camera handles input */ }
         Panel.OPENCLAW_CHAT -> { host.openClawScrollDown(); host.navTone() }
         Panel.OPENCLAW_CAMERA -> { host.openClawCameraMotorNudge(+15) }
         Panel.OPENCLAW_SETTINGS -> {
@@ -610,6 +559,13 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             claudeScrollIndex = (claudeScrollIndex - 1).coerceAtLeast(0)
             if (prev != claudeScrollIndex) host.navTone()
         }
+        Panel.HERMES_CHAT -> { host.hermesScrollDown(); host.navTone() }
+        Panel.HERMES_CONFIG -> {
+            val prev = hermesConfigFocus
+            // back, url, key, scan, speak, hide input, test
+            hermesConfigFocus = (hermesConfigFocus + 1).coerceAtMost(6)
+            if (prev != hermesConfigFocus) host.navTone()
+        }
         Panel.TRANSCRIBER_LIST -> {
             // 0=back, 1="+ new recording", 2..=meetings ; +1 for settings shortcut at the end
             val max = 2 + meetings.size  // back + new + N meetings + settings = last idx N+2
@@ -636,39 +592,6 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             // back, host, port, user, password, recipient, clear
             transcriberSettingsFocus = (transcriberSettingsFocus + 1).coerceAtMost(6)
             if (prev != transcriberSettingsFocus) host.navTone()
-        }
-        Panel.SURVEY_LIST -> {
-            // 0=back, 1=settings, 2="+ new campaign", 3..=campaigns rows
-            val max = 2 + campaigns.size
-            val prev = surveyListFocus
-            surveyListFocus = (surveyListFocus + 1).coerceAtMost(max)
-            if (prev != surveyListFocus) host.navTone()
-        }
-        Panel.SURVEY_CAMPAIGN -> {
-            // 0=back, 1=pick survey, 2=pick contacts, 3=start
-            val prev = surveyCampaignFocus
-            surveyCampaignFocus = (surveyCampaignFocus + 1).coerceAtMost(3)
-            if (prev != surveyCampaignFocus) host.navTone()
-        }
-        Panel.SURVEY_CONSENT -> {
-            // 0=cancel, 1=confirm + dial
-            val prev = surveyConsentFocus
-            surveyConsentFocus = (surveyConsentFocus + 1).coerceAtMost(1)
-            if (prev != surveyConsentFocus) host.navTone()
-        }
-        Panel.SURVEY_LIVE -> { /* side-button hangs up; no scroll target */ }
-        Panel.SURVEY_DETAIL -> {
-            // 0=back, 1=⋮
-            val prev = surveyDetailFocus
-            surveyDetailFocus = (surveyDetailFocus + 1).coerceAtMost(1)
-            if (prev != surveyDetailFocus) host.navTone()
-        }
-        Panel.SURVEY_SETTINGS -> {
-            // back, openai-key, sip-host, sip-user, sip-password, sip-from,
-            // consent text, voice cycle, summarizer model, email recipient, clear
-            val prev = surveySettingsFocus
-            surveySettingsFocus = (surveySettingsFocus + 1).coerceAtMost(10)
-            if (prev != surveySettingsFocus) host.navTone()
         }
         Panel.HOME -> {
             openApps()
@@ -740,8 +663,9 @@ fun LauncherState.activate(host: LauncherHost) {
         }
         Panel.SETTINGS_SOUND -> when (settingsSoundFocus) {
             0 -> { back(); host.backTone() }
-            1 -> { openUiVolume(); host.selectTone() }
-            2 -> { openVolume(); host.selectTone() }
+            1 -> { host.toggleUiSoundEnabled(!uiSoundEnabled); host.popTone() }
+            2 -> { openUiVolume(); host.selectTone() }
+            3 -> { openVolume(); host.selectTone() }
         }
         Panel.SETTINGS_DEVICE -> when (settingsDeviceFocus) {
             0 -> { back(); host.backTone() }
@@ -749,7 +673,8 @@ fun LauncherState.activate(host: LauncherHost) {
             2 -> { openSettingsLanguage(); host.selectTone() }
             3 -> { host.rebootDevice(); host.selectTone() }
             4 -> { host.powerOffDevice(); host.selectTone() }
-            5 -> { openFactoryConfirm(); host.selectTone() }
+            5 -> { host.resetCameraMotor(); host.popTone() }
+            6 -> { openFactoryConfirm(); host.selectTone() }
         }
         Panel.SETTINGS_ABOUT -> { back(); host.backTone() }
         Panel.NETWORK -> when (networkFocus) {
@@ -794,6 +719,7 @@ fun LauncherState.activate(host: LauncherHost) {
         Panel.WIFI_PASSWORD -> { /* RetroKeyboard handles input */ }
         Panel.BRIGHTNESS, Panel.VOLUME, Panel.UI_VOLUME -> { back(); host.selectTone() }
         Panel.OPENCLAW_QR -> { /* camera scan auto-completes; activate is no-op */ }
+        Panel.HERMES_QR -> { /* camera scan auto-completes; activate is no-op */ }
         Panel.OPENCLAW_CHAT -> { host.openClawToggleRecord(); host.popTone() }
         Panel.OPENCLAW_CAMERA -> { /* touch-first capture/ask surface */ }
         Panel.OPENCLAW_SETTINGS -> {
@@ -826,6 +752,11 @@ fun LauncherState.activate(host: LauncherHost) {
                 host.popTone()
             }
         }
+        Panel.HERMES_CHAT -> { /* push-to-talk handled in side-button dispatcher; wheel press is no-op */ }
+        Panel.HERMES_CONFIG -> {
+            host.hermesConfigRowActivate(hermesConfigFocus)
+            host.selectTone()
+        }
         Panel.CLAUDE -> {
             // Redirect screen: wheel-press is the primary "open anyway"
             // action so users can dismiss the hint without reaching the
@@ -848,8 +779,8 @@ fun LauncherState.activate(host: LauncherHost) {
         Panel.TRANSCRIBER_LIST -> when {
             // 0=back, 1=settings, 2=record, 3..N+2=meetings
             transcriberListFocus == 0 -> { back(); host.backTone() }
-            transcriberListFocus == 1 -> { host.transcriberOpenSettings(); host.selectTone() }
-            transcriberListFocus == 2 -> { host.transcriberStartRecording(); host.popTone() }
+            transcriberListFocus == 1 -> { host.transcriberStartRecording(); host.popTone() }
+            transcriberListFocus == 2 -> { host.transcriberOpenSettings(); host.selectTone() }
             transcriberListFocus - 3 in meetings.indices -> {
                 val m = meetings[transcriberListFocus - 3]
                 host.transcriberOpenDetail(m.uuid)
@@ -873,30 +804,6 @@ fun LauncherState.activate(host: LauncherHost) {
             host.transcriberSettingsRowActivate(transcriberSettingsFocus)
             host.selectTone()
         }
-        Panel.SURVEY_LIST -> {
-            host.surveyListRowActivate(surveyListFocus)
-            host.selectTone()
-        }
-        Panel.SURVEY_CAMPAIGN -> {
-            host.surveyCampaignRowActivate(surveyCampaignFocus)
-            host.selectTone()
-        }
-        Panel.SURVEY_CONSENT -> when (surveyConsentFocus) {
-            0 -> { back(); host.backTone() }
-            1 -> { host.surveyConfirmCampaignAndDial(); host.selectTone() }
-        }
-        // Side-button activate while on the live call panel = hang up.
-        Panel.SURVEY_LIVE -> { host.surveyHangup(); host.popTone() }
-        Panel.SURVEY_DETAIL -> when (surveyDetailFocus) {
-            0 -> { back(); host.backTone() }
-            // No multi-action menu yet — single action is "email this call".
-            // Re-summary + delete + playback live on the web companion for now.
-            1 -> currentCallRecordId?.let { host.surveyEmailCallRecord(it); host.selectTone() }
-        }
-        Panel.SURVEY_SETTINGS -> {
-            host.surveySettingsRowActivate(surveySettingsFocus)
-            host.selectTone()
-        }
     }
 }
 
@@ -915,12 +822,6 @@ fun LauncherState.backPressed(host: LauncherHost) {
     // (and would chew battery indefinitely).
     if (panel == Panel.TRANSCRIBER_RECORDING) {
         host.transcriberStopRecording()
-        back(); host.backTone()
-        return
-    }
-    // Back from a live survey call hangs up first — same rationale.
-    if (panel == Panel.SURVEY_LIVE) {
-        host.surveyHangup()
         back(); host.backTone()
         return
     }

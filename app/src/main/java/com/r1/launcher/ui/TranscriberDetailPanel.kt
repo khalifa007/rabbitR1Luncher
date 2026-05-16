@@ -96,35 +96,21 @@ fun TranscriberDetailPanel(
                 return@AnimatedVisibility
             }
 
-            Column(modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 18.dp)) {
-                // Header
-                Row(
-                    modifier = Modifier.fillMaxWidth().height(36.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    HeaderBackPillD(
-                        focused = !state.transcriberDetailMenuOpen && state.transcriberDetailFocus == 0,
-                        color = orange,
-                        onClick = onBack,
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = meeting.title,
-                        color = orange,
-                        fontSize = 16.sp,
-                        fontFamily = type.appCard.fontFamily,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    HeaderMenuIcon(
-                        focused = !state.transcriberDetailMenuOpen && state.transcriberDetailFocus == 1,
-                        color = orange,
-                        onClick = onMenuOpen,
-                    )
-                }
+            Column(modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 0.dp)) {
+                AppPageHeader(
+                    backFocused = !state.transcriberDetailMenuOpen && state.transcriberDetailFocus == 0,
+                    onBack = onBack,
+                    themeColor = AppThemes.Meetings,
+                    compact = true,
+                    subtitle = meeting.title,
+                    trailingContent = {
+                        MenuDot(
+                            themeColor = AppThemes.Meetings,
+                            focused = !state.transcriberDetailMenuOpen && state.transcriberDetailFocus == 1,
+                            onClick = onMenuOpen,
+                        )
+                    },
+                )
 
                 Spacer(Modifier.height(8.dp))
                 Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(divider))
@@ -196,56 +182,6 @@ fun TranscriberDetailPanel(
                 onMenuClose = onMenuClose,
             )
         }
-    }
-}
-
-// ---------- header ----------
-
-@Composable
-private fun HeaderBackPillD(focused: Boolean, color: Color, onClick: () -> Unit) {
-    val type = LocalR1Type.current
-    val bg = if (focused) color else Color.Transparent
-    val fg = if (focused) Color.Black else color
-    Box(
-        modifier = Modifier
-            .height(28.dp)
-            .clip(RoundedCornerShape(6.dp))
-            .background(bg)
-            .border(1.dp, color, RoundedCornerShape(6.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = "< back",
-            color = fg,
-            fontSize = 12.sp,
-            fontFamily = type.appCard.fontFamily,
-        )
-    }
-}
-
-@Composable
-private fun HeaderMenuIcon(focused: Boolean, color: Color, onClick: () -> Unit) {
-    val type = LocalR1Type.current
-    val bg = if (focused) color else Color.Transparent
-    val fg = if (focused) Color.Black else color
-    Box(
-        modifier = Modifier
-            .size(28.dp)
-            .clip(RoundedCornerShape(6.dp))
-            .background(bg)
-            .border(1.dp, color, RoundedCornerShape(6.dp))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = "⋮",
-            color = fg,
-            fontSize = 18.sp,
-            fontFamily = type.appCard.fontFamily,
-            fontWeight = FontWeight.Bold,
-        )
     }
 }
 

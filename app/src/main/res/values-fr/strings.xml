@@ -22,7 +22,6 @@
     <string name="app_label_terminal">terminal</string>
     <string name="app_label_claude">claude code</string>
     <string name="app_label_meetings">réunions</string>
-    <string name="app_label_survey">enquêteur</string>
 
     <!-- Settings root -->
     <string name="settings_title">réglages</string>
@@ -38,8 +37,9 @@
     <string name="settings_display_title">affichage</string>
     <string name="settings_display_row_brightness">luminosité</string>
     <string name="settings_sound_title">son</string>
-    <string name="settings_sound_row_ui">son interface</string>
-    <string name="settings_sound_row_speaker">haut-parleur</string>
+    <string name="settings_sound_row_system_toggle">son système</string>
+    <string name="settings_sound_row_ui">volume système</string>
+    <string name="settings_sound_row_speaker">son</string>
     <string name="settings_device_title">appareil</string>
     <string name="settings_device_row_check_updates">rechercher des mises à jour</string>
     <string name="settings_device_row_language">langue</string>
@@ -100,8 +100,8 @@
 
     <!-- Brightness / volume / ui-volume -->
     <string name="panel_brightness_title">luminosité</string>
-    <string name="panel_volume_title">haut-parleur</string>
-    <string name="panel_uivolume_title">son interface</string>
+    <string name="panel_volume_title">son</string>
+    <string name="panel_uivolume_title">volume système</string>
     <string name="panel_volume_hint">molette ↑↓   appuyez OK</string>
 
     <!-- Factory reset -->
@@ -141,7 +141,6 @@
     <string name="voice_row_toggle_on">voix : activée</string>
     <string name="voice_row_toggle_off">voix : désactivée</string>
     <string name="voice_row_key">clé elevenlabs</string>
-    <string name="voice_row_scan_qr">scanner la clé via qr</string>
     <string name="voice_row_clear_key">effacer la clé</string>
     <string name="voice_kb_hint">tapez sk_… ou collez</string>
     <string name="voice_row_custom_id">id de voix perso</string>
@@ -252,7 +251,6 @@
     <!-- OpenClaw QR -->
     <string name="openclaw_qr_back_home">accueil</string>
     <string name="openclaw_qr_title_gateway">scanner le qr de la gate</string>
-    <string name="openclaw_qr_title_openai">montrez le qr de configuration de la gate</string>
 
     <!-- Home hotspot status -->
     <string name="home_hotspot_zero">hotspot actif · 0 appareil</string>

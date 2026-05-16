@@ -60,7 +60,7 @@ fun WifiSharePanel(
             else -> ""
         }
         val items = listOf(
-            ShareRow.Plain(stringResource(R.string.back_short)),
+            ShareRow.Plain("__header__"),
             ShareRow.Toggle(stringResource(R.string.wifi_share_row_enable), state.wifiShareEnabled, enableSubtitle),
             ShareRow.Plain(stringResource(R.string.wifi_share_row_name), ssid),
             ShareRow.Plain(stringResource(R.string.wifi_share_row_password), passDisplay),
@@ -79,16 +79,24 @@ fun WifiSharePanel(
             LazyColumn(
                 state = listState,
                 contentPadding = PaddingValues(
-                    start = 16.dp, end = 16.dp, top = 32.dp, bottom = 32.dp,
+                    start = 16.dp, end = 16.dp, top = 0.dp, bottom = 32.dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
                 itemsIndexed(
                     items = items,
-                    key = { _, item -> item.label },
+                    key = { idx, item -> if (idx == 0) "header" else item.label },
                 ) { idx, item ->
-                    when (item) {
+                    if (idx == 0) {
+                        AppPageHeader(
+                            titleIconRes = R.drawable.ic_wifi_arc,
+                            title = "wi-fi share",
+                            backFocused = state.wifiShareFocus == 0,
+                            onBack = { onRowClick(0) },
+                            themeColor = AppThemes.Settings,
+                        )
+                    } else when (item) {
                         is ShareRow.Toggle -> SettingsRow(
                             label = item.label,
                             focused = idx == state.wifiShareFocus,

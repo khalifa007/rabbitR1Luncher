@@ -38,7 +38,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -55,23 +54,18 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Meetings → list. Layout:
+ * Meetings → list.
  *
- *   [< back]   meetings        [⚙]      ← header row (focus 0 = back, focus 1 = gear)
- *   ─────────────────────────────────
- *   ┌─ + new recording ──────────┐     ← focus 2 (or "■ stop recording" while live)
- *   └────────────────────────────┘
+ *   [< back]                          [+] [⚙]
+ *   🎙 meetings
+ *   ──────────────────────────────────────
  *   ●  Standup                          ← focus 3
  *      May 10 · 12:34
- *   ●  Sync with Sara                   ← focus 4
- *      Yesterday · 03:21
- *   ⚠  Q1 review                        ← focus 5
- *      May 8 · failed
  *
- * Focus indices kept in lockstep with [com.r1.launcher.LauncherNav]:
- *   0       back pill (header left)
- *   1       settings gear (header right)
- *   2       + new recording / stop recording
+ * Focus indices:
+ *   0       back pill
+ *   1       + (start/stop recording)
+ *   2       settings gear
  *   3..N+2  one row per saved meeting
  */
 @Composable
@@ -83,95 +77,73 @@ fun TranscriberListPanel(state: LauncherState, onRowClick: (Int) -> Unit) {
     ) {
         val type = LocalR1Type.current
         val orange = Color(0xFFFF4500)
-        val divider = Color(0xFF222222)
         val dim = Color(0xFF707070)
 
-        // The header (back, title, gear) lives outside the LazyColumn so it
-        // never scrolls off. The list below holds rows starting at focus 2.
+        val listState = rememberLazyListState()
+        LaunchedEffect(state.transcriberListFocus, state.meetings.size) {
+            val target = when {
+                state.transcriberListFocus <= 2 -> 0
+                else -> (state.transcriberListFocus - 2).coerceAtMost(state.meetings.size)
+            }
+            listState.animateScrollToItem(target)
+        }
+
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-            Column(modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 18.dp)) {
-                // Header row
-                Row(
-                    modifier = Modifier.fillMaxWidth().height(36.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    HeaderBackPill(
-                        focused = state.transcriberListFocus == 0,
-                        color = orange,
-                        onClick = { onRowClick(0) },
-                    )
-                    Spacer(Modifier.weight(1f))
-                    Text(
-                        text = stringResource(R.string.transcriber_list_title),
-                        color = orange,
-                        fontSize = 22.sp,
-                        fontFamily = type.appCard.fontFamily,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Spacer(Modifier.weight(1f))
-                    HeaderGearIcon(
-                        focused = state.transcriberListFocus == 1,
-                        color = orange,
-                        onClick = { onRowClick(1) },
+            LazyColumn(
+                state = listState,
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 32.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                item(key = "header") {
+                    AppPageHeader(
+                        titleIconRes = R.drawable.ic_meetings,
+                        title = stringResource(R.string.transcriber_list_title).lowercase(),
+                        backFocused = state.transcriberListFocus == 0,
+                        onBack = { onRowClick(0) },
+                        plusFocused = state.transcriberListFocus == 1,
+                        onPlus = { onRowClick(1) },
+                        gearFocused = state.transcriberListFocus == 2,
+                        onGear = { onRowClick(2) },
+                        themeColor = AppThemes.Meetings,
                     )
                 }
 
-                Spacer(Modifier.height(8.dp))
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(1.dp)
-                        .background(divider),
-                )
-                Spacer(Modifier.height(8.dp))
-
-                // Content list — record row + meetings. focus 2 = record (item 0).
-                val listState = rememberLazyListState()
-                LaunchedEffect(state.transcriberListFocus, state.meetings.size) {
-                    val contentIdx = (state.transcriberListFocus - 2).coerceAtLeast(0)
-                    val target = contentIdx.coerceAtMost(state.meetings.size)
-                    if (state.transcriberListFocus >= 2) listState.animateScrollToItem(target)
-                }
-
-                LazyColumn(
-                    state = listState,
-                    contentPadding = PaddingValues(bottom = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxSize(),
-                ) {
-                    item(key = "rec_row") {
-                        RecordRow(
-                            label = if (state.recordingActive) "■ stop recording" else "+ new recording",
-                            focused = state.transcriberListFocus == 2,
+                // Live recording status indicator just under the header — the
+                // + button itself flips behavior to "stop" while recording, but
+                // an explicit indicator helps confirm what's happening.
+                if (state.recordingActive || state.transcribeBusy) {
+                    item(key = "rec_status") {
+                        RecordingStatusBar(
                             recording = state.recordingActive,
                             transcribing = state.transcribeBusy,
                             color = orange,
-                            onClick = { onRowClick(2) },
                         )
                     }
-                    if (state.meetings.isEmpty()) {
-                        item(key = "empty_state") {
-                            Text(
-                                text = stringResource(R.string.transcriber_no_recordings),
-                                color = dim,
-                                fontSize = 12.sp,
-                                fontFamily = type.appCard.fontFamily,
-                                modifier = Modifier.padding(start = 6.dp, top = 12.dp),
-                            )
-                        }
-                    } else {
-                        itemsIndexed(
-                            items = state.meetings,
-                            key = { _, m -> m.uuid },
-                        ) { idx, m ->
-                            val rowIdx = 3 + idx
-                            MeetingRow(
-                                meeting = m,
-                                focused = state.transcriberListFocus == rowIdx,
-                                color = orange,
-                                onClick = { onRowClick(rowIdx) },
-                            )
-                        }
+                }
+
+                if (state.meetings.isEmpty()) {
+                    item(key = "empty_state") {
+                        Text(
+                            text = stringResource(R.string.transcriber_no_recordings),
+                            color = dim,
+                            fontSize = 12.sp,
+                            fontFamily = type.appCard.fontFamily,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
+                    }
+                } else {
+                    itemsIndexed(
+                        items = state.meetings,
+                        key = { _, m -> m.uuid },
+                    ) { idx, m ->
+                        val rowIdx = 3 + idx
+                        MeetingRow(
+                            meeting = m,
+                            focused = state.transcriberListFocus == rowIdx,
+                            color = orange,
+                            onClick = { onRowClick(rowIdx) },
+                        )
                     }
                 }
             }
@@ -180,66 +152,12 @@ fun TranscriberListPanel(state: LauncherState, onRowClick: (Int) -> Unit) {
 }
 
 @Composable
-private fun HeaderBackPill(focused: Boolean, color: Color, onClick: () -> Unit) {
-    val type = LocalR1Type.current
-    val bg = if (focused) color else Color.Transparent
-    val fg = if (focused) Color.Black else color
-    Box(
-        modifier = Modifier
-            .height(28.dp)
-            .clip(RoundedCornerShape(6.dp))
-            .background(bg)
-            .border(1.dp, color, RoundedCornerShape(6.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = "< back",
-            color = fg,
-            fontSize = 12.sp,
-            fontFamily = type.appCard.fontFamily,
-        )
-    }
-}
-
-@Composable
-private fun HeaderGearIcon(focused: Boolean, color: Color, onClick: () -> Unit) {
-    val bg = if (focused) color else Color.Transparent
-    Box(
-        modifier = Modifier
-            .size(28.dp)
-            .clip(RoundedCornerShape(6.dp))
-            .background(bg)
-            .border(1.dp, color, RoundedCornerShape(6.dp))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        androidx.compose.foundation.Image(
-            painter = painterResource(R.drawable.ic_settings),
-            contentDescription = "settings",
-            colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(
-                if (focused) Color.Black else color
-            ),
-            modifier = Modifier.size(16.dp),
-        )
-    }
-}
-
-@Composable
-private fun RecordRow(
-    label: String,
-    focused: Boolean,
+private fun RecordingStatusBar(
     recording: Boolean,
     transcribing: Boolean,
     color: Color,
-    onClick: () -> Unit,
 ) {
     val type = LocalR1Type.current
-    val bg = if (focused) color else Color.Transparent
-    val fg = if (focused) Color.Black else color
-    // Pulse the dot when actively recording so the row reads as "live" at a
-    // glance from the list page.
     val pulseAlpha = if (recording) {
         val t = rememberInfiniteTransition(label = "rec_pulse")
         val a by t.animateFloat(
@@ -254,38 +172,32 @@ private fun RecordRow(
         a
     } else 1f
 
-    Column {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .border(1.dp, color.copy(alpha = pulseAlpha), RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+    ) {
         Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .height(44.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(bg)
-                .border(
-                    width = 1.dp,
-                    color = if (recording) color.copy(alpha = pulseAlpha) else color,
-                    shape = RoundedCornerShape(8.dp),
-                )
-                .clickable(onClick = onClick),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = label,
-                color = fg,
-                fontSize = 14.sp,
-                fontFamily = type.appCard.fontFamily,
-                fontWeight = FontWeight.Bold,
-            )
-        }
-        if (transcribing && !recording) {
-            Text(
-                text = stringResource(R.string.transcriber_transcribing),
-                color = Color(0xFFE65100),
-                fontSize = 10.sp,
-                fontFamily = type.appCard.fontFamily,
-                modifier = Modifier.padding(start = 12.dp, top = 4.dp),
-            )
-        }
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(color.copy(alpha = pulseAlpha)),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = when {
+                recording -> "recording…"
+                transcribing -> stringResource(R.string.transcriber_transcribing)
+                else -> ""
+            },
+            color = color,
+            fontSize = 11.sp,
+            fontFamily = type.appCard.fontFamily,
+            fontWeight = FontWeight.Bold,
+        )
     }
 }
 
@@ -311,7 +223,6 @@ private fun MeetingRow(
             .padding(horizontal = 6.dp, vertical = 6.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            // Status indicator — colored dot for normal states, ⚠ glyph for failed.
             if (statusGlyph == null) {
                 Box(
                     modifier = Modifier
@@ -353,7 +264,6 @@ private fun MeetingRow(
     }
 }
 
-/** Status → (dot color, optional glyph that replaces the dot). */
 private fun statusVisuals(status: MeetingStatus): Pair<Color, String?> = when (status) {
     MeetingStatus.RECORDING -> Color(0xFFFF4500) to null
     MeetingStatus.QUEUED -> Color(0xFFFFA726) to null
@@ -362,12 +272,6 @@ private fun statusVisuals(status: MeetingStatus): Pair<Color, String?> = when (s
     MeetingStatus.FAILED -> Color(0xFFE53935) to "⚠"
 }
 
-/**
- * Returns the per-row metadata line, e.g. "May 10 · 12:34" for a transcribed
- * meeting. For RECORDING/QUEUED/TRANSCRIBING/FAILED we replace the duration
- * with a status word so the line stays informative even when there's no
- * playback length yet.
- */
 private fun subtitleFor(m: MeetingIndexEntry): String {
     val datePart = humanDate(m.createdAtMs)
     val statusOrDuration = when (m.status) {

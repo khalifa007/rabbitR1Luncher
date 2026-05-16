@@ -7,16 +7,19 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -25,6 +28,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
@@ -73,79 +77,61 @@ fun TerminalPanel(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black)
-                .padding(top = 12.dp),
+                .background(Color.Black),
         ) {
-            // --- header: back / cwd / status ---
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(
-                    modifier = Modifier.clickable { onBack() },
-                ) {
-                    Text(
-                        text = stringResource(R.string.back_short),
-                        color = Color(0xFFFF4500),
-                        fontSize = 12.sp,
-                        fontFamily = ui,
-                    )
-                }
-                Text(
-                    text = "  " + compactCwd(state.terminalCwd),
-                    color = Color(0xFF888888),
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(start = 8.dp),
-                )
-                Box(
-                    modifier = Modifier
-                        .clickable { onToggleKb() }
-                        .padding(horizontal = 6.dp, vertical = 2.dp),
-                ) {
-                    Text(
-                        text = stringResource(
-                            if (state.terminalKbVisible) R.string.terminal_kb_hide else R.string.terminal_kb_show
-                        ),
-                        color = Color(0xFF888888),
-                        fontSize = 11.sp,
-                        fontFamily = ui,
-                    )
-                }
-                StatusIndicator(state)
-            }
+            AppPageHeader(
+                backFocused = false,
+                onBack = onBack,
+                themeColor = AppThemes.Terminal,
+                compact = true,
+                subtitle = compactCwd(state.terminalCwd),
+                trailingContent = {
+                    Box(
+                        modifier = Modifier
+                            .clickable { onToggleKb() }
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    ) {
+                        Text(
+                            text = stringResource(
+                                if (state.terminalKbVisible) R.string.terminal_kb_hide else R.string.terminal_kb_show
+                            ),
+                            color = AppThemes.Terminal,
+                            fontSize = 12.sp,
+                            fontFamily = ui,
+                        )
+                    }
+                    Spacer(Modifier.width(4.dp))
+                    StatusIndicator(state)
+                },
+            )
 
             // --- output scrollback ---
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp),
+                    .padding(horizontal = 10.dp),
             ) {
                 if (output.isEmpty()) {
                     Text(
                         text = stringResource(R.string.terminal_empty_hint),
-                        color = Color(0xFF555555),
-                        fontSize = 10.sp,
+                        color = Color(0xFF777777),
+                        fontSize = 13.sp,
                         fontFamily = ui,
                         modifier = Modifier.align(Alignment.Center),
                     )
                 } else {
                     LazyColumn(
                         state = listState,
-                        contentPadding = PaddingValues(vertical = 4.dp),
-                        verticalArrangement = Arrangement.spacedBy(1.dp),
+                        contentPadding = PaddingValues(vertical = 6.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         itemsIndexed(output) { _, line ->
                             Text(
                                 text = line,
                                 color = lineColor(line),
-                                fontSize = 10.sp,
+                                fontSize = 13.sp,
                                 fontFamily = FontFamily.Monospace,
                             )
                         }
@@ -158,20 +144,20 @@ fun TerminalPanel(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(Color(0xFF0A0A0A))
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
                     text = if (state.terminalBusy) stringResource(R.string.common_thinking_dots)
                         else stringResource(R.string.terminal_prompt),
-                    color = Color(0xFFFF4500),
-                    fontSize = 11.sp,
+                    color = AppThemes.Terminal,
+                    fontSize = 15.sp,
                     fontFamily = FontFamily.Monospace,
                 )
                 Text(
                     text = " " + state.terminalInput + "_",
                     color = Color.White,
-                    fontSize = 11.sp,
+                    fontSize = 15.sp,
                     fontFamily = FontFamily.Monospace,
                     modifier = Modifier
                         .weight(1f)
@@ -184,8 +170,8 @@ fun TerminalPanel(
                 ) {
                     Text(
                         text = stringResource(R.string.common_paste),
-                        color = Color(0xFF888888),
-                        fontSize = 11.sp,
+                        color = AppThemes.Terminal.copy(alpha = 0.75f),
+                        fontSize = 13.sp,
                         fontFamily = ui,
                     )
                 }
@@ -197,8 +183,8 @@ fun TerminalPanel(
                     Text(
                         text = stringResource(R.string.terminal_run),
                         color = if (state.terminalInput.isBlank() || state.terminalBusy)
-                            Color(0xFF555555) else Color(0xFFFF4500),
-                        fontSize = 11.sp,
+                            Color(0xFF555555) else AppThemes.Terminal,
+                        fontSize = 14.sp,
                         fontFamily = ui,
                     )
                 }
@@ -209,8 +195,8 @@ fun TerminalPanel(
                 ) {
                     Text(
                         text = stringResource(R.string.terminal_short_clear),
-                        color = Color(0xFF888888),
-                        fontSize = 11.sp,
+                        color = AppThemes.Terminal.copy(alpha = 0.75f),
+                        fontSize = 13.sp,
                         fontFamily = ui,
                     )
                 }
@@ -239,25 +225,25 @@ private fun StatusIndicator(state: LauncherState) {
         state.terminalRecording -> Text(
             text = stringResource(R.string.terminal_status_rec),
             color = Color(0xFFFF4040),
-            fontSize = 11.sp,
+            fontSize = 13.sp,
             fontFamily = ui,
         )
         state.terminalTranscribing -> Text(
             text = stringResource(R.string.terminal_status_stt),
             color = Color(0xFFFFD600),
-            fontSize = 11.sp,
+            fontSize = 13.sp,
             fontFamily = ui,
         )
         state.terminalBusy -> Text(
             text = stringResource(R.string.common_thinking_dots),
-            color = Color(0xFFFF4500),
-            fontSize = 11.sp,
+            color = AppThemes.Terminal,
+            fontSize = 13.sp,
             fontFamily = ui,
         )
         else -> Text(
             text = stringResource(R.string.terminal_status_idle),
             color = Color(0xFF35D26F),
-            fontSize = 11.sp,
+            fontSize = 13.sp,
             fontFamily = ui,
         )
     }

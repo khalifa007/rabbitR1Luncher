@@ -73,12 +73,6 @@
                 android:resource="@xml/accessibility_service" />
         </service>
 
-        <provider
-            android:name=".ApkProvider"
-            android:authorities="com.r1.launcher.apk"
-            android:exported="false"
-            android:grantUriPermissions="true" />
-
         <receiver
             android:name=".messages.SmsReceiver"
             android:exported="true"

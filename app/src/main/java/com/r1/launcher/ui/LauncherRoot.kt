@@ -119,8 +119,9 @@ fun LauncherRoot(
             onRowClick = { idx ->
                 when (idx) {
                     0 -> { state.back(); host.backTone() }
-                    1 -> { state.openUiVolume(); host.selectTone() }
-                    2 -> { state.openVolume(); host.selectTone() }
+                    1 -> { host.toggleUiSoundEnabled(!state.uiSoundEnabled); host.popTone() }
+                    2 -> { state.openUiVolume(); host.selectTone() }
+                    3 -> { state.openVolume(); host.selectTone() }
                 }
             },
         )
@@ -129,14 +130,15 @@ fun LauncherRoot(
             state = state,
             onRowClick = { idx ->
                 // Order must match SettingsDevicePanel rows + LauncherNav dispatcher:
-                //   updates, language, restart, power off, factory reset
+                //   updates, language, restart, power off, reset camera, factory reset
                 when (idx) {
                     0 -> { state.back(); host.backTone() }
                     1 -> { host.checkForUpdate(); host.selectTone() }
                     2 -> { state.openSettingsLanguage(); host.selectTone() }
                     3 -> { host.rebootDevice(); host.selectTone() }
                     4 -> { host.powerOffDevice(); host.selectTone() }
-                    5 -> { state.openFactoryConfirm(); host.selectTone() }
+                    5 -> { host.resetCameraMotor(); host.popTone() }
+                    6 -> { state.openFactoryConfirm(); host.selectTone() }
                 }
             },
         )
@@ -384,6 +386,29 @@ fun LauncherRoot(
             onPaste = { host.claudePasteFromClipboard(); host.popTone() },
         )
 
+        HermesChatPanel(
+            state = state,
+            onBack = { state.back(); host.backTone() },
+            onSend = { text -> host.hermesSendText(text); host.popTone() },
+            onClear = { host.hermesClearHistory(); host.popTone() },
+            onOpenConfig = { state.openHermesConfig(fromChat = true); host.selectTone() },
+        )
+
+        HermesConfigPanel(
+            state = state,
+            onRowClick = { idx -> host.hermesConfigRowActivate(idx) },
+            onSaveServerUrl = { url -> host.hermesSetServerUrl(url) },
+            onPasteServerUrl = { host.hermesPasteServerUrlFromClipboard() },
+            onSaveApiKey = { key -> host.hermesSetApiKey(key) },
+            onPasteApiKey = { host.hermesPasteApiKeyFromClipboard() },
+        )
+
+        HermesQrPanel(
+            state = state,
+            onScanned = { raw -> host.hermesScanned(raw) },
+            onBack = { state.back(); host.backTone() },
+        )
+
         TranscriberListPanel(
             state = state,
             onRowClick = { idx ->
@@ -444,23 +469,6 @@ fun LauncherRoot(
                 state.transcriberSettingsEditInput = ""
             },
         )
-
-        SurveyListPanel(state = state, onRowClick = { idx -> host.surveyListRowActivate(idx) })
-        SurveyCampaignPanel(state = state, onRowClick = { idx -> host.surveyCampaignRowActivate(idx) })
-        SurveyConsentPanel(state = state, onRowClick = { idx ->
-            when (idx) {
-                0 -> { state.back(); host.backTone() }
-                1 -> { host.surveyConfirmCampaignAndDial(); host.selectTone() }
-            }
-        })
-        SurveyLivePanel(state = state)
-        SurveyDetailPanel(state = state, onRowClick = { idx ->
-            when (idx) {
-                0 -> { state.back(); host.backTone() }
-                1 -> state.currentCallRecordId?.let { host.surveyEmailCallRecord(it) }
-            }
-        })
-        SurveySettingsPanel(state = state, onRowClick = { idx -> host.surveySettingsRowActivate(idx) })
 
         // Topbar overlay — only on the clock screen; every other panel
         // either draws its own header or is a full-screen takeover.
