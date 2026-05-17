@@ -160,22 +160,33 @@ object OTAUpdater {
                 if (rootFunc != null) {
                     val src = cacheFile.absolutePath
                     val dst = "/data/local/tmp/update.apk"
-                    // Copy to world-readable location then install silently via root
+                    // Copy to world-readable location then install silently via root.
                     rootFunc("cp \"$src\" $dst && chmod 644 $dst")
                     notify(onResult, "Installing update...")
-                    val ok = rootFunc("pm install -r $dst")
-                    if (ok) {
-                        // Clear the fail-guard on success
-                        context.getSharedPreferences("ota_prefs", Context.MODE_PRIVATE)
-                            .edit().remove("last_failed_tag").apply()
-                        // Relaunch launcher
-                        rootFunc("am force-stop com.r1.launcher")
-                        rootFunc("am start -a android.intent.action.MAIN -c android.intent.category.HOME")
+                    // sendToCarroot returns true on socket-write success, NOT on
+                    // command success — pm install can fail (signature mismatch,
+                    // version downgrade, parser error, full /data) and we'd see
+                    // the same `true`. Verify by re-reading PackageManager and
+                    // confirming the installed versionName matches the remote
+                    // tag. Without this check, a silently-failing install ends
+                    // up in a boot loop: auto-restart → onCreate check → same
+                    // remote version still newer → reinstall → repeat.
+                    rootFunc("pm install -r $dst")
+                    val expected = tagName.removePrefix("v")
+                    val verified = verifyInstall(context, expected)
+                    val prefs = context.getSharedPreferences("ota_prefs", Context.MODE_PRIVATE)
+                    if (verified) {
+                        prefs.edit().remove("last_failed_tag").apply()
+                        // Do NOT auto-restart. The new APK is committed to
+                        // PackageManager; subsequent OTA checks will see
+                        // "up to date" against pInfo.versionName regardless
+                        // of whether this process restarted. Letting the user
+                        // reopen naturally avoids an OTA-driven restart loop
+                        // even in the presence of regressions elsewhere.
+                        resetState(state, onResult, "Update v$expected installed — reopen launcher to apply")
                     } else {
-                        // Mark this tag as failed so silent checks don't loop
-                        context.getSharedPreferences("ota_prefs", Context.MODE_PRIVATE)
-                            .edit().putString("last_failed_tag", tagName).apply()
-                        resetState(state, onResult, "Install failed — try again manually")
+                        prefs.edit().putString("last_failed_tag", tagName).apply()
+                        resetState(state, onResult, "Install failed — version did not change")
                     }
                 } else {
                     resetState(state, onResult, "Root shell unavailable")
@@ -186,6 +197,31 @@ object OTAUpdater {
                 resetState(state, onResult, "Download failed: ${e.message}")
             }
         }.start()
+    }
+
+    /** Poll PackageManager until `versionName` matches `expected` (the
+     *  remote tag minus its `v` prefix), or until [timeoutMs] elapses.
+     *
+     *  PackageManagerService is updated synchronously by `pm install -r`'s
+     *  success path, so a positive match here is the authoritative signal
+     *  the new APK is committed — even without our process restarting.
+     *  Polling (rather than reading once) absorbs the ~hundreds-of-ms
+     *  between `sendToCarroot` returning and the install actually
+     *  finishing on the carroot side. */
+    private fun verifyInstall(
+        context: android.content.Context,
+        expected: String,
+        timeoutMs: Long = 8000L,
+    ): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val installed = runCatching {
+                context.packageManager.getPackageInfo(context.packageName, 0).versionName
+            }.getOrNull()
+            if (installed == expected) return true
+            try { Thread.sleep(500) } catch (_: InterruptedException) { return false }
+        }
+        return false
     }
 
     private fun notify(onResult: ((String) -> Unit)?, msg: String) {
