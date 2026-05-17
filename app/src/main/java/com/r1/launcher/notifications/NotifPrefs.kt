@@ -62,28 +62,43 @@ class NotifPrefs private constructor(ctx: Context) {
         get() {
             val existing = secure.getString(KEY_TOKEN, null)
             if (!existing.isNullOrBlank()) return existing
-            // Migration: pre-1.1.5 stored the token in plain prefs. If we find
-            // one there, promote it into the secure store and wipe the plain
-            // copy so the upgrade doesn't invalidate active webhook clients.
+            // Migration: pre-1.1.5 stored the token in plain prefs. Promote
+            // into the secure store and only wipe the plain copy after the
+            // secure write is confirmed — otherwise a keystore hiccup during
+            // commit would lose the token entirely (active webhook clients
+            // would 401 with no way to recover the same value). If commit
+            // fails, leave the plain copy in place so the next read retries
+            // the migration cleanly.
             val legacy = plain.getString(KEY_TOKEN, null)
             if (!legacy.isNullOrBlank()) {
-                secure.edit(commit = true) { putString(KEY_TOKEN, legacy) }
-                plain.edit(commit = true) { remove(KEY_TOKEN) }
+                if (commitToken(secure, legacy)) {
+                    plain.edit(commit = true) { remove(KEY_TOKEN) }
+                }
                 return legacy
             }
             val fresh = generateToken()
-            secure.edit(commit = true) { putString(KEY_TOKEN, fresh) }
+            commitToken(secure, fresh)
             return fresh
         }
 
     @Synchronized
     fun regenerateWebhookToken(): String {
         val fresh = generateToken()
-        secure.edit(commit = true) { putString(KEY_TOKEN, fresh) }
+        commitToken(secure, fresh)
         // Defensive: if a legacy plain entry survived (e.g. user rotated before
         // the secure path was ever read), drop it now so it can't be recovered.
         plain.edit(commit = true) { remove(KEY_TOKEN) }
         return fresh
+    }
+
+    /** Synchronous write that returns the underlying `Editor.commit()` boolean
+     *  so callers can branch on success. The kotlin `edit { }` extension
+     *  swallows this value, which is dangerous for the migration path where
+     *  we use it to decide whether the legacy copy can be safely removed. */
+    private fun commitToken(prefs: SharedPreferences, token: String): Boolean {
+        val editor = prefs.edit()
+        editor.putString(KEY_TOKEN, token)
+        return editor.commit()
     }
 
     private fun generateToken(): String {

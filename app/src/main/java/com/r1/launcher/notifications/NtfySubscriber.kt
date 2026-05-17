@@ -180,6 +180,13 @@ class NtfySubscriber(
                     while (!source.exhausted()) {
                         val line = runCatching { source.readUtf8Line() }.getOrNull() ?: break
                         if (line.isEmpty()) continue
+                        // Stale-stream guard: if a topic-change / stop happened
+                        // mid-read, the network cancel will eventually trip the
+                        // read but a few frames can slip through first. Bail
+                        // before they advance lastMessageId (wrong topic's
+                        // cursor) or post UI callbacks for a stream we no
+                        // longer own.
+                        if (myGen != generation) break
                         handleFrame(line)
                     }
                 } catch (e: Throwable) {
