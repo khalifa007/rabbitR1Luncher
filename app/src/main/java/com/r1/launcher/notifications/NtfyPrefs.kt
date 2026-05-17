@@ -39,7 +39,16 @@ class NtfyPrefs private constructor(ctx: Context) {
      *  on the next reconnect, repopulating any list the user had cleared. */
     var lastMessageId: String
         get() = plain.getString(KEY_LAST_ID, "").orEmpty()
-        set(value) = plain.edit(commit = true) { putString(KEY_LAST_ID, value) }
+        set(value) { setLastMessageId(value) }
+
+    /** Synchronous setter that surfaces the commit result. Returns false on
+     *  IO error / full disk — caller can log and decide whether to retry.
+     *  The property setter delegates here so existing call sites stay terse;
+     *  code that cares about durability can call this directly. */
+    fun setLastMessageId(value: String): Boolean =
+        plain.edit().putString(KEY_LAST_ID, value).commit().also {
+            if (!it) android.util.Log.w("NtfyPrefs", "lastMessageId commit failed")
+        }
 
     fun isConfigured(): Boolean = topic.isNotBlank()
 

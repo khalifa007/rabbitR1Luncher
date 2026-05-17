@@ -58,6 +58,19 @@ class NtfySubscriber(
 
     @Volatile private var inflight: Call? = null
     @Volatile private var wifiLock: WifiManager.WifiLock? = null
+    // Short-lived wakelock acquired around each handleFrame so the kernel can't
+    // re-suspend the CPU mid-delivery when the screen is off. Held for the
+    // duration of one frame parse + UI post (microseconds in practice); 5s
+    // timeout is a hard safety belt against a hung handler leaking the lock.
+    // Single instance, setReferenceCounted(false) → acquire() is idempotent.
+    private val frameWakeLock: android.os.PowerManager.WakeLock? by lazy {
+        runCatching {
+            val pm = app.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "r1.ntfy.frame").apply {
+                setReferenceCounted(false)
+            }
+        }.getOrNull()
+    }
     private val userStopped = AtomicBoolean(false)
     @Volatile private var reconnectDelayMs = 2_000L
     private val MAX_RECONNECT_DELAY_MS = 16_000L
@@ -65,7 +78,16 @@ class NtfySubscriber(
     // Per-connection generation token. Bumped before each cancel/open so a
     // stale callback from a previous Call can't null out the new inflight or
     // schedule a duplicate reconnect when topic-change / stop interleaves.
+    // All mutations happen on the UI thread; reads happen on the OkHttp
+    // dispatcher thread, hence @Volatile (single-writer pattern — no need for
+    // AtomicInteger).
     @Volatile private var generation: Int = 0
+
+    // Serializes the user-clear "bump generation + wipe cursor" pair with the
+    // dispatcher-thread "check generation + write cursor" pair in handleFrame.
+    // Without it, a frame whose check passed before the bump can still write a
+    // stale id after the clear, undoing the cursor reset.
+    private val cursorLock = Any()
 
     /** Fired on UI thread when a real ntfy message arrives. Keepalives /
      *  poll-open frames are filtered out before this fires. */
@@ -117,6 +139,29 @@ class NtfySubscriber(
         } else {
             updateStatus(Status.DISABLED)
         }
+    }
+
+    /** User cleared the local notification list. Wipe the resume cursor
+     *  and force the current stream closed so any in-flight backlog frames
+     *  the dispatcher is mid-parsing are fenced out by the stale-generation
+     *  guard before they can re-advance lastMessageId or post a UI callback.
+     *  Next reconnect opens with no `?since=` — only frames sent after the
+     *  clear will arrive. */
+    fun resetCursorAndResync() {
+        // Bump-and-clear under cursorLock so any handleFrame already past
+        // its myGen check still sees a coherent state: either its cursor
+        // write happens entirely before we bump+clear (then we overwrite
+        // it), or entirely after (then its own gen-check inside the lock
+        // sees the new generation and skips the write).
+        synchronized(cursorLock) {
+            generation++
+            prefs.lastMessageId = ""
+        }
+        if (userStopped.get()) return
+        runCatching { inflight?.cancel() }
+        inflight = null
+        if (prefs.isConfigured()) openConnection()
+        else updateStatus(Status.DISABLED)
     }
 
     private fun openConnection() {
@@ -187,7 +232,7 @@ class NtfySubscriber(
                         // cursor) or post UI callbacks for a stream we no
                         // longer own.
                         if (myGen != generation) break
-                        handleFrame(line)
+                        handleFrame(line, myGen)
                     }
                 } catch (e: Throwable) {
                     if (!call.isCanceled()) Log.w(TAG, "stream parse failed: ${e.message}")
@@ -212,20 +257,43 @@ class NtfySubscriber(
      *    "message":"hello", "title":"optional", "priority":3, "tags":[]}
      *  Keepalives: `{"event":"keepalive"}` (no message field).
      *  Poll-open  : `{"event":"open"}` (sent once when stream opens). */
-    private fun handleFrame(line: String) {
+    private fun handleFrame(line: String, myGen: Int) {
+        // Pin the CPU awake just long enough to parse + dispatch this frame.
+        // Without it, an inbound TCP packet that wakes the OkHttp callback can
+        // race the kernel's idle suspension — the thread starts, the CPU goes
+        // back to sleep mid-stack, and the frame is dropped or delayed.
+        val wl = frameWakeLock
+        runCatching { wl?.acquire(5_000L) }
+        try {
+            handleFrameLocked(line, myGen)
+        } finally {
+            runCatching { if (wl?.isHeld == true) wl.release() }
+        }
+    }
+
+    private fun handleFrameLocked(line: String, myGen: Int) {
         val obj = runCatching { json.parseToJsonElement(line) as? JsonObject }.getOrNull() ?: return
         val event = obj["event"]?.jsonPrimitive?.contentOrNull
         // Advance the resume cursor for *every* frame with an id, not just
         // messages — so an idle stream of keepalives still moves forward
-        // and we don't replay them on reconnect.
-        obj["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let {
-            prefs.lastMessageId = it
+        // and we don't replay them on reconnect. Gen-check + write happens
+        // under cursorLock so it interlocks with resetCursorAndResync's
+        // bump+clear; without the lock a frame whose loop-level gen check
+        // already passed could still write a stale id over the user clear.
+        obj["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let { id ->
+            synchronized(cursorLock) {
+                if (myGen == generation) prefs.lastMessageId = id
+            }
         }
         if (event != "message") return
         val body = obj["message"]?.jsonPrimitive?.contentOrNull.orEmpty()
         val title = obj["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
         if (body.isBlank() && title.isBlank()) return
-        ui.post { onMessage(title, body) }
+        // Gate the UI delivery too: if the user clears between this post
+        // and the Looper draining it, the queued onMessage would re-add a
+        // notification to the just-cleared list. The check runs on the UI
+        // thread so it's coherent with notificationsClear()'s gen bump.
+        ui.post { if (myGen == generation) onMessage(title, body) }
     }
 
     private fun scheduleReconnect() {
