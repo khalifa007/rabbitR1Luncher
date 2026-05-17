@@ -62,6 +62,10 @@ class NtfySubscriber(
     @Volatile private var reconnectDelayMs = 2_000L
     private val MAX_RECONNECT_DELAY_MS = 16_000L
     @Volatile private var statusNow: Status = Status.DISABLED
+    // Per-connection generation token. Bumped before each cancel/open so a
+    // stale callback from a previous Call can't null out the new inflight or
+    // schedule a duplicate reconnect when topic-change / stop interleaves.
+    @Volatile private var generation: Int = 0
 
     /** Fired on UI thread when a real ntfy message arrives. Keepalives /
      *  poll-open frames are filtered out before this fires. */
@@ -89,6 +93,9 @@ class NtfySubscriber(
 
     fun stop() {
         userStopped.set(true)
+        // Bump generation before cancel so the cancelled call's onFailure
+        // can't race past us and re-schedule a reconnect.
+        generation++
         runCatching { inflight?.cancel() }
         inflight = null
         releaseWifiLock()
@@ -99,6 +106,9 @@ class NtfySubscriber(
      *  re-open against the new URL. No-op if the topic didn't change. */
     fun applyTopicChange() {
         if (userStopped.get()) return
+        // Bump first so the cancelled old call's callbacks see a stale gen
+        // and bail out instead of nulling out the new call we're about to open.
+        generation++
         runCatching { inflight?.cancel() }
         inflight = null
         if (prefs.isConfigured()) {
@@ -130,9 +140,16 @@ class NtfySubscriber(
         updateStatus(Status.CONNECTING)
         Log.i(TAG, "connecting to $url")
         val call = client.newCall(req)
+        // Snapshot generation for this Call. Bump first so any prior call
+        // can't shadow ours; capture the new value so callbacks can confirm
+        // they belong to the current generation before mutating state.
+        val myGen = ++generation
         inflight = call
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
+                // Stale callback (a newer connection has already taken over);
+                // do nothing — the current owner manages inflight + reconnect.
+                if (myGen != generation) return
                 inflight = null
                 if (userStopped.get()) return
                 Log.w(TAG, "stream failed: ${e.message}")
@@ -140,6 +157,12 @@ class NtfySubscriber(
                 scheduleReconnect()
             }
             override fun onResponse(call: Call, response: Response) {
+                // If we've been superseded mid-flight (topic change, stop),
+                // drain + close the body without touching shared state.
+                if (myGen != generation) {
+                    runCatching { response.close() }
+                    return
+                }
                 try {
                     if (!response.isSuccessful) {
                         Log.w(TAG, "http ${response.code} — backing off")
@@ -163,10 +186,14 @@ class NtfySubscriber(
                     if (!call.isCanceled()) Log.w(TAG, "stream parse failed: ${e.message}")
                 } finally {
                     runCatching { response.close() }
-                    inflight = null
-                    if (!userStopped.get()) {
-                        updateStatus(Status.RETRYING)
-                        scheduleReconnect()
+                    // Final ownership check — the read loop runs long enough
+                    // that a topic change could've happened during it.
+                    if (myGen == generation) {
+                        inflight = null
+                        if (!userStopped.get()) {
+                            updateStatus(Status.RETRYING)
+                            scheduleReconnect()
+                        }
                     }
                 }
             }

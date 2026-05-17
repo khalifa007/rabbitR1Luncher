@@ -3,18 +3,48 @@ package com.r1.launcher.notifications
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.core.content.edit
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import java.security.SecureRandom
 
 /**
  * Notification settings + the webhook bearer token used by `POST /api/notify`.
- * Stored in plain SharedPreferences — the token isn't a credential to a remote
- * service, just an unguessable secret that gates "anyone on the LAN" → "anyone
- * who knows the token". 16 random bytes hex (32 chars) is plenty.
+ *
+ * The token is stored in EncryptedSharedPreferences (`notif.secure`) because
+ * it authorizes notification ingress — anyone holding it can post arbitrary
+ * notifications, deeplinks included. `MODE_PRIVATE` would prevent other apps
+ * on the device from reading it, but encrypted-at-rest also protects against
+ * an offline backup / image dump.
+ *
+ * Pre-1.1.5 builds stored the token in plain prefs (`notif.plain` key
+ * `webhook.token`). On first read we migrate it into the secure store and
+ * clear the plain copy so existing tokens stay valid across the upgrade.
+ *
+ * The audio toggle stays in plain prefs — it's not sensitive.
  */
 class NotifPrefs private constructor(ctx: Context) {
 
+    private val app = ctx.applicationContext
+
+    private val secure: SharedPreferences = runCatching {
+        val key = MasterKey.Builder(app)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        EncryptedSharedPreferences.create(
+            app,
+            "notif.secure",
+            key,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+        )
+    }.getOrElse {
+        // Same fallback pattern as VoicePrefs — keystore corruption is rare on
+        // AOSP but better to keep notifications working than to hard-crash.
+        app.getSharedPreferences("notif.fallback", Context.MODE_PRIVATE)
+    }
+
     private val plain: SharedPreferences =
-        ctx.applicationContext.getSharedPreferences("notif.plain", Context.MODE_PRIVATE)
+        app.getSharedPreferences("notif.plain", Context.MODE_PRIVATE)
 
     /** Master toggle for the chime that fires when a new notification lands.
      *  When off, the visual badge / panel still update — only the audio cue is
@@ -30,17 +60,29 @@ class NotifPrefs private constructor(ctx: Context) {
     val webhookToken: String
         @Synchronized
         get() {
-            val existing = plain.getString(KEY_TOKEN, null)
+            val existing = secure.getString(KEY_TOKEN, null)
             if (!existing.isNullOrBlank()) return existing
+            // Migration: pre-1.1.5 stored the token in plain prefs. If we find
+            // one there, promote it into the secure store and wipe the plain
+            // copy so the upgrade doesn't invalidate active webhook clients.
+            val legacy = plain.getString(KEY_TOKEN, null)
+            if (!legacy.isNullOrBlank()) {
+                secure.edit(commit = true) { putString(KEY_TOKEN, legacy) }
+                plain.edit(commit = true) { remove(KEY_TOKEN) }
+                return legacy
+            }
             val fresh = generateToken()
-            plain.edit(commit = true) { putString(KEY_TOKEN, fresh) }
+            secure.edit(commit = true) { putString(KEY_TOKEN, fresh) }
             return fresh
         }
 
     @Synchronized
     fun regenerateWebhookToken(): String {
         val fresh = generateToken()
-        plain.edit(commit = true) { putString(KEY_TOKEN, fresh) }
+        secure.edit(commit = true) { putString(KEY_TOKEN, fresh) }
+        // Defensive: if a legacy plain entry survived (e.g. user rotated before
+        // the secure path was ever read), drop it now so it can't be recovered.
+        plain.edit(commit = true) { remove(KEY_TOKEN) }
         return fresh
     }
 

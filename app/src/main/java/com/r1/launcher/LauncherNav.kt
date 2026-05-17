@@ -894,7 +894,10 @@ fun LauncherState.activate(host: LauncherHost) {
         }
         Panel.NOTIFICATIONS -> {
             // 0=back, 1..N=items (open deeplink + mark read), N+1=clear-all.
-            val items = notifications
+            // Match the panel + touch path: the list renders newest-first via
+            // asReversed(), so wheel activation has to index the same view or
+            // the focused (top) card opens the wrong (oldest) entry.
+            val items = notifications.asReversed()
             when {
                 notificationsFocus == 0 -> { back(); host.backTone() }
                 notificationsFocus - 1 in items.indices -> {

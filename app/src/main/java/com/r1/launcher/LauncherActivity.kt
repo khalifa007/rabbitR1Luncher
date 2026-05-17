@@ -5153,8 +5153,17 @@ override fun hermesPasteServerUrlFromClipboard() {
             0 -> { state.back(); backTone() }
             1 -> toggleNtfySubscriber(!state.ntfySubscriberEnabled)
             2 -> {
-                // Reuse the credentials field machinery for the topic keyboard
-                // so we don't duplicate keyboard plumbing per panel.
+                // The keyboard overlay that handles credential edits lives
+                // inside SettingsCredentialsPanel and only composes when
+                // panel == SETTINGS_CREDENTIALS. So instead of trying to
+                // surface it from NTFY_CONFIG (where it would silently
+                // never render), jump to the credentials panel with the
+                // ntfy.sh topic row focused and the keyboard pre-opened.
+                // Row order in SettingsCredentialsPanel:
+                //   0=header, 1=anthropic, 2=elevenlabs, 3=hermes,
+                //   4=ntfy.sh topic, 5=webhook token
+                state.openSettingsCredentials()
+                state.credentialsFocus = 4
                 state.credentialsEditField = "ntfy_topic"
                 state.credentialsEditInput = ntfyPrefs.topic
             }

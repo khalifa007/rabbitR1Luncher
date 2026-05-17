@@ -258,16 +258,12 @@ object WebRpc {
         "notifications.clear" -> {
             host.notificationsClear(); JsonNull
         }
-        "notifications.token" -> {
-            // Reveal the current webhook bearer token so the user can paste
-            // it into their automation (Zapier / GitHub / Hermes config).
-            val prefs = com.r1.launcher.notifications.NotifPrefs.get(ctx)
-            buildJsonObject { put("token", prefs.webhookToken) }
-        }
-        "notifications.rotateToken" -> {
-            val prefs = com.r1.launcher.notifications.NotifPrefs.get(ctx)
-            buildJsonObject { put("token", prefs.regenerateWebhookToken()) }
-        }
+        // notifications.token / notifications.rotateToken intentionally removed.
+        // The web RPC channel is unauthenticated (any LAN client can connect),
+        // so returning the webhook bearer here would defeat the token's purpose
+        // — anyone reachable could grab it and then post fake notifications
+        // from the public internet via ntfy.sh or the /api/notify endpoint.
+        // The bearer is only visible on-device in Settings → Credentials.
         "notifications.test" -> {
             // Convenience for the web companion: simulate an incoming
             // notification so users can verify sound + badge wiring without
