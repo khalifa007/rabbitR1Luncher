@@ -31,10 +31,15 @@ class NtfyPrefs private constructor(ctx: Context) {
 
     /** Last message id we successfully received. Used as `?since=<id>` on
      *  reconnect to replay missed messages from ntfy.sh's 12h retention
-     *  window. Empty string = first connect / no resume token. */
+     *  window. Empty string = first connect / no resume token.
+     *
+     *  Persisted synchronously (commit) so a process death between receiving
+     *  a frame and the async apply() flushing can't leave the cursor pointing
+     *  at an older id — that would cause ntfy.sh to replay the missed window
+     *  on the next reconnect, repopulating any list the user had cleared. */
     var lastMessageId: String
         get() = plain.getString(KEY_LAST_ID, "").orEmpty()
-        set(value) = plain.edit { putString(KEY_LAST_ID, value) }
+        set(value) = plain.edit(commit = true) { putString(KEY_LAST_ID, value) }
 
     fun isConfigured(): Boolean = topic.isNotBlank()
 

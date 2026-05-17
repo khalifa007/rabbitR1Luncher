@@ -4957,6 +4957,12 @@ override fun hermesPasteServerUrlFromClipboard() {
         state.notifications.clear()
         state.notificationsUnread = 0
         state.notificationBanner = null
+        // Drop the ntfy resume cursor: explicit clear is the user's signal
+        // that they don't want any more history. Without this, a reconnect
+        // after the clear (network blip, keepalive timeout) would `?since=`
+        // the old id and ntfy.sh would replay everything in its 12h
+        // retention window — repopulating the list we just cleared.
+        ntfyPrefs.lastMessageId = ""
     }
 
     override fun toggleNotificationSound(enabled: Boolean) {
