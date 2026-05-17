@@ -120,6 +120,17 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private var hermesSpeechCurrentFile: File? = null
     private var hermesSpeakNextAssistant = false
     private var hermesLastSpokenKey = ""
+    // Hermes streaming-TTS pipeline — mirrors the OpenClaw block above.
+    // Cuts first-audio latency to "first sentence boundary in SSE deltas"
+    // instead of waiting for the full reply.
+    private var hermesStreamingSpokenOffset: Int = 0
+    private var hermesStreamingTtsActive: Boolean = false
+    private var hermesStreamingTtsTurnId: Long = 0L
+    private var hermesSpeechIssuedSeq: Int = 0
+    private var hermesSpeechNextToPlay: Int = 1
+    private var hermesSpeechPlaying: Boolean = false
+    private val hermesSpeechSlots: java.util.TreeMap<Int, File?> = java.util.TreeMap()
+    private val hermesTtsChunkCalls: MutableList<okhttp3.Call> = mutableListOf()
     private val soundPrefs by lazy { com.r1.launcher.sound.SoundPrefs.get(this) }
     private val wifiSharePrefs by lazy { com.r1.launcher.wifishare.WifiSharePrefs.get(this) }
     private var wifiShareTimerEndMs: Long = 0L
@@ -1811,26 +1822,44 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private fun pollWifiShareClients() {
         Thread {
             val out = "/data/local/tmp/softap_clients.txt"
-            // ap0 is the SoftAp interface on this build (confirmed via dumpsys).
-            // Pull both ip-neigh and ARP and union — early in a connection a
-            // client may show in one but not the other.
-            sendToCarroot("ip neigh show dev ap0 > $out 2>/dev/null; cat /proc/net/arp >> $out; chmod 666 $out")
+            // ap0 is the SoftAp interface on this build.
+            // Only `ip neigh` is consulted: /proc/net/arp has no state column,
+            // so it would re-include clients the kernel knows are gone but
+            // hasn't GC'd yet (and on a launcher that's ALSO a wifi STA, it
+            // mixes upstream-LAN hosts into the softap count). `ip neigh`
+            // populates REACHABLE within one packet of the first connect,
+            // which is fast enough that the prior arp-union is unnecessary.
+            sendToCarroot("ip neigh show dev ap0 > $out 2>/dev/null; chmod 666 $out")
             Thread.sleep(250)
+            val rawText = runCatching { java.io.File(out).readText() }.getOrDefault("")
+            // Accept only states that mean "currently or recently confirmed
+            // reachable". Reject:
+            //   STALE       — entry past nud_stale_time, kernel hasn't probed yet;
+            //                 may be a still-connected idle client OR a dead one.
+            //                 We err on the side of "not counting" since the
+            //                 user-visible bug is inflated counts.
+            //   FAILED      — probe failed; client is gone.
+            //   INCOMPLETE  — initial ARP request pending, no MAC yet.
+            //   NOARP       — typically not seen for normal wifi clients.
+            // PERMANENT/NOARP kept because manually-added static entries may
+            // be legitimate (no harm if none exist).
+            val live = setOf("REACHABLE", "DELAY", "PROBE", "PERMANENT")
             val macs = runCatching {
-                val text = java.io.File(out).readText()
                 val seen = linkedSetOf<String>()
-                Regex("lladdr ([0-9a-fA-F:]{17})").findAll(text).forEach { seen.add(it.groupValues[1].uppercase()) }
-                text.lineSequence().drop(1).forEach { line ->
-                    val parts = line.trim().split(Regex("\\s+"))
-                    if (parts.size >= 6 && (parts[5] == "ap0" || parts[5].startsWith("wlan"))) {
-                        val mac = parts[3]
-                        if (mac.matches(Regex("[0-9a-fA-F:]{17}")) && mac != "00:00:00:00:00:00") {
-                            seen.add(mac.uppercase())
-                        }
+                rawText.lineSequence().forEach { line ->
+                    val m = Regex("lladdr ([0-9a-fA-F:]{17})\\s+(\\S+)").find(line) ?: return@forEach
+                    val mac = m.groupValues[1].uppercase()
+                    val state = m.groupValues[2].uppercase()
+                    if (state in live && mac != "00:00:00:00:00:00") {
+                        seen.add(mac)
                     }
                 }
                 seen.toList()
             }.getOrDefault(emptyList())
+            android.util.Log.d(
+                "WifiShare",
+                "softap clients: count=${macs.size} macs=${macs.joinToString()} raw=${rawText.replace("\n", " | ").take(400)}",
+            )
             ui.post {
                 state.wifiShareConnectedClients.clear()
                 state.wifiShareConnectedClients.addAll(macs)
@@ -2981,10 +3010,16 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             onDelta = { delta ->
                 ui.post {
                     state.hermesStreamingText = state.hermesStreamingText + delta
+                    maybeEmitHermesStreamingTtsChunk()
                 }
             },
             onDone = { full ->
                 ui.post {
+                    // Flush any residue BEFORE clearing the streaming buffer.
+                    // Pass `full` explicitly so it works regardless of which
+                    // source the splitter was reading from.
+                    flushHermesStreamingTtsTail(full)
+                    val streamingHandledTts = hermesStreamingTtsActive
                     state.hermesStreamingText = ""
                     state.hermesBusy = false
                     if (full.isNotBlank()) {
@@ -2995,7 +3030,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                         persistHermesHistory()
                         state.hermesScrollIndex = 0
                         state.hermesStatus = "live"
-                        speakLatestHermesAssistantIfNeeded()
+                        // Only fall back to the one-shot read-back if the
+                        // streaming pipeline never claimed this run (e.g.,
+                        // reply was too short to hit a sentence boundary
+                        // before onDone — flushHermesStreamingTtsTail is a
+                        // no-op when streaming wasn't active).
+                        if (!streamingHandledTts) speakLatestHermesAssistantIfNeeded()
                     } else {
                         state.hermesStatus = "idle"
                     }
@@ -3003,6 +3043,10 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             },
             onError = { msg ->
                 ui.post {
+                    // Tear down any in-flight streaming TTS so half-played
+                    // chunks don't keep talking after an error and so the
+                    // next turn starts with a clean offset.
+                    if (hermesStreamingTtsActive) cancelHermesSpeech()
                     state.hermesStreamingText = ""
                     state.hermesBusy = false
                     state.hermesStatus = "error: $msg"
@@ -3193,6 +3237,146 @@ override fun hermesPasteServerUrlFromClipboard() {
         }
     }
 
+    /** Mirror of [maybeEmitStreamingTtsChunk] for the Hermes chat panel.
+     *  Slices off any newly-completed sentences past
+     *  [hermesStreamingSpokenOffset] and enqueues them for ElevenLabs synth
+     *  while the SSE stream is still mid-flight. */
+    private fun maybeEmitHermesStreamingTtsChunk() {
+        if (!hermesStreamingTtsActive && !hermesSpeakNextAssistant) return
+        if (state.panel != Panel.HERMES_CHAT || !state.voiceEnabled) return
+        if (voicePrefs.elevenlabsKey.isNullOrBlank()) return
+        val full = state.hermesStreamingText
+        if (full.length <= hermesStreamingSpokenOffset) return
+        val tail = full.substring(hermesStreamingSpokenOffset)
+        val firstChunk = hermesSpeechIssuedSeq == 0
+        val split = findStreamingSplitPoint(tail, firstChunk)
+        if (split <= 0) return
+        val chunk = tail.substring(0, split).trim()
+        hermesStreamingSpokenOffset += split
+        if (chunk.isEmpty()) return
+        hermesStreamingTtsActive = true
+        hermesSpeakNextAssistant = false
+        enqueueHermesStreamingTtsChunk(chunk)
+    }
+
+    /** Flush any non-empty residue past [hermesStreamingSpokenOffset] —
+     *  for replies that ended without a sentence terminator. Only runs if
+     *  streaming TTS already claimed this run (otherwise the post-stream
+     *  one-shot still speaks the full message). Pass the final accumulated
+     *  text directly so the flush still works after onDone resets
+     *  [state.hermesStreamingText] = "". */
+    private fun flushHermesStreamingTtsTail(fullText: String) {
+        if (state.panel != Panel.HERMES_CHAT || !state.voiceEnabled) return
+        if (!hermesStreamingTtsActive) return
+        if (voicePrefs.elevenlabsKey.isNullOrBlank()) return
+        if (fullText.length <= hermesStreamingSpokenOffset) return
+        val tail = fullText.substring(hermesStreamingSpokenOffset).trim()
+        hermesStreamingSpokenOffset = fullText.length
+        if (tail.isEmpty()) return
+        enqueueHermesStreamingTtsChunk(tail)
+    }
+
+    private fun enqueueHermesStreamingTtsChunk(chunk: String) {
+        val apiKey = voicePrefs.elevenlabsKey
+        if (apiKey.isNullOrBlank()) return
+        val cleanChunk = stripMarkdownForTts(chunk)
+        if (cleanChunk.isBlank()) return
+        val turnId = hermesStreamingTtsTurnId
+        val seq = ++hermesSpeechIssuedSeq
+        val outFile = File(
+            File(cacheDir, "hermes-voice").apply { mkdirs() },
+            "stream-$turnId-$seq.mp3",
+        )
+        val call = com.r1.launcher.voice.ElevenLabsTtsClient.synthesize(
+            text = cleanChunk,
+            apiKey = apiKey,
+            voiceId = voicePrefs.effectiveVoiceId(),
+            model = voicePrefs.model,
+            tuning = voicePrefs.tuning(),
+            outFile = outFile,
+        ) { _, err ->
+            if (turnId != hermesStreamingTtsTurnId) {
+                runCatching { outFile.delete() }
+                return@synthesize
+            }
+            if (err != null) {
+                hermesSpeechSlots[seq] = null
+                runCatching { outFile.delete() }
+            } else {
+                hermesSpeechSlots[seq] = outFile
+            }
+            drainHermesStreamingSpeechQueue()
+        }
+        if (call != null) {
+            if (turnId != hermesStreamingTtsTurnId) {
+                runCatching { call.cancel() }
+            } else {
+                hermesTtsChunkCalls.add(call)
+            }
+        }
+    }
+
+    private fun drainHermesStreamingSpeechQueue() {
+        while (true) {
+            if (hermesSpeechPlaying) return
+            val next = hermesSpeechNextToPlay
+            if (!hermesSpeechSlots.containsKey(next)) return
+            val file = hermesSpeechSlots.remove(next)
+            hermesSpeechNextToPlay = next + 1
+            if (file == null) continue
+            playHermesStreamingSpeechFile(file)
+            return
+        }
+    }
+
+    private fun playHermesStreamingSpeechFile(file: File) {
+        runCatching { hermesSpeechPlayer?.stop() }
+        runCatching { hermesSpeechPlayer?.release() }
+        hermesSpeechPlayer = null
+        runCatching { hermesSpeechCurrentFile?.delete() }
+        hermesSpeechCurrentFile = file
+        val turnId = hermesStreamingTtsTurnId
+        runCatching {
+            hermesSpeechPlayer = MediaPlayer().apply {
+                setAudioAttributes(
+                    android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                setDataSource(file.absolutePath)
+                setOnCompletionListener { mp ->
+                    runCatching { mp.release() }
+                    if (hermesSpeechPlayer === mp) hermesSpeechPlayer = null
+                    runCatching { file.delete() }
+                    if (hermesSpeechCurrentFile === file) hermesSpeechCurrentFile = null
+                    if (turnId != hermesStreamingTtsTurnId) {
+                        hermesSpeechPlaying = false
+                        return@setOnCompletionListener
+                    }
+                    hermesSpeechPlaying = false
+                    drainHermesStreamingSpeechQueue()
+                }
+                setOnErrorListener { mp, _, _ ->
+                    runCatching { mp.release() }
+                    if (hermesSpeechPlayer === mp) hermesSpeechPlayer = null
+                    runCatching { file.delete() }
+                    if (hermesSpeechCurrentFile === file) hermesSpeechCurrentFile = null
+                    hermesSpeechPlaying = false
+                    if (turnId == hermesStreamingTtsTurnId) drainHermesStreamingSpeechQueue()
+                    true
+                }
+                prepare()
+                start()
+            }
+            hermesSpeechPlaying = true
+        }.onFailure {
+            hermesSpeechPlaying = false
+            runCatching { file.delete() }
+            if (hermesSpeechCurrentFile === file) hermesSpeechCurrentFile = null
+        }
+    }
+
     private fun playHermesSpeech(file: File) {
         runCatching { hermesSpeechPlayer?.release() }
         val mp = MediaPlayer()
@@ -3236,6 +3420,25 @@ override fun hermesPasteServerUrlFromClipboard() {
         hermesSpeechPlayer = null
         runCatching { hermesSpeechCurrentFile?.delete() }
         hermesSpeechCurrentFile = null
+
+        // Streaming pipeline teardown: bumping turnId invalidates any
+        // in-flight chunk callbacks that race past cancel(). Cancel HTTP,
+        // drop queued slots, delete leftover chunk MP3s.
+        hermesStreamingTtsTurnId++
+        hermesTtsChunkCalls.forEach { runCatching { it.cancel() } }
+        hermesTtsChunkCalls.clear()
+        hermesSpeechSlots.values.forEach { f -> f?.let { runCatching { it.delete() } } }
+        hermesSpeechSlots.clear()
+        runCatching {
+            File(cacheDir, "hermes-voice")
+                .listFiles { f -> f.name.startsWith("stream-") }
+                ?.forEach { runCatching { it.delete() } }
+        }
+        hermesSpeechIssuedSeq = 0
+        hermesSpeechNextToPlay = 1
+        hermesSpeechPlaying = false
+        hermesStreamingSpokenOffset = 0
+        hermesStreamingTtsActive = false
     }
 
     override fun openClawCloseSession() {
