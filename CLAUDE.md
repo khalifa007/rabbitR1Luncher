@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Compose-based HOME launcher for the **Rabbit R1** (480×480 round, MT6765). Ships as a system app inside the user's LineageOS-based **CarrotOS** image, source tree at `/home/khalifa/lineage` (target: `lineage_r1-userdebug`). Successor to `../mylauncher/` (Gradle-less Java + XML). Same package (`com.r1.launcher`), platform-signed (see Release compatibility) so the launcher can hold signature-only perms like `ACCESS_MESSAGES_ON_ICC`. Current clean-baseline chain — see `app/build.gradle.kts` for live `versionCode`/`versionName`.
+Compose-based HOME launcher for the **Rabbit R1** (480×480 round, MT6765). Ships as a system app inside the user's LineageOS-based **CarrotOS** image, source tree at `/home/khalifa/lineage` (target: `gsi_r1-ap2a-userdebug`). Successor to `../mylauncher/` (Gradle-less Java + XML). Same package (`com.r1.launcher`), platform-signed (see Release compatibility) so the launcher can hold signature-only perms like `ACCESS_MESSAGES_ON_ICC`. Current clean-baseline chain — see `app/build.gradle.kts` for live `versionCode`/`versionName`.
 
 `../mylauncher/CLAUDE.md` has feature-level history; this file covers only the Compose rewrite + OpenClaw chat + OS-image integration.
 
@@ -120,24 +120,25 @@ Each toggle logs `toggleX(B) direct applied=A` and `toggleX(B) ok=O (applied=A)`
 
 ## OS-image dependency (CarrotOS at /home/khalifa/lineage)
 
-Two cross-tree integrations:
+Three cross-tree integrations:
 
 - **APN database**: `device/rabbit/r1/device.mk` PRODUCT_COPY_FILES includes `device/sample/etc/apns-full-conf.xml:system/etc/apns-conf.xml`. Without this, the carriers DB is empty on first boot and no SIM gets data.
 - **carroot socket**: `device/rabbit/r1/rootdir/system/etc/init/carroot.rc` runs `nc -L -p 1337 sh` as root with `u:r:su:s0`. `sendToCarroot(cmd: String): Boolean` in `LauncherActivity.kt` is the single entry point; returns true on socket-write success, NOT command effect — re-verify state after every call.
+- **Doze whitelist for ntfy**: `device/rabbit/r1/sysconfig/r1-launcher.xml` declares `<allow-in-power-save package="com.r1.launcher" />`. Without this, Doze severs the long-poll TCP and firewalls DNS for the launcher's package — `NtfySubscriber` reconnects fail with `Unable to resolve host "ntfy.sh"` until the next maintenance window. Verify via `adb shell dumpsys deviceidle whitelist | grep com.r1.launcher`.
 
 Rebuild + flash sequence:
 
 ```bash
 cd /home/khalifa/lineage && source build/envsetup.sh
-lunch lineage_r1-userdebug
+lunch gsi_r1-ap2a-userdebug             # NOT lineage_r1-userdebug; product name is gsi_r1, release is ap2a
 make systemimage -j$(nproc)
 adb reboot bootloader
+fastboot reboot fastboot                # system is a logical partition inside `super`; need fastbootd
 fastboot flash system out/target/product/r1/system.img
-fastboot -w                       # wipes userdata; prevents ART cache mismatch
 fastboot reboot
+# `fastboot -w` only required if boot jars / telephony jars changed (ART cache mismatch).
+# Sysconfig XML / APN / launcher-only changes preserve userdata fine.
 ```
-
-`fastboot -w` is load-bearing (see anti-pattern list).
 
 ## Wi-Fi sharing (hotspot)
 
