@@ -1,7 +1,6 @@
 package com.r1.launcher.notifications
 
 import android.content.Context
-import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -31,11 +30,15 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Resume: `?since=<lastId>` on reconnect replays anything we missed during
  * the drop window (ntfy retains 12h by default).
  *
- * WifiLock: acquired in [start] / released in [stop] so the Wi-Fi radio
- * stays in high-perf mode even with screen off. If the launcher's web
- * server is also running it'll be holding its own lock — that's fine,
- * WifiLock is per-process and Android collapses the radio's actual power
- * state across all current holders.
+ * Power: no WifiLock. The launcher's package is whitelisted from Doze via
+ * /system/etc/sysconfig/r1-launcher.xml (allow-in-power-save), which lets the
+ * long-poll TCP stay open across screen-off and idle. The Wi-Fi firmware
+ * wakes the CPU when inbound packets arrive on the open socket; a per-frame
+ * PARTIAL_WAKE_LOCK in handleFrame keeps the CPU up long enough to finish
+ * dispatch. Without the Doze exemption, holding a WifiLock alone wasn't
+ * enough — Doze still firewalls DNS for non-whitelisted apps. With the
+ * exemption, the WifiLock is redundant and was costing ~150-400mW of
+ * radio idle current 24/7 on a 3000mAh device.
  */
 class NtfySubscriber(
     private val ctx: Context,
@@ -57,7 +60,6 @@ class NtfySubscriber(
     private val ui = Handler(Looper.getMainLooper())
 
     @Volatile private var inflight: Call? = null
-    @Volatile private var wifiLock: WifiManager.WifiLock? = null
     // Short-lived wakelock acquired around each handleFrame so the kernel can't
     // re-suspend the CPU mid-delivery when the screen is off. Held for the
     // duration of one frame parse + UI post (microseconds in practice); 5s
@@ -109,7 +111,6 @@ class NtfySubscriber(
         }
         userStopped.set(false)
         reconnectDelayMs = 2_000L
-        acquireWifiLock()
         openConnection()
     }
 
@@ -120,7 +121,6 @@ class NtfySubscriber(
         generation++
         runCatching { inflight?.cancel() }
         inflight = null
-        releaseWifiLock()
         updateStatus(Status.DISABLED)
     }
 
@@ -304,25 +304,6 @@ class NtfySubscriber(
         ui.postDelayed({
             if (!userStopped.get() && inflight == null) openConnection()
         }, delay)
-    }
-
-    private fun acquireWifiLock() {
-        if (wifiLock?.isHeld == true) return
-        runCatching {
-            val wm = app.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return@runCatching
-            val lock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "r1.ntfy")
-            lock.setReferenceCounted(false)
-            lock.acquire()
-            wifiLock = lock
-            Log.i(TAG, "wifi lock acquired (full_high_perf)")
-        }.onFailure { Log.w(TAG, "wifi lock failed: ${it.message}") }
-    }
-
-    private fun releaseWifiLock() {
-        runCatching {
-            wifiLock?.takeIf { it.isHeld }?.release()
-            wifiLock = null
-        }
     }
 
     private fun updateStatus(s: Status) {
