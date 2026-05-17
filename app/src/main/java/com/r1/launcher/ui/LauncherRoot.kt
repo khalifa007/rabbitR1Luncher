@@ -49,7 +49,34 @@ fun LauncherRoot(
             .background(colors.bg),
     ) {
         // Base: home screen. Visible whenever nothing else is stacked over it.
-        HomeScreen(state = state)
+        // Tapping the unread badge / banner opens the notifications panel.
+        HomeScreen(
+            state = state,
+            onOpenNotifications = {
+                state.openNotifications()
+                state.notificationBanner = null
+                host.selectTone()
+            },
+        )
+
+        NotificationsPanel(
+            state = state,
+            onRowClick = { idx ->
+                val items = state.notifications.asReversed()
+                when {
+                    idx == 0 -> { state.back(); host.backTone() }
+                    idx - 1 in items.indices -> {
+                        val n = items[idx - 1]
+                        host.notificationActivate(n.id)
+                        host.selectTone()
+                    }
+                    items.isNotEmpty() && idx == items.size + 1 -> {
+                        host.notificationsClear()
+                        host.popTone()
+                    }
+                }
+            },
+        )
 
         OnboardingPanel(
             state = state,
@@ -89,7 +116,7 @@ fun LauncherRoot(
             state = state,
             onRowClick = { idx ->
                 // Order must match the rows list in SettingsPanel.kt:
-                //   network, display, sound, voice, device, about
+                //   network, display, sound, voice, credentials, device, about
                 // (language was promoted into device in v3.32)
                 // and the wheel-activate dispatcher in LauncherNav.kt.
                 when (idx) {
@@ -98,8 +125,9 @@ fun LauncherRoot(
                     2 -> { state.openSettingsDisplay(); host.selectTone() }
                     3 -> { state.openSettingsSound(); host.selectTone() }
                     4 -> { state.openSettingsVoice(); host.selectTone() }
-                    5 -> { state.openSettingsDevice(); host.selectTone() }
-                    6 -> { state.openSettingsAbout(); host.selectTone() }
+                    5 -> { state.openSettingsCredentials(); host.selectTone() }
+                    6 -> { state.openSettingsDevice(); host.selectTone() }
+                    7 -> { state.openSettingsAbout(); host.selectTone() }
                 }
             },
         )
@@ -122,6 +150,7 @@ fun LauncherRoot(
                     1 -> { host.toggleUiSoundEnabled(!state.uiSoundEnabled); host.popTone() }
                     2 -> { state.openUiVolume(); host.selectTone() }
                     3 -> { state.openVolume(); host.selectTone() }
+                    4 -> { host.toggleNotificationSound(!state.notificationSoundEnabled); host.popTone() }
                 }
             },
         )
@@ -155,13 +184,33 @@ fun LauncherRoot(
         SettingsVoicePanel(
             state = state,
             onBack = { state.back(); host.backTone() },
-            onSaveKey = { k -> host.voiceSaveKey(k) },
-            onPasteKey = { host.voicePasteKeyFromClipboard() },
-            onClear = { host.voiceClearKey() },
             onSaveCustomVoiceId = { id -> host.voiceSaveCustomVoiceId(id) },
             onPasteCustomVoiceId = { host.voicePasteCustomVoiceIdFromClipboard() },
             onClearCustomVoiceId = { host.voiceClearCustomVoiceId() },
             onRowClick = { idx -> host.voiceSettingsRowActivate(idx) },
+        )
+
+        SettingsCredentialsPanel(
+            state = state,
+            onRowClick = { idx ->
+                if (idx == 0) {
+                    state.back(); host.backTone()
+                } else {
+                    host.credentialsRowActivate(idx)
+                    host.selectTone()
+                }
+            },
+            onSaveField = { field, value -> host.credentialsSaveField(field, value) },
+            onPasteField = { field -> host.credentialsPasteField(field) },
+            onClearField = { field -> host.credentialsClearField(field) },
+        )
+
+        NtfyConfigPanel(
+            state = state,
+            onRowClick = { idx ->
+                host.ntfyConfigRowActivate(idx)
+                if (idx == 0) host.backTone() else host.popTone()
+            },
         )
 
         SettingsVoiceTuningPanel(
@@ -205,7 +254,8 @@ fun LauncherRoot(
                     4 -> { state.openWifiShare(); host.selectTone() }
                     5 -> { host.toggleWebServer(!state.webServerEnabled); host.popTone() }
                     6 -> { host.setWebTerminalEnabled(!state.webTerminalEnabled); host.popTone() }
-                    7 -> { host.startWifiScan(); state.openWifiScan(); host.selectTone() }
+                    7 -> { state.openNtfyConfig(); host.selectTone() }
+                    8 -> { host.startWifiScan(); state.openWifiScan(); host.selectTone() }
                 }
             },
         )

@@ -178,6 +178,46 @@ interface LauncherHost {
     /** Dispatch a single ⋮ menu action. The activity reads the current meeting
      *  uuid from state. */
     fun transcriberDetailMenuActivate(action: com.r1.launcher.transcriber.TranscriberDetailAction)
+
+    // --- notifications ---
+    /** Push a notification into the local center. Persists to JSON, updates
+     *  the unread badge, fires the chime (guards permitting), and emits a
+     *  `notification` event on the web companion socket. Called by the
+     *  OpenClaw chat ingress, the Hermes onDone ingress, the `POST /api/notify`
+     *  webhook, and any future local cron jobs. */
+    fun notify(
+        source: String,
+        title: String,
+        body: String,
+        deeplink: String? = null,
+    )
+    /** Wheel-activate on a notification row: mark read, then jump to the
+     *  deeplinked panel (or stay on NOTIFICATIONS if the notif has no link). */
+    fun notificationActivate(id: Long)
+    fun notificationsMarkAllRead()
+    fun notificationsClear()
+    /** Toggle the master chime — surfaced in Settings → Sound. */
+    fun toggleNotificationSound(enabled: Boolean)
+
+    // --- credentials (global API keys) ---
+    /** Row-activate dispatcher for SETTINGS_CREDENTIALS. The activity opens
+     *  the appropriate keyboard overlay (or fires the "regenerate" action
+     *  on the webhook token row). */
+    fun credentialsRowActivate(idx: Int)
+    /** Persist a typed credential. `field` is the credentialsEditField name:
+     *  "anthropic" | "elevenlabs" | "hermes" | "ntfy_topic". Empty value
+     *  clears the field. */
+    fun credentialsSaveField(field: String, value: String)
+    fun credentialsPasteField(field: String)
+    fun credentialsClearField(field: String)
+    /** Regenerate the webhook bearer token. Returns the new value so the
+     *  panel can refresh its display mirror without an extra read. */
+    fun regenerateWebhookToken(): String
+
+    // --- ntfy.sh subscriber ---
+    fun toggleNtfySubscriber(enabled: Boolean)
+    fun ntfySetTopic(topic: String)
+    fun ntfyConfigRowActivate(idx: Int)
 }
 
 fun LauncherState.wheelUp(host: LauncherHost) {
@@ -388,6 +428,27 @@ fun LauncherState.wheelUp(host: LauncherHost) {
                 transcriberSettingsFocus--; host.navTone()
             }
         }
+        Panel.NOTIFICATIONS -> {
+            if (notificationsFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                notificationsFocus--; host.navTone()
+            }
+        }
+        Panel.SETTINGS_CREDENTIALS -> {
+            if (credentialsFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                credentialsFocus--; host.navTone()
+            }
+        }
+        Panel.NTFY_CONFIG -> {
+            if (ntfyConfigFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                ntfyConfigFocus--; host.navTone()
+            }
+        }
         Panel.HOME -> { /* clock screen — no list to scroll */ }
     }
 }
@@ -415,7 +476,8 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.SETTINGS -> {
             val prev = settingsFocus
-            settingsFocus = (settingsFocus + 1).coerceAtMost(6) // back, network, display, sound, voice, device, about
+            // back, network, display, sound, voice, credentials, device, about
+            settingsFocus = (settingsFocus + 1).coerceAtMost(7)
             if (prev != settingsFocus) host.navTone()
         }
         Panel.SETTINGS_DISPLAY -> {
@@ -425,7 +487,8 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.SETTINGS_SOUND -> {
             val prev = settingsSoundFocus
-            settingsSoundFocus = (settingsSoundFocus + 1).coerceAtMost(3) // back, system-toggle, system-volume, sound
+            // back, system-toggle, system-volume, sound, notifications
+            settingsSoundFocus = (settingsSoundFocus + 1).coerceAtMost(4)
             if (prev != settingsSoundFocus) host.navTone()
         }
         Panel.SETTINGS_DEVICE -> {
@@ -439,8 +502,9 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.SETTINGS_VOICE -> {
             val prev = voiceFocus
-            // back, on/off, key, subscription, voice picker, custom-id, test, tuning, clear
-            voiceFocus = (voiceFocus + 1).coerceAtMost(8)
+            // back, on/off, subscription, voice picker, custom-id, test, tuning
+            // (elevenlabs key + clear key moved to Settings → Credentials)
+            voiceFocus = (voiceFocus + 1).coerceAtMost(6)
             if (prev != voiceFocus) host.navTone()
         }
         Panel.SETTINGS_VOICE_TUNING -> {
@@ -464,7 +528,8 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.NETWORK -> {
             val prev = networkFocus
-            networkFocus = (networkFocus + 1).coerceAtMost(7) // back, wifi, cellular, bluetooth, share, remote, terminal, scan
+            // back, wifi, cellular, bluetooth, share, remote, terminal, ntfy, scan
+            networkFocus = (networkFocus + 1).coerceAtMost(8)
             if (prev != networkFocus) host.navTone()
         }
         Panel.FACTORY_CONFIRM -> {
@@ -593,6 +658,26 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             transcriberSettingsFocus = (transcriberSettingsFocus + 1).coerceAtMost(6)
             if (prev != transcriberSettingsFocus) host.navTone()
         }
+        Panel.NOTIFICATIONS -> {
+            // 0=back, 1..N=items, (N+1)=clear-all row (only when items exist).
+            val itemsCount = notifications.size
+            val maxRow = if (itemsCount == 0) 0 else itemsCount + 1
+            val prev = notificationsFocus
+            notificationsFocus = (notificationsFocus + 1).coerceAtMost(maxRow)
+            if (prev != notificationsFocus) host.navTone()
+        }
+        Panel.SETTINGS_CREDENTIALS -> {
+            // back, anthropic, elevenlabs, hermes, ntfy topic, webhook token
+            val prev = credentialsFocus
+            credentialsFocus = (credentialsFocus + 1).coerceAtMost(5)
+            if (prev != credentialsFocus) host.navTone()
+        }
+        Panel.NTFY_CONFIG -> {
+            // back, enable toggle, topic row, status (info)
+            val prev = ntfyConfigFocus
+            ntfyConfigFocus = (ntfyConfigFocus + 1).coerceAtMost(3)
+            if (prev != ntfyConfigFocus) host.navTone()
+        }
         Panel.HOME -> {
             openApps()
             host.selectTone()
@@ -636,8 +721,9 @@ fun LauncherState.activate(host: LauncherHost) {
             2 -> { openSettingsDisplay(); host.selectTone() }
             3 -> { openSettingsSound(); host.selectTone() }
             4 -> { openSettingsVoice(); host.selectTone() }
-            5 -> { openSettingsDevice(); host.selectTone() }
-            6 -> { openSettingsAbout(); host.selectTone() }
+            5 -> { openSettingsCredentials(); host.selectTone() }
+            6 -> { openSettingsDevice(); host.selectTone() }
+            7 -> { openSettingsAbout(); host.selectTone() }
         }
         Panel.SETTINGS_LANGUAGE -> {
             if (settingsLanguageFocus == 0) {
@@ -666,6 +752,7 @@ fun LauncherState.activate(host: LauncherHost) {
             1 -> { host.toggleUiSoundEnabled(!uiSoundEnabled); host.popTone() }
             2 -> { openUiVolume(); host.selectTone() }
             3 -> { openVolume(); host.selectTone() }
+            4 -> { host.toggleNotificationSound(!notificationSoundEnabled); host.popTone() }
         }
         Panel.SETTINGS_DEVICE -> when (settingsDeviceFocus) {
             0 -> { back(); host.backTone() }
@@ -685,7 +772,8 @@ fun LauncherState.activate(host: LauncherHost) {
             4 -> { openWifiShare(); host.selectTone() }
             5 -> { host.toggleWebServer(!webServerEnabled); host.popTone() }
             6 -> { host.setWebTerminalEnabled(!webTerminalEnabled); host.popTone() }
-            7 -> { host.startWifiScan(); openWifiScan(); host.selectTone() }
+            7 -> { openNtfyConfig(); host.selectTone() }
+            8 -> { host.startWifiScan(); openWifiScan(); host.selectTone() }
         }
         Panel.WIFI_SHARE -> when (wifiShareFocus) {
             0 -> { back(); host.backTone() }
@@ -804,6 +892,27 @@ fun LauncherState.activate(host: LauncherHost) {
             host.transcriberSettingsRowActivate(transcriberSettingsFocus)
             host.selectTone()
         }
+        Panel.NOTIFICATIONS -> {
+            // 0=back, 1..N=items (open deeplink + mark read), N+1=clear-all.
+            val items = notifications
+            when {
+                notificationsFocus == 0 -> { back(); host.backTone() }
+                notificationsFocus - 1 in items.indices -> {
+                    val n = items[notificationsFocus - 1]
+                    host.notificationActivate(n.id)
+                    host.selectTone()
+                }
+                items.isNotEmpty() && notificationsFocus == items.size + 1 -> {
+                    host.notificationsClear()
+                    host.popTone()
+                }
+            }
+        }
+        Panel.SETTINGS_CREDENTIALS -> when (credentialsFocus) {
+            0 -> { back(); host.backTone() }
+            else -> { host.credentialsRowActivate(credentialsFocus); host.selectTone() }
+        }
+        Panel.NTFY_CONFIG -> { host.ntfyConfigRowActivate(ntfyConfigFocus); host.selectTone() }
     }
 }
 

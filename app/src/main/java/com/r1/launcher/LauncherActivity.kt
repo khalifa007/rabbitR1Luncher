@@ -132,6 +132,16 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private val hermesSpeechSlots: java.util.TreeMap<Int, File?> = java.util.TreeMap()
     private val hermesTtsChunkCalls: MutableList<okhttp3.Call> = mutableListOf()
     private val soundPrefs by lazy { com.r1.launcher.sound.SoundPrefs.get(this) }
+    private val notifPrefs by lazy { com.r1.launcher.notifications.NotifPrefs.get(this) }
+    private val ntfyPrefs by lazy { com.r1.launcher.notifications.NtfyPrefs.get(this) }
+    /** Single ntfy.sh subscriber instance — null when stopped. Created lazily
+     *  on first enable to avoid holding a Wi-Fi lock when the feature is
+     *  unused. */
+    private var ntfySubscriber: com.r1.launcher.notifications.NtfySubscriber? = null
+    /** Wall-clock of the last notification chime — rate-limit to one beep per
+     *  [NOTIF_SOUND_MIN_GAP_MS] so a burst of webhooks doesn't machine-gun. */
+    private var lastNotifSoundAtMs: Long = 0L
+    private val NOTIF_SOUND_MIN_GAP_MS = 3000L
     private val wifiSharePrefs by lazy { com.r1.launcher.wifishare.WifiSharePrefs.get(this) }
     private var wifiShareTimerEndMs: Long = 0L
     private val wifiShareTimerRunnable = Runnable { toggleWifiShare(false) }
@@ -463,6 +473,27 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.wifiShareSsid = wifiSharePrefs.ssid
         state.wifiSharePassword = wifiSharePrefs.password
         state.wifiShareTimerMinutes = wifiSharePrefs.timerMinutes
+        // Hydrate notifications from disk so the HOME badge is correct on
+        // first paint after a cold start. Append-only JSON, oldest-first.
+        state.notificationSoundEnabled = notifPrefs.soundEnabled
+        runCatching {
+            val persisted = com.r1.launcher.notifications.NotificationStore.all(this)
+            state.notifications.clear()
+            state.notifications.addAll(persisted)
+            state.notificationsUnread = persisted.count { !it.read }
+        }
+        // Credentials panel display mirrors. Anthropic key isn't in a
+        // SharedPreferences — probe the file via the existing claude auth
+        // status path which already handles the carroot read.
+        refreshCredentialsDisplay()
+        // ntfy.sh subscriber: hydrate display state + auto-start if the
+        // user previously enabled it (matches webserver auto-on pattern).
+        state.ntfyTopic = ntfyPrefs.topic
+        state.ntfySubscriberEnabled = ntfyPrefs.enabled
+        state.ntfyStatus = if (ntfyPrefs.enabled && ntfyPrefs.isConfigured()) "connecting" else "disabled"
+        if (ntfyPrefs.enabled && ntfyPrefs.isConfigured()) {
+            startNtfySubscriber()
+        }
         loadApps()
 
         // Default the remote panel and Bluetooth to off on every cold start —
@@ -614,6 +645,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         voiceSession = null
         runCatching { webServer?.stopServer() }
         webServer = null
+        runCatching { ntfySubscriber?.stop() }
+        ntfySubscriber = null
         // Clean up UI handlers
         runCatching { ui.removeCallbacksAndMessages(null) }
         runCatching { tone?.release() }
@@ -977,6 +1010,14 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         } else {
             incoming
         }
+        // Detect a *new* assistant message landing (compared with what we had
+        // before) so we can push a notification when the chat panel isn't the
+        // current panel. Computed before we overwrite chatMessages.
+        val prevLastAssistantText = current.lastOrNull { it.role == "assistant" }?.text.orEmpty()
+        val incomingLastAssistantText = next.lastOrNull { it.role == "assistant" }?.text.orEmpty()
+        val newAssistantArrived = incomingLastAssistantText.isNotBlank() &&
+            incomingLastAssistantText != prevLastAssistantText
+
         state.chatMessages.clear()
         state.chatMessages.addAll(next.takeLast(state.chatMessagesMax))
         // Drop the streaming preview now that the persisted messages have
@@ -984,6 +1025,15 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         // streaming bubble disappearing and the final assistant bubble
         // appearing in chatMessages.
         state.chatStreamingText = ""
+
+        if (newAssistantArrived && state.panel != Panel.OPENCLAW_CHAT) {
+            notify(
+                source = "openclaw",
+                title = "openclaw",
+                body = incomingLastAssistantText.replace('\n', ' ').take(120),
+                deeplink = "openclaw_chat",
+            )
+        }
     }
 
     private fun speakLatestAssistantIfNeeded() {
@@ -3036,6 +3086,14 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                         // before onDone — flushHermesStreamingTtsTail is a
                         // no-op when streaming wasn't active).
                         if (!streamingHandledTts) speakLatestHermesAssistantIfNeeded()
+                        if (state.panel != Panel.HERMES_CHAT) {
+                            notify(
+                                source = "hermes",
+                                title = "hermes",
+                                body = full.replace('\n', ' ').take(120),
+                                deeplink = "hermes_chat",
+                            )
+                        }
                     } else {
                         state.hermesStatus = "idle"
                     }
@@ -3506,32 +3564,28 @@ override fun hermesPasteServerUrlFromClipboard() {
     }
 
     override fun voiceSettingsRowActivate(idx: Int) {
-        // Row layout matches SettingsVoicePanel:
+        // Row layout matches SettingsVoicePanel (post-credentials-migration):
         //   0  back
         //   1  voice on/off
-        //   2  elevenlabs key  (handled inline by the panel's keyboard overlay)
-        //   3  subscription (tap = force-refresh balance)
-        //   4  voice picker (cycle catalog)
-        //   5  custom voice id (handled inline by the panel's keyboard overlay)
-        //   6  test voice
-        //   7  tuning (opens SETTINGS_VOICE_TUNING)
-        //   8  clear key
+        //   2  subscription (tap = force-refresh balance)
+        //   3  voice picker (cycle catalog)
+        //   4  custom voice id (handled inline by the panel's keyboard overlay)
+        //   5  test voice
+        //   6  tuning (opens SETTINGS_VOICE_TUNING)
         when (idx) {
             0 -> { state.back(); backTone() }
             1 -> voiceToggleEnabled()
-            // 2 handled by the panel's keyboard overlay
-            3 -> {
+            2 -> {
                 state.openSettingsVoiceSubscription()
                 // Auto-fetch on entry; honors the 60s cache so re-entering
                 // the page in quick succession doesn't re-hit the API.
                 voiceFetchSubscription(force = false)
                 selectTone()
             }
-            4 -> voiceCycleVoiceId()
-            // 5 handled by the panel's keyboard overlay
-            6 -> voiceTestSynthesize()
-            7 -> { state.openSettingsVoiceTuning(); selectTone() }
-            8 -> voiceClearKey()
+            3 -> voiceCycleVoiceId()
+            // 4 handled by the panel's keyboard overlay
+            5 -> voiceTestSynthesize()
+            6 -> { state.openSettingsVoiceTuning(); selectTone() }
         }
     }
 
@@ -4790,6 +4844,452 @@ override fun hermesPasteServerUrlFromClipboard() {
             }
             com.r1.launcher.transcriber.TranscriberDetailAction.CLOSE -> {
                 state.transcriberDetailMenuOpen = false
+            }
+        }
+    }
+
+    // --- notifications ---
+
+    override fun notify(
+        source: String,
+        title: String,
+        body: String,
+        deeplink: String?,
+    ) {
+        // Suppress notifications we'd just be telling the user about themselves:
+        // when the source matches the current panel, the chime + badge are pure
+        // noise. The originating call site usually pre-filters too, but this is
+        // a cheap belt to keep the contract honest for new ingress paths.
+        val deeplinkPanel = panelForDeeplink(deeplink)
+        if (deeplinkPanel != null && deeplinkPanel == state.panel) return
+        val id = com.r1.launcher.notifications.NotificationStore.nextId(this)
+        val n = com.r1.launcher.notifications.Notification(
+            id = id,
+            source = source,
+            title = title,
+            body = body,
+            timestamp = System.currentTimeMillis(),
+            read = false,
+            deeplink = deeplink,
+        )
+        com.r1.launcher.notifications.NotificationStore.append(this, n)
+        // Mutate UI state on the main thread — `notify` can be called from
+        // background threads (Hermes/OpenClaw event callbacks, webhook server
+        // executor) so we centralize the post here rather than at every site.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            applyNotificationToState(n)
+        } else {
+            ui.post { applyNotificationToState(n) }
+        }
+    }
+
+    private fun applyNotificationToState(n: com.r1.launcher.notifications.Notification) {
+        state.notifications.add(n)
+        state.notificationsUnread = state.notifications.count { !it.read }
+        // Surface a slide-in card on HOME for ~4s. Only meaningful while HOME
+        // is the active panel — the HomeScreen composable gates render on that.
+        state.notificationBanner = n
+        playNotificationChime()
+        webServer?.broadcastNotification(n)
+    }
+
+    override fun notificationActivate(id: Long) {
+        // Mark read first so the unread count drops immediately even if the
+        // user backs out of the deeplinked panel without doing anything.
+        com.r1.launcher.notifications.NotificationStore.markRead(this, id)
+        val idx = state.notifications.indexOfFirst { it.id == id }
+        if (idx >= 0) {
+            state.notifications[idx] = state.notifications[idx].copy(read = true)
+            state.notificationsUnread = state.notifications.count { !it.read }
+        }
+        val n = state.notifications.getOrNull(idx)
+        val target = panelForDeeplink(n?.deeplink)
+        if (target == null) {
+            // No link — stay on NOTIFICATIONS. The mark-read above is the
+            // user-visible effect.
+            return
+        }
+        // Best-effort deeplink. Each app has its own open() helper that
+        // resets focus/scroll, so use those rather than directly setting panel.
+        when (target) {
+            Panel.OPENCLAW_CHAT -> {
+                if (openClawPrefs.hasPairing()) {
+                    openClawStartSession()
+                    state.openOpenClawChat()
+                } else {
+                    // Not paired yet — drop into QR so the user can fix it.
+                    state.openOpenClawQr()
+                }
+            }
+            Panel.HERMES_CHAT -> {
+                hydrateHermesStateFromPrefs()
+                if (hermesPrefs.hasConfig()) state.openHermesChat()
+                else state.openHermesConfig(fromChat = false)
+            }
+            Panel.MESSAGES -> {
+                if (ContextCompat.checkSelfPermission(
+                        this, Manifest.permission.READ_SMS
+                    ) == PackageManager.PERMISSION_GRANTED
+                ) {
+                    state.openMessages()
+                    loadSmsConversations()
+                } else {
+                    state.openMessages()
+                }
+            }
+            Panel.NOTIFICATIONS -> { /* already there */ }
+            else -> { /* unknown deeplink — leave panel as-is */ }
+        }
+    }
+
+    override fun notificationsMarkAllRead() {
+        com.r1.launcher.notifications.NotificationStore.markAllRead(this)
+        for (i in state.notifications.indices) {
+            if (!state.notifications[i].read) {
+                state.notifications[i] = state.notifications[i].copy(read = true)
+            }
+        }
+        state.notificationsUnread = 0
+    }
+
+    override fun notificationsClear() {
+        com.r1.launcher.notifications.NotificationStore.clear(this)
+        state.notifications.clear()
+        state.notificationsUnread = 0
+        state.notificationBanner = null
+    }
+
+    override fun toggleNotificationSound(enabled: Boolean) {
+        notifPrefs.soundEnabled = enabled
+        state.notificationSoundEnabled = enabled
+    }
+
+    // --- credentials panel ---
+
+    /** Refresh every credential display mirror in [state] from its backing
+     *  store. Cheap — three prefs reads + one carroot probe for the file
+     *  on disk. Called from onCreate + after every credentialsSaveField /
+     *  credentialsClearField. */
+    private fun refreshCredentialsDisplay() {
+        state.hasAnthropicKey = anthropicKeyFileExists()
+        state.anthropicKeyTail = if (state.hasAnthropicKey) readAnthropicKeyTail() else ""
+        // ElevenLabs key — reuse existing hasVoiceKey/voiceKeyTail since
+        // refreshVoiceKeyState() already maintains them.
+        // Hermes key
+        val hk = hermesPrefs.apiKey
+        state.hasHermesKey = hk.isNotBlank()
+        state.hermesKeyTail = if (hk.isNotBlank()) hk.takeLast(4) else ""
+        // Webhook token — always visible (gen-on-read), no "set" gate.
+        state.webhookTokenDisplay = notifPrefs.webhookToken.takeLast(8)
+    }
+
+    /** Probe `/data/local/tmp/.anthropic_key` via carroot — file lives
+     *  outside the app sandbox because the alpine wrapper reads it as root. */
+    private fun anthropicKeyFileExists(): Boolean = runCatching {
+        // Best-effort sync probe — use the existing carroot helper but with
+        // a tight read window. Don't block UI for long; the result feeds a
+        // status pill, stale-on-error is acceptable.
+        val out = sendToCarrootCapture("test -s /data/local/tmp/.anthropic_key && echo Y")
+        out.contains("Y")
+    }.getOrDefault(false)
+
+    private fun readAnthropicKeyTail(): String = runCatching {
+        val out = sendToCarrootCapture("tail -c 5 /data/local/tmp/.anthropic_key 2>/dev/null").trim()
+        out.takeLast(4)
+    }.getOrDefault("")
+
+    /** Short blocking carroot helper for the small probes above. Distinct
+     *  from sendToCarrootStreaming because we want the captured stdout for
+     *  one-shot commands; the streaming helper is geared toward the
+     *  terminal/claude panel's line-by-line UX. */
+    private fun sendToCarrootCapture(cmd: String): String {
+        return runCatching {
+            java.net.Socket().use { s ->
+                s.connect(InetSocketAddress("127.0.0.1", 1337), 1500)
+                s.soTimeout = 2000
+                s.getOutputStream().write((cmd + "\nexit\n").toByteArray())
+                s.shutdownOutput()
+                s.getInputStream().bufferedReader().readText()
+            }
+        }.getOrDefault("")
+    }
+
+    override fun credentialsRowActivate(idx: Int) {
+        // Row layout (kept in sync with SettingsCredentialsPanel):
+        //   1=anthropic, 2=elevenlabs, 3=hermes, 4=ntfy_topic,
+        //   5=webhook (regenerate action, no keyboard)
+        when (idx) {
+            1 -> { state.credentialsEditField = "anthropic"; state.credentialsEditInput = "" }
+            2 -> { state.credentialsEditField = "elevenlabs"; state.credentialsEditInput = "" }
+            3 -> { state.credentialsEditField = "hermes"; state.credentialsEditInput = "" }
+            4 -> {
+                state.credentialsEditField = "ntfy_topic"
+                state.credentialsEditInput = ntfyPrefs.topic
+            }
+            5 -> {
+                // Webhook token — regenerate in place, no keyboard.
+                regenerateWebhookToken()
+                toast("new webhook token: …${state.webhookTokenDisplay}")
+            }
+        }
+    }
+
+    override fun credentialsSaveField(field: String, value: String) {
+        val v = value.trim()
+        when (field) {
+            "anthropic" -> {
+                if (v.isEmpty()) {
+                    toastFail("paste a key first")
+                    return
+                }
+                if (claudeSaveApiKey(v)) {
+                    toast("anthropic key saved")
+                    refreshCredentialsDisplay()
+                    refreshClaudeAuthFlag()
+                } else {
+                    toastFail("save failed (carroot)")
+                }
+            }
+            "elevenlabs" -> {
+                voiceSaveKey(v)
+                refreshCredentialsDisplay()
+            }
+            "hermes" -> {
+                hermesPrefs.apiKey = v
+                refreshCredentialsDisplay()
+                if (v.isNotBlank()) toast("hermes key saved")
+            }
+            "ntfy_topic" -> {
+                ntfySetTopic(v)
+            }
+        }
+        state.credentialsEditField = ""
+        state.credentialsEditInput = ""
+    }
+
+    override fun credentialsPasteField(field: String) {
+        val clip = (getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager)
+            ?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty().trim()
+        if (clip.isEmpty()) {
+            toastFail("clipboard empty")
+            return
+        }
+        state.credentialsEditInput = clip
+    }
+
+    override fun credentialsClearField(field: String) {
+        when (field) {
+            "anthropic" -> {
+                runCatching { sendToCarroot("rm -f /data/local/tmp/.anthropic_key") }
+                toast("anthropic key cleared")
+                refreshCredentialsDisplay()
+                refreshClaudeAuthFlag()
+            }
+            "elevenlabs" -> {
+                voiceClearKey()
+                refreshCredentialsDisplay()
+            }
+            "hermes" -> {
+                hermesPrefs.apiKey = ""
+                refreshCredentialsDisplay()
+                toast("hermes key cleared")
+            }
+            "ntfy_topic" -> {
+                ntfySetTopic("")
+            }
+        }
+        state.credentialsEditField = ""
+        state.credentialsEditInput = ""
+    }
+
+    override fun regenerateWebhookToken(): String {
+        val fresh = notifPrefs.regenerateWebhookToken()
+        state.webhookTokenDisplay = fresh.takeLast(8)
+        return fresh
+    }
+
+    // --- ntfy.sh subscriber ---
+
+    override fun toggleNtfySubscriber(enabled: Boolean) {
+        ntfyPrefs.enabled = enabled
+        state.ntfySubscriberEnabled = enabled
+        if (enabled) {
+            if (!ntfyPrefs.isConfigured()) {
+                toastFail("set a topic first")
+                ntfyPrefs.enabled = false
+                state.ntfySubscriberEnabled = false
+                state.ntfyStatus = "disabled"
+                return
+            }
+            startNtfySubscriber()
+        } else {
+            stopNtfySubscriber()
+        }
+    }
+
+    override fun ntfySetTopic(topic: String) {
+        val t = topic.trim()
+        val changed = t != ntfyPrefs.topic
+        ntfyPrefs.topic = t
+        state.ntfyTopic = t
+        if (changed) {
+            // New topic = new id space, reset the resume cursor so we don't
+            // try to `?since=` an id from a different topic.
+            ntfyPrefs.lastMessageId = ""
+            if (state.ntfySubscriberEnabled && t.isNotBlank()) {
+                ntfySubscriber?.applyTopicChange() ?: startNtfySubscriber()
+            } else if (t.isBlank()) {
+                stopNtfySubscriber()
+                state.ntfySubscriberEnabled = false
+                ntfyPrefs.enabled = false
+            }
+        }
+    }
+
+    override fun ntfyConfigRowActivate(idx: Int) {
+        // Row layout (kept in sync with NtfyConfigPanel):
+        //   0=back, 1=enable toggle, 2=topic, 3=status (info; no action)
+        when (idx) {
+            0 -> { state.back(); backTone() }
+            1 -> toggleNtfySubscriber(!state.ntfySubscriberEnabled)
+            2 -> {
+                // Reuse the credentials field machinery for the topic keyboard
+                // so we don't duplicate keyboard plumbing per panel.
+                state.credentialsEditField = "ntfy_topic"
+                state.credentialsEditInput = ntfyPrefs.topic
+            }
+            3 -> { /* status row — info only */ }
+        }
+    }
+
+    private fun startNtfySubscriber() {
+        if (ntfySubscriber != null) return
+        val sub = com.r1.launcher.notifications.NtfySubscriber(this, ntfyPrefs)
+        sub.onMessage = { title, body ->
+            // Mirror the webhook path — same source enum, same deeplink, same
+            // downstream notification handling (chime + badge + banner +
+            // persistence + web broadcast).
+            val finalTitle = title.ifBlank { "ntfy" }
+            notify("ntfy", finalTitle, body, deeplink = "notifications")
+        }
+        sub.onStatusChange = { s ->
+            state.ntfyStatus = when (s) {
+                com.r1.launcher.notifications.NtfySubscriber.Status.DISABLED -> "disabled"
+                com.r1.launcher.notifications.NtfySubscriber.Status.CONNECTING -> "connecting"
+                com.r1.launcher.notifications.NtfySubscriber.Status.LIVE -> "live"
+                com.r1.launcher.notifications.NtfySubscriber.Status.RETRYING -> "retry…"
+                com.r1.launcher.notifications.NtfySubscriber.Status.ERROR -> "error"
+            }
+        }
+        ntfySubscriber = sub
+        sub.start()
+    }
+
+    private fun stopNtfySubscriber() {
+        runCatching { ntfySubscriber?.stop() }
+        ntfySubscriber = null
+        state.ntfyStatus = "disabled"
+    }
+
+    /** Resolve a deeplink string into a real [Panel], or null for unrouted /
+     *  unknown deeplinks. Keep this list short — every panel here needs an
+     *  open() helper in [notificationActivate]. */
+    private fun panelForDeeplink(deeplink: String?): Panel? = when (deeplink) {
+        "openclaw_chat" -> Panel.OPENCLAW_CHAT
+        "hermes_chat" -> Panel.HERMES_CHAT
+        "messages" -> Panel.MESSAGES
+        "notifications" -> Panel.NOTIFICATIONS
+        else -> null
+    }
+
+    /** Notification chime. Skipped when:
+     *   - the master toggle is off (Settings → Sound → "notifications")
+     *   - we're currently recording (mic open — beeping into the mic is bad)
+     *   - TTS is mid-playback (don't trample assistant readback)
+     *   - one fired within [NOTIF_SOUND_MIN_GAP_MS] (burst rate-limit)
+     *  Uses STREAM_NOTIFICATION so it respects DnD + the user's notification
+     *  volume slider, independent of media / system streams.
+     *
+     *  Acquires a short PARTIAL_WAKE_LOCK so the CPU stays alive end-to-end
+     *  through the tone — without it, the device can re-enter idle mid-tone
+     *  with the screen off and clip the audio. Released after the tone
+     *  finishes. CPU-only — does NOT wake the screen (matches normal Android
+     *  notification behavior). */
+    private fun playNotificationChime() {
+        if (!state.notificationSoundEnabled) return
+        val recording = state.chatRecording || state.terminalRecording ||
+            state.claudeRecording || state.hermesRecording
+        if (recording) return
+        // MediaPlayer.isPlaying throws IllegalStateException when the player
+        // is in the END / error state (post-release). The TTS slots may hold
+        // stale references mid-teardown, so wrap each probe defensively.
+        val ttsBusy = openClawTtsCall != null || hermesTtsCall != null ||
+            (runCatching { openClawSpeechPlayer?.isPlaying == true }.getOrDefault(false)) ||
+            (runCatching { hermesSpeechPlayer?.isPlaying == true }.getOrDefault(false))
+        if (ttsBusy) return
+        val now = System.currentTimeMillis()
+        if (now - lastNotifSoundAtMs < NOTIF_SOUND_MIN_GAP_MS) return
+        lastNotifSoundAtMs = now
+        val wake = runCatching {
+            val pm = getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+            pm?.newWakeLock(
+                android.os.PowerManager.PARTIAL_WAKE_LOCK,
+                "r1.launcher:notif-chime",
+            )?.apply {
+                setReferenceCounted(false)
+                acquire(5000L) // hard timeout — never leak past 5s
+            }
+        }.getOrNull()
+        // Play UIAlert-retro.mp3 via MediaPlayer with USAGE_NOTIFICATION audio
+        // attributes — routes through STREAM_NOTIFICATION (respects DnD +
+        // the notification-volume slider). MediaPlayer rather than SoundPool
+        // because some MTK builds reject SoundPool.load on a pool created
+        // with notification attrs ("doLoad: unable to load sound"); MediaPlayer
+        // is more permissive and the asset is short enough that the
+        // create+prep cost is fine for one-shot playback.
+        //
+        // Hoisted `player` so onPrepared / onCompletion / onError can all
+        // release it without resurrecting it through a lambda capture.
+        var player: android.media.MediaPlayer? = null
+        try {
+            val mp = android.media.MediaPlayer()
+            player = mp
+            val attrs = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
+            mp.setAudioAttributes(attrs)
+            val afd = assets.openFd("UIAlert-retro.mp3")
+            mp.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+            afd.close()
+            mp.setOnCompletionListener {
+                runCatching { it.release() }
+                runCatching { wake?.takeIf { it.isHeld }?.release() }
+            }
+            mp.setOnErrorListener { errPlayer, _, _ ->
+                runCatching { errPlayer.release() }
+                runCatching { wake?.takeIf { it.isHeld }?.release() }
+                true
+            }
+            mp.prepare()
+            mp.start()
+        } catch (t: Throwable) {
+            android.util.Log.w("LauncherActivity", "notif mp3 playback failed: ${t.message}")
+            runCatching { player?.release() }
+            // Fallback: synthesized prompt tone so the user always hears
+            // *something* even if the asset can't play.
+            var tg: ToneGenerator? = null
+            try {
+                tg = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 95)
+                tg.startTone(ToneGenerator.TONE_PROP_PROMPT, 220)
+                val playingTg = tg
+                ui.postDelayed({
+                    runCatching { playingTg.release() }
+                    runCatching { wake?.takeIf { it.isHeld }?.release() }
+                }, 400L)
+            } catch (t2: Throwable) {
+                runCatching { tg?.release() }
+                runCatching { wake?.takeIf { it.isHeld }?.release() }
             }
         }
     }

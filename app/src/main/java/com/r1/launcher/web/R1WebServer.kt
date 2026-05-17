@@ -1,6 +1,7 @@
 package com.r1.launcher.web
 
 import android.content.Context
+import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -50,6 +51,13 @@ class R1WebServer(
     private val ui = Handler(Looper.getMainLooper())
     private val sockets = CopyOnWriteArrayList<RpcSocket>()
     private var stateTickActive = false
+    /** Kept alive for as long as the server is running so the Wi-Fi radio
+     *  stays in high-performance mode even when the screen is off. Without
+     *  this, the radio drops to DTIM-driven sleep and packets to the
+     *  listening socket can be delayed by hundreds of ms — fine for the
+     *  state-snapshot 1Hz tick, bad for "ring me when this webhook fires"
+     *  notifications. Released in stopServer(). */
+    private var wifiLock: WifiManager.WifiLock? = null
     /** All socket writes go through this — Android forbids socket I/O on the main thread. */
     private val sendExecutor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "r1-ws-send").apply { isDaemon = true }
@@ -73,6 +81,7 @@ class R1WebServer(
             stateTickActive = true
             ui.post(stateTick)
         }
+        acquireWifiLock()
     }
 
     fun stopServer() {
@@ -82,6 +91,31 @@ class R1WebServer(
         sockets.clear()
         runCatching { stop() }
         runCatching { sendExecutor.shutdownNow() }
+        releaseWifiLock()
+    }
+
+    private fun acquireWifiLock() {
+        if (wifiLock?.isHeld == true) return
+        runCatching {
+            val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                ?: return@runCatching
+            // FULL_HIGH_PERF disables Wi-Fi power save mode entirely. Battery
+            // cost is real but small at idle; alternative FULL_LOW_LATENCY
+            // (API 29+) is more aggressive than we need for HTTP webhooks.
+            val lock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "r1.webserver")
+            lock.setReferenceCounted(false)
+            lock.acquire()
+            wifiLock = lock
+            Log.i(TAG, "wifi lock acquired (full_high_perf)")
+        }.onFailure { Log.w(TAG, "wifi lock failed: ${it.message}") }
+    }
+
+    private fun releaseWifiLock() {
+        runCatching {
+            wifiLock?.takeIf { it.isHeld }?.release()
+            wifiLock = null
+            Log.i(TAG, "wifi lock released")
+        }
     }
 
     // --- HTTP routing ---
@@ -96,6 +130,7 @@ class R1WebServer(
                 uri == "/i18n.js" -> serveAsset("web/i18n.js", "application/javascript")
                 uri == "/style.css" -> serveAsset("web/style.css", "text/css")
                 uri == "/api/state" -> jsonResponse(WebRpc.buildSnapshot(state, ctx))
+                uri == "/api/notify" -> handleNotifyPost(session)
                 uri == "/favicon.ico" -> notFound()
                 uri.startsWith("/api/transcriber/audio/") ->
                     serveTranscriberAudio(uri.removePrefix("/api/transcriber/audio/"))
@@ -107,6 +142,65 @@ class R1WebServer(
             Log.w(TAG, "serve $uri failed: ${e.message}")
             errorResponse(Response.Status.INTERNAL_ERROR, e.message ?: "error")
         }
+    }
+
+    /**
+     * Generic notification ingress for any client that can hit the LAN —
+     * Hermes agent, GitHub webhooks, Zapier, custom cron jobs, etc.
+     *
+     * Auth: bearer token in either the `Authorization: Bearer <token>` header
+     * or a `?token=...` query param. The token is generated lazily on first
+     * read of [NotifPrefs.webhookToken] and surfaces in Settings → Network
+     * (planned) + via the web companion. 401 on mismatch, 415 on non-POST.
+     *
+     * Body: `{title, body, source?, deeplink?}` — all fields optional except
+     * we require at least one of title/body to be non-empty. Anything else in
+     * the JSON is ignored.
+     */
+    private fun handleNotifyPost(session: IHTTPSession): Response {
+        if (session.method != NanoHTTPD.Method.POST) {
+            return errorResponse(Response.Status.METHOD_NOT_ALLOWED, "POST required")
+        }
+        val prefs = com.r1.launcher.notifications.NotifPrefs.get(ctx)
+        val expected = prefs.webhookToken
+        val auth = session.headers["authorization"].orEmpty()
+        val headerToken = if (auth.startsWith("Bearer ", ignoreCase = true)) {
+            auth.removePrefix("Bearer ").trim()
+        } else null
+        val queryToken = session.parameters["token"]?.firstOrNull()
+        val provided = headerToken ?: queryToken
+        if (provided.isNullOrBlank() || provided != expected) {
+            return errorResponse(Response.Status.UNAUTHORIZED, "bad token")
+        }
+
+        // Read the POST body. NanoHTTPD wants us to parseBody first; the result
+        // lands in `files["postData"]` when Content-Type is application/json or
+        // anything not form-encoded.
+        val files = mutableMapOf<String, String>()
+        runCatching { session.parseBody(files) }
+        val rawBody = files["postData"]
+            ?: session.parameters["body"]?.firstOrNull()
+            ?: ""
+        if (rawBody.isBlank()) {
+            return errorResponse(Response.Status.BAD_REQUEST, "empty body")
+        }
+        val obj = runCatching { json.parseToJsonElement(rawBody).jsonObject }.getOrNull()
+            ?: return errorResponse(Response.Status.BAD_REQUEST, "bad json")
+        val title = obj["title"]?.jsonPrimitive?.contentOrNull.orEmpty().take(80)
+        val body = obj["body"]?.jsonPrimitive?.contentOrNull.orEmpty().take(400)
+        val source = obj["source"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            ?: "webhook"
+        val deeplink = obj["deeplink"]?.jsonPrimitive?.contentOrNull
+        if (title.isBlank() && body.isBlank()) {
+            return errorResponse(Response.Status.BAD_REQUEST, "title or body required")
+        }
+        // Hop to UI thread — host.notify mutates Compose state.
+        ui.post { host.notify(source, title, body, deeplink) }
+        val payload = buildJsonObject { put("ok", true) }
+        return newFixedLengthResponse(
+            Response.Status.OK, "application/json",
+            json.encodeToString(JsonElement.serializer(), payload),
+        )
     }
 
     /** Stream the m4a recording. Don't readBytes() — files can be 30 MB+. */
@@ -367,6 +461,23 @@ class R1WebServer(
         if (sockets.isEmpty()) return
         val payload = buildJsonObject { put("ok", ok) }
         sockets.toList().forEach { it.sendEvent("claude.setup.done", payload) }
+    }
+
+    /** New notification landed — push to every web client so the companion
+     *  panel can mirror the on-device badge / list. Cheap no-op when no one
+     *  is connected. */
+    fun broadcastNotification(n: com.r1.launcher.notifications.Notification) {
+        if (sockets.isEmpty()) return
+        val payload = buildJsonObject {
+            put("id", n.id)
+            put("source", n.source)
+            put("title", n.title)
+            put("body", n.body)
+            put("timestamp", n.timestamp)
+            put("read", n.read)
+            n.deeplink?.let { put("deeplink", it) }
+        }
+        sockets.toList().forEach { it.sendEvent("notification", payload) }
     }
 
 }

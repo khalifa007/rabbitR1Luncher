@@ -12,41 +12,54 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
 import com.r1.launcher.R
+import kotlinx.coroutines.delay
 
 /**
  * Home: spacer(22dp) to clear the topbar, flex clock/date block, dock row, 9sp hint.
  * Paddings from the old activity_main.xml: horizontal 14dp, top 6dp, bottom 14dp.
+ *
+ * [onOpenNotifications] is invoked when the user taps the unread badge above the
+ * clock. Wired through to `state.openNotifications()` in LauncherRoot so the
+ * badge is the primary touch path to the panel.
  */
 @Composable
 fun HomeScreen(
     state: LauncherState,
+    onOpenNotifications: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalR1Colors.current
@@ -86,6 +99,13 @@ fun HomeScreen(
                     Spacer(Modifier.height(6.dp))
                     Text(state.clockText.lowercase(), style = type.clock, color = colors.labelBright)
                 }
+                // Unread badge directly under the clock — orange outlined chip
+                // that hides when count == 0. Tap opens the notifications panel.
+                Spacer(Modifier.height(8.dp))
+                NotificationBadge(
+                    count = state.notificationsUnread,
+                    onClick = onOpenNotifications,
+                )
                 if (state.wifiShareEnabled) {
                     val n = state.wifiShareConnectedClients.size
                     val label = when (n) {
@@ -103,6 +123,130 @@ fun HomeScreen(
                 }
             }
 
+        }
+    }
+
+    // Banner overlay — slides in from the top whenever a fresh notification
+    // arrives while HOME is visible. Self-clears after ~4s via LaunchedEffect.
+    NotificationBanner(state = state, onClick = onOpenNotifications)
+}
+
+@Composable
+private fun NotificationBadge(count: Int, onClick: () -> Unit) {
+    val type = LocalR1Type.current
+    AnimatedVisibility(
+        visible = count > 0,
+        enter = fadeIn(tween(ANIM_OPEN_MS)) + scaleIn(tween(ANIM_OPEN_MS), initialScale = 0.8f),
+        exit = fadeOut(tween(ANIM_CLOSE_MS)) + scaleOut(tween(ANIM_CLOSE_MS), targetScale = 0.8f),
+    ) {
+        // Outlined chip — orange 1px border, transparent fill, sharp 3dp
+        // corners. Matches the 2px-edge tile aesthetic used elsewhere; the
+        // bell icon makes the meaning unambiguous when count "blends in"
+        // with the surrounding orange date text.
+        val label = if (count == 1) "1 notification" else "$count notifications"
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .padding(bottom = 4.dp)
+                .clip(RoundedCornerShape(3.dp))
+                .border(1.dp, Color(0xFFFF6B00), RoundedCornerShape(3.dp))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onClick,
+                )
+                .padding(horizontal = 8.dp, vertical = 3.dp),
+        ) {
+            Image(
+                painter = painterResource(R.drawable.ic_notifications),
+                contentDescription = null,
+                colorFilter = ColorFilter.tint(Color(0xFFFF6B00)),
+                modifier = Modifier.size(12.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = label,
+                color = Color(0xFFFF6B00),
+                fontSize = 13.sp,
+                fontFamily = type.appCard.fontFamily,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+    }
+}
+
+/** Top-of-screen toast for a single freshly-landed notification. Only renders
+ *  while HOME is the active panel — every other panel does its own thing and
+ *  we don't want a banner stamping over a chat/recording UI. */
+@Composable
+private fun NotificationBanner(state: LauncherState, onClick: () -> Unit) {
+    val type = LocalR1Type.current
+    val banner = state.notificationBanner
+    val visible = banner != null && state.panel == Panel.HOME
+    // Drop the banner the moment HOME stops being the active panel — otherwise
+    // a fresh notif could pop back into view after the user returned to HOME
+    // within the 4s auto-dismiss window, even though they've already moved on.
+    LaunchedEffect(state.panel) {
+        if (state.panel != Panel.HOME && state.notificationBanner != null) {
+            state.notificationBanner = null
+        }
+    }
+    // Auto-dismiss after 4s. Keyed by the banner's id so back-to-back
+    // notifications restart the timer cleanly.
+    LaunchedEffect(banner?.id) {
+        if (banner != null) {
+            delay(4000L)
+            // Only clear if no newer banner has replaced it.
+            if (state.notificationBanner?.id == banner.id) {
+                state.notificationBanner = null
+            }
+        }
+    }
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(180)) + slideInVertically(tween(220)) { -it },
+        exit = fadeOut(tween(150)) + slideOutVertically(tween(180)) { -it },
+    ) {
+        val b = banner ?: return@AnimatedVisibility
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .padding(top = 26.dp, start = 14.dp, end = 14.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xFF1C1C1E))
+                    .border(1.dp, Color(0xFFFF6B00).copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onClick,
+                    )
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                Column {
+                    if (b.title.isNotBlank()) {
+                        Text(
+                            text = b.title,
+                            color = Color(0xFFFF6B00),
+                            fontSize = 12.sp,
+                            fontFamily = type.appCard.fontFamily,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (b.body.isNotBlank()) {
+                        Text(
+                            text = b.body,
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontFamily = type.appCard.fontFamily,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
         }
     }
 }

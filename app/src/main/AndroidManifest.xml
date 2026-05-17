@@ -29,6 +29,14 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Notification chime needs the CPU alive for ~250ms to drive the speaker
+         end-to-end; without WAKE_LOCK the device can re-enter idle mid-tone
+         and clip the audio. WifiLock(HIGH_PERF) on the web server keeps the
+         Wi-Fi radio out of low-power state so inbound `POST /api/notify`
+         packets arrive immediately when the screen is off. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <queries>

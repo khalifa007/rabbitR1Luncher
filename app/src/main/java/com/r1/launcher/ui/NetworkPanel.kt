@@ -63,6 +63,17 @@ fun NetworkPanel(
                     else -> stringResource(R.string.network_terminal_warn_lan)
                 },
             ),
+            // ntfy.sh — outbound long-poll subscriber. Subtitle shows live
+            // status when on, the topic when off but configured.
+            SettingsItem.Toggle(
+                "ntfy.sh",
+                state.ntfySubscriberEnabled,
+                subtitle = when {
+                    state.ntfySubscriberEnabled -> state.ntfyStatus
+                    state.ntfyTopic.isNotBlank() -> "topic …${state.ntfyTopic.takeLast(10)}"
+                    else -> "set a topic"
+                },
+            ),
             SettingsItem.Standard(stringResource(R.string.network_row_scan)),
         )
 

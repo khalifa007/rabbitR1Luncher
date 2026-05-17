@@ -232,6 +232,55 @@ object WebRpc {
             host.transcriberRetryTranscribe(params.requireString("uuid")); JsonNull
         }
 
+        "notifications.list" -> buildJsonObject {
+            put("unread", state.notificationsUnread)
+            put("items", buildJsonArray {
+                // Newest-first to match the on-device panel.
+                state.notifications.asReversed().forEach { n ->
+                    add(buildJsonObject {
+                        put("id", n.id)
+                        put("source", n.source)
+                        put("title", n.title)
+                        put("body", n.body)
+                        put("timestamp", n.timestamp)
+                        put("read", n.read)
+                        n.deeplink?.let { put("deeplink", it) }
+                    })
+                }
+            })
+        }
+        "notifications.markAllRead" -> {
+            host.notificationsMarkAllRead(); JsonNull
+        }
+        "notifications.activate" -> {
+            host.notificationActivate(params.requireLong("id")); JsonNull
+        }
+        "notifications.clear" -> {
+            host.notificationsClear(); JsonNull
+        }
+        "notifications.token" -> {
+            // Reveal the current webhook bearer token so the user can paste
+            // it into their automation (Zapier / GitHub / Hermes config).
+            val prefs = com.r1.launcher.notifications.NotifPrefs.get(ctx)
+            buildJsonObject { put("token", prefs.webhookToken) }
+        }
+        "notifications.rotateToken" -> {
+            val prefs = com.r1.launcher.notifications.NotifPrefs.get(ctx)
+            buildJsonObject { put("token", prefs.regenerateWebhookToken()) }
+        }
+        "notifications.test" -> {
+            // Convenience for the web companion: simulate an incoming
+            // notification so users can verify sound + badge wiring without
+            // having to fire a real webhook from a separate machine.
+            host.notify(
+                source = params?.get("source")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: "webhook",
+                title = params?.get("title")?.jsonPrimitive?.contentOrNull ?: "test",
+                body = params?.get("body")?.jsonPrimitive?.contentOrNull ?: "hello from web companion",
+                deeplink = params?.get("deeplink")?.jsonPrimitive?.contentOrNull,
+            )
+            JsonNull
+        }
+
         else -> throw RpcException("unknown_method", "unknown method: $method")
     }
 
@@ -298,6 +347,11 @@ object WebRpc {
             put("model", state.hermesModel)
             put("messageCount", state.hermesMessages.size)
             put("busy", state.hermesBusy)
+        })
+        put("notifications", buildJsonObject {
+            put("unread", state.notificationsUnread)
+            put("total", state.notifications.size)
+            put("soundEnabled", state.notificationSoundEnabled)
         })
     }
 
@@ -388,4 +442,8 @@ private fun JsonObject?.requireInt(key: String): Int =
 
 private fun JsonObject?.requireBool(key: String): Boolean =
     this?.get(key)?.jsonPrimitive?.boolean
+        ?: throw RpcException("missing_param", "missing param: $key")
+
+private fun JsonObject?.requireLong(key: String): Long =
+    this?.get(key)?.jsonPrimitive?.contentOrNull?.toLongOrNull()
         ?: throw RpcException("missing_param", "missing param: $key")

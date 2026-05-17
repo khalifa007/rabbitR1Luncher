@@ -45,31 +45,25 @@ import com.r1.launcher.R
 import com.r1.launcher.voice.VoicePrefs
 
 /**
- * Settings → Voice subpanel. Single source of truth for the ElevenLabs key,
- * voice picker, custom voice id, and the auto-speak toggle. Used by:
- *   - OpenClaw chat / Terminal / Claude STT (ElevenLabs Realtime, key only)
- *   - OpenClaw assistant TTS readback (ElevenLabs Flash v2.5, key + voice id +
- *     model + voice_settings)
- *   - Meetings (ElevenLabs Scribe v2 batch — same key, same credit pool)
+ * Settings → Voice subpanel. Owns voice picker, custom voice id, auto-speak
+ * toggle, tuning, and subscription view. The ElevenLabs API key itself
+ * lives in Settings → Credentials now — it's a global key shared with every
+ * ElevenLabs consumer (TTS, STT, Scribe batch) so it belongs in the global
+ * credentials store rather than scattered per-app.
  *
  * Row layout — kept in lockstep with [com.r1.launcher.LauncherActivity.voiceSettingsRowActivate]:
  *   0  < back
  *   1  voice: on/off    (toggles auto-speak of assistant replies)
- *   2  elevenlabs key   (status pill; on click opens RetroKeyboard overlay)
- *   3  subscription     (live credit balance from /v1/user/subscription; tap to refresh)
- *   4  voice: <name>    (cycles through 4 hardcoded ElevenLabs voices)
- *   5  custom voice id  (status pill; on click opens RetroKeyboard overlay)
- *   6  test voice       (synthesize a short sample with current settings)
- *   7  tuning           (opens SETTINGS_VOICE_TUNING)
- *   8  clear key
+ *   2  subscription     (live credit balance from /v1/user/subscription; tap to refresh)
+ *   3  voice: <name>    (cycles through 4 hardcoded ElevenLabs voices)
+ *   4  custom voice id  (status pill; on click opens RetroKeyboard overlay)
+ *   5  test voice       (synthesize a short sample with current settings)
+ *   6  tuning           (opens SETTINGS_VOICE_TUNING)
  */
 @Composable
 fun SettingsVoicePanel(
     state: LauncherState,
     onBack: () -> Unit,
-    onSaveKey: (String) -> Unit,
-    onPasteKey: () -> Unit,
-    onClear: () -> Unit,
     onSaveCustomVoiceId: (String) -> Unit,
     onPasteCustomVoiceId: () -> Unit,
     onClearCustomVoiceId: () -> Unit,
@@ -84,26 +78,20 @@ fun SettingsVoicePanel(
     ) {
         val type = LocalR1Type.current
         var input by remember { mutableStateOf("") }
-        // Which keyboard overlay is open: null = none; KEY = elevenlabs key;
-        // CUSTOM_VOICE = custom voice id. Keeping a single overlay surface
-        // avoids stacking two keyboards on a 480x480 screen.
-        var kbTarget by remember { mutableStateOf<KeyboardTarget?>(null) }
+        // Only one keyboard target remains on this panel — the custom voice
+        // id. ElevenLabs key entry moved to Settings → Credentials.
+        var kbOpen by remember { mutableStateOf(false) }
 
         // Reset keyboard state when panel opens.
         LaunchedEffect(state.panel) {
             if (state.panel == Panel.SETTINGS_VOICE) {
                 input = ""
-                kbTarget = null
+                kbOpen = false
             }
         }
 
         val voiceLabel = VoicePrefs.VOICES.firstOrNull { it.second == state.voiceId }
             ?.first ?: "rachel"
-        val keyStatus = if (state.hasVoiceKey) {
-            stringResource(R.string.voice_key_set_short) + state.voiceKeyTail
-        } else {
-            stringResource(R.string.voice_key_not_set)
-        }
         val customStatus = if (state.voiceCustomId.isNotBlank()) {
             stringResource(R.string.voice_custom_id_set_short) +
                 state.voiceCustomId.takeLast(6)
@@ -118,20 +106,18 @@ fun SettingsVoicePanel(
         else
             stringResource(R.string.voice_row_test)
 
-        // Subscription row is now pure navigation — opens its own page that
-        // does the actual fetch + full info display. No live data here.
+        // Subscription row is pure navigation — opens its own page that
+        // does the actual fetch + full info display.
         val subStatus = "view balance & plan"
         val subOk = false
         val items = listOf(
             SettingsItem.Standard("__header__"),
             SettingsItem.Toggle(toggleLabel, state.voiceEnabled),
-            SettingsItem.Standard(stringResource(R.string.voice_row_key)),  // subtitle injected below
             SettingsItem.Standard("subscription"),                          // subtitle injected below
             SettingsItem.Standard("voice: $voiceLabel"),
             SettingsItem.Standard(stringResource(R.string.voice_row_custom_id)),
             SettingsItem.Standard(testLabel),
             SettingsItem.Standard(stringResource(R.string.voice_row_tuning)),
-            SettingsItem.Standard(stringResource(R.string.voice_row_clear_key)),
         )
 
         val listState = rememberLazyListState()
@@ -161,10 +147,11 @@ fun SettingsVoicePanel(
                             themeColor = AppThemes.Settings,
                         )
                     } else {
+                        // New idx mapping after key migration:
+                        //   1=toggle, 2=subscription, 3=picker, 4=custom-id, 5=test, 6=tuning
                         val (subtitle, subtitleOk) = when (idx) {
-                            2 -> keyStatus to state.hasVoiceKey
-                            4 -> subStatus to subOk
-                            6 -> customStatus to state.voiceCustomId.isNotBlank()
+                            2 -> subStatus to subOk
+                            4 -> customStatus to state.voiceCustomId.isNotBlank()
                             else -> "" to false
                         }
                         val subtitleColor = if (subtitleOk)
@@ -177,8 +164,7 @@ fun SettingsVoicePanel(
                             subtitleColor = subtitleColor,
                             onClick = {
                                 when (idx) {
-                                    2 -> { input = ""; kbTarget = KeyboardTarget.KEY }
-                                    6 -> { input = ""; kbTarget = KeyboardTarget.CUSTOM_VOICE }
+                                    4 -> { input = ""; kbOpen = true }
                                     else -> onRowClick(idx)
                                 }
                             },
@@ -187,34 +173,23 @@ fun SettingsVoicePanel(
                 }
             }
 
-            // Single keyboard overlay shared between "elevenlabs key" and
-            // "custom voice id" inputs. The label, hint, validation, and the
-            // pill actions are switched on `kbTarget`.
+            // Custom voice id keyboard. ElevenLabs key entry moved to
+            // Settings → Credentials; this overlay only handles the voice id.
             AnimatedVisibility(
-                visible = kbTarget != null,
+                visible = kbOpen,
                 enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
                 exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
                 modifier = Modifier.align(Alignment.BottomCenter)
             ) {
-                val target = kbTarget ?: KeyboardTarget.KEY
                 val accent = Color(0xFFFF4500)
                 val ok = Color(0xFF35D26F)
                 val warn = Color(0xFFE53935)
                 val saveEnabled = input.trim().isNotBlank()
-                val isKey = target == KeyboardTarget.KEY
-                val clearEnabled = if (isKey) {
-                    state.hasVoiceKey || input.isNotEmpty()
-                } else {
-                    state.voiceCustomId.isNotBlank() || input.isNotEmpty()
-                }
-                val title = stringResource(
-                    if (isKey) R.string.voice_row_key else R.string.voice_row_custom_id
-                )
-                val hint = stringResource(
-                    if (isKey) R.string.voice_kb_hint else R.string.voice_custom_id_kb_hint
-                )
-                val statusText = if (isKey) keyStatus else customStatus
-                val statusOk = if (isKey) state.hasVoiceKey else state.voiceCustomId.isNotBlank()
+                val clearEnabled = state.voiceCustomId.isNotBlank() || input.isNotEmpty()
+                val title = stringResource(R.string.voice_row_custom_id)
+                val hint = stringResource(R.string.voice_custom_id_kb_hint)
+                val statusText = customStatus
+                val statusOk = state.voiceCustomId.isNotBlank()
 
                 Column(
                     modifier = Modifier
@@ -250,15 +225,7 @@ fun SettingsVoicePanel(
                             .background(Color(0xFF101010))
                             .padding(horizontal = 10.dp, vertical = 8.dp),
                     ) {
-                        val displayText = when {
-                            input.isNotEmpty() -> {
-                                // Mask the API key (sensitive) but show the
-                                // custom voice id in clear — voice ids aren't
-                                // secrets and users need to spot typos.
-                                if (isKey) mask(input) + "_" else input + "_"
-                            }
-                            else -> hint
-                        }
+                        val displayText = if (input.isNotEmpty()) input + "_" else hint
                         Text(
                             text = displayText,
                             style = type.appCard.copy(fontSize = 14.sp),
@@ -271,40 +238,32 @@ fun SettingsVoicePanel(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         VoicePill(stringResource(R.string.common_save), if (saveEnabled) ok else Color.DarkGray, saveEnabled, Modifier.weight(1f)) {
-                            val v = input.trim()
-                            if (isKey) onSaveKey(v) else onSaveCustomVoiceId(v)
+                            onSaveCustomVoiceId(input.trim())
                             input = ""
-                            kbTarget = null
+                            kbOpen = false
                         }
                         VoicePill(stringResource(R.string.common_paste), accent, true, Modifier.weight(1f)) {
-                            if (isKey) onPasteKey() else onPasteCustomVoiceId()
-                            kbTarget = null
+                            onPasteCustomVoiceId()
+                            kbOpen = false
                         }
                         VoicePill(stringResource(R.string.common_clear), if (clearEnabled) warn else Color.DarkGray, clearEnabled, Modifier.weight(1f)) {
-                            if (isKey) onClear() else onClearCustomVoiceId()
+                            onClearCustomVoiceId()
                             input = ""
                         }
                         VoicePill(stringResource(R.string.common_close), Color.White, true, Modifier.weight(1f)) {
-                            kbTarget = null
+                            kbOpen = false
                         }
                     }
 
                     RetroKeyboard(
                         onKeyPress = { ch -> input += ch },
                         onBackspace = { if (input.isNotEmpty()) input = input.dropLast(1) },
-                        onDismiss = { kbTarget = null },
+                        onDismiss = { kbOpen = false },
                     )
                 }
             }
         }
     }
-}
-
-private enum class KeyboardTarget { KEY, CUSTOM_VOICE }
-
-private fun mask(s: String): String {
-    if (s.length <= 8) return s
-    return s.take(3) + "…" + s.takeLast(4)
 }
 
 

@@ -98,6 +98,7 @@ fun SettingsPanel(
                 stringResource(R.string.settings_row_display) to R.drawable.ic_display,
                 stringResource(R.string.settings_row_sound) to R.drawable.ic_sound,
                 stringResource(R.string.settings_row_voice) to R.drawable.ic_voice,
+                "credentials" to R.drawable.ic_about,
                 stringResource(R.string.settings_row_device) to R.drawable.ic_device,
                 stringResource(R.string.settings_row_about) to R.drawable.ic_about,
             ),
@@ -136,7 +137,7 @@ fun SettingsSoundPanel(state: LauncherState, onRowClick: (Int) -> Unit) {
         exit = fadeOut(tween(ANIM_CLOSE_MS)) + slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
     ) {
         val listState = rememberLazyListState()
-        val rows = 3 // toggle + system volume + sound
+        val rows = 4 // toggle + system volume + sound + notifications
         LaunchedEffect(state.settingsSoundFocus) {
             listState.animateScrollToItem(state.settingsSoundFocus.coerceIn(0, rows))
         }
@@ -179,6 +180,15 @@ fun SettingsSoundPanel(state: LauncherState, onRowClick: (Int) -> Unit) {
                         focused = state.settingsSoundFocus == 3,
                         leadingIcon = R.drawable.ic_sound,
                         onClick = { onRowClick(3) },
+                    )
+                }
+                item(key = "notifications") {
+                    SettingsRow(
+                        label = "notifications",
+                        focused = state.settingsSoundFocus == 4,
+                        toggleChecked = state.notificationSoundEnabled,
+                        leadingIcon = R.drawable.ic_notifications,
+                        onClick = { onRowClick(4) },
                     )
                 }
             }

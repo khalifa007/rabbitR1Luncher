@@ -10,12 +10,13 @@ import com.r1.launcher.claude.ClaudeMessage
 import com.r1.launcher.hermes.HermesMessage
 import com.r1.launcher.messages.SmsConversation
 import com.r1.launcher.messages.SmsItem
+import com.r1.launcher.notifications.Notification
 import com.r1.launcher.openclaw.ChatMessage
 import com.r1.launcher.openclaw.SessionEntry
 import com.r1.launcher.transcriber.MeetingIndexEntry
 import com.r1.launcher.transcriber.TranscriberDetailAction
 
-enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, CLAUDE, HERMES_CHAT, HERMES_CONFIG, HERMES_QR, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS }
+enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, SETTINGS_CREDENTIALS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, NTFY_CONFIG, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, CLAUDE, HERMES_CHAT, HERMES_CONFIG, HERMES_QR, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS, NOTIFICATIONS }
 
 enum class WifiShareEditTarget { SSID, PASSWORD }
 
@@ -432,6 +433,81 @@ class LauncherState {
     var smsThreadLoading by mutableStateOf(false)
     var smsThreadFocus by mutableIntStateOf(0)
 
+    // --- credentials panel (global API keys) ---
+    /** Focus index in SETTINGS_CREDENTIALS. Row layout matches the panel:
+     *  0=back, 1=anthropic, 2=elevenlabs, 3=hermes, 4=ntfy topic,
+     *  5=webhook token (view+regenerate). Single keyboard overlay opened
+     *  per-row via [credentialsEditField] / [credentialsEditInput]. */
+    var credentialsFocus by mutableIntStateOf(0)
+    /** When non-empty, the credentials keyboard overlay is open for this
+     *  field. Values: "anthropic" | "elevenlabs" | "hermes" | "ntfy_topic". */
+    var credentialsEditField by mutableStateOf("")
+    var credentialsEditInput by mutableStateOf("")
+    /** Display mirrors for the credentials panel. Hydrated in onCreate +
+     *  refreshed on every successful save. Keys themselves stay in their
+     *  per-app *Prefs objects — these are read-only snapshots for UI. */
+    var hasAnthropicKey by mutableStateOf(false)
+    var anthropicKeyTail by mutableStateOf("")
+    var hasHermesKey by mutableStateOf(false)
+    var hermesKeyTail by mutableStateOf("")
+    /** Webhook bearer token — read-only on this surface; regenerate button
+     *  triggers [LauncherHost.regenerateWebhookToken]. */
+    var webhookTokenDisplay by mutableStateOf("")
+
+    // --- ntfy.sh subscriber ---
+    /** Focus index in NTFY_CONFIG. Row layout:
+     *  0=back, 1=enable toggle, 2=topic, 3=status (info row). */
+    var ntfyConfigFocus by mutableIntStateOf(0)
+    /** Buffer for the NTFY_CONFIG topic keyboard. Empty when keyboard closed. */
+    var ntfyTopicInput by mutableStateOf("")
+    /** Display mirror of NtfyPrefs.topic. */
+    var ntfyTopic by mutableStateOf("")
+    /** Display mirror of NtfyPrefs.enabled — also drives the Network panel
+     *  row toggle. */
+    var ntfySubscriberEnabled by mutableStateOf(false)
+    /** Live subscriber status. Values: "disabled" | "connecting" |
+     *  "live" | "retry…" | "error". Drives the Network row pill + the
+     *  config page status display. */
+    var ntfyStatus by mutableStateOf("disabled")
+
+    // --- notifications ---
+    /** Newest-first list of notifications. Hydrated from NotificationStore on
+     *  activity start; mutated by NotificationCenter.add/markRead/dismiss/clear
+     *  in lockstep with the on-disk JSON. */
+    val notifications = mutableStateListOf<Notification>()
+    /** Cached unread count — kept in sync by NotificationCenter so the HOME
+     *  badge doesn't have to recompute every recomposition. */
+    var notificationsUnread by mutableIntStateOf(0)
+    /** Wheel focus inside the NOTIFICATIONS panel. 0 = back row, 1..N = items
+     *  in reverse-chronological order, last row = "clear all". */
+    var notificationsFocus by mutableIntStateOf(0)
+    /** Transient banner shown on HOME for ~4s when a notification arrives
+     *  while the clock screen is visible. Null = nothing being shown. */
+    var notificationBanner by mutableStateOf<Notification?>(null)
+    /** Master gate for the chime that fires when a notification lands. Mirrors
+     *  NotifPrefs.soundEnabled; surfaced as the "notifications" row in
+     *  Settings → Sound. When false the badge/panel still update — only the
+     *  audio cue is suppressed. */
+    var notificationSoundEnabled by mutableStateOf(true)
+
+    fun openNotifications() {
+        notificationsFocus = 0
+        panel = Panel.NOTIFICATIONS
+    }
+
+    fun openSettingsCredentials() {
+        credentialsFocus = 0
+        credentialsEditField = ""
+        credentialsEditInput = ""
+        panel = Panel.SETTINGS_CREDENTIALS
+    }
+
+    fun openNtfyConfig() {
+        ntfyConfigFocus = 0
+        ntfyTopicInput = ntfyTopic
+        panel = Panel.NTFY_CONFIG
+    }
+
     // --- state transitions ---
 
     fun openApps() {
@@ -677,13 +753,14 @@ class LauncherState {
             // under Device alongside reboot/power off/factory reset, so the
             // back arrow needs to drop back into SETTINGS_DEVICE.
             Panel.SETTINGS_LANGUAGE -> Panel.SETTINGS_DEVICE
-            Panel.SETTINGS_DISPLAY, Panel.SETTINGS_SOUND, Panel.SETTINGS_DEVICE, Panel.SETTINGS_ABOUT, Panel.SETTINGS_VOICE -> Panel.SETTINGS
+            Panel.SETTINGS_DISPLAY, Panel.SETTINGS_SOUND, Panel.SETTINGS_DEVICE, Panel.SETTINGS_ABOUT, Panel.SETTINGS_VOICE, Panel.SETTINGS_CREDENTIALS -> Panel.SETTINGS
             Panel.SETTINGS_VOICE_TUNING -> Panel.SETTINGS_VOICE
             Panel.SETTINGS_VOICE_SUBSCRIPTION -> Panel.SETTINGS_VOICE
             Panel.WIFI_SCAN -> if (isOnboarding) Panel.ONBOARDING else Panel.NETWORK
             Panel.WIFI_PASSWORD -> Panel.WIFI_SCAN
             Panel.WIFI_SHARE -> Panel.NETWORK
             Panel.WIFI_SHARE_EDIT -> Panel.WIFI_SHARE
+            Panel.NTFY_CONFIG -> Panel.NETWORK
             Panel.ONBOARDING -> Panel.ONBOARDING
             Panel.SETTINGS -> Panel.APPS
             Panel.APPS -> Panel.HOME
@@ -704,6 +781,8 @@ class LauncherState {
             Panel.TRANSCRIBER_RECORDING -> Panel.TRANSCRIBER_LIST
             Panel.TRANSCRIBER_DETAIL -> Panel.TRANSCRIBER_LIST
             Panel.TRANSCRIBER_SETTINGS -> Panel.TRANSCRIBER_LIST
+            // Notifications open from the HOME badge — back returns there.
+            Panel.NOTIFICATIONS -> Panel.HOME
             Panel.HOME -> Panel.HOME
         }
     }
