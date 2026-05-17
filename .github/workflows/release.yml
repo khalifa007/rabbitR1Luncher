@@ -74,12 +74,23 @@ jobs:
           VERSION_NAME=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
           echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
 
+      # SHA-256 sidecar so the in-launcher OTA can verify integrity before
+      # handing the APK to `pm install`. Format is sha256sum's default
+      # (`<hex>  <filename>`) — the launcher parses just the first token.
+      - name: Generate SHA-256 sidecar
+        run: |
+          cd app/build/outputs/apk/release
+          sha256sum app-release.apk > app-release.apk.sha256
+          cat app-release.apk.sha256
+
       - name: Create or Update Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "v${{ env.VERSION_NAME }}"
           name: "Release v${{ env.VERSION_NAME }}"
-          files: app/build/outputs/apk/release/app-release.apk
+          files: |
+            app/build/outputs/apk/release/app-release.apk
+            app/build/outputs/apk/release/app-release.apk.sha256
           fail_on_unmatched_files: true
           prerelease: false
         env:

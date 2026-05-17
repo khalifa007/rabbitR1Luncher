@@ -14,6 +14,10 @@ import java.net.URL
 object OTAUpdater {
     private const val TAG = "OTAUpdater"
     private const val API_URL = "https://api.github.com/repos/khalifa007/rabbitR1Luncher/releases/latest"
+    // Free-space floor for /data before download + install. ~3x the typical
+    // APK size: one for cacheDir, one for /data/local/tmp/update.apk, one
+    // for /data/app's pre-commit staging area.
+    private const val REQUIRED_FREE_BYTES = 50L * 1024 * 1024
 
     // Root command executor injected from LauncherActivity
     var executeRootCommand: ((String) -> Boolean)? = null
@@ -59,20 +63,27 @@ object OTAUpdater {
                             return@Thread
                         }
 
-                        // Find the APK asset
+                        // Pick the APK and the optional SHA-256 sidecar. The
+                        // workflow uploads `<name>.apk` plus `<name>.apk.sha256`
+                        // (single hex line). Older releases predate the
+                        // sidecar — we proceed without integrity verification
+                        // in that case rather than refusing the update.
                         val assets = json.getJSONArray("assets")
                         var downloadUrl = ""
+                        var shaUrl = ""
                         for (i in 0 until assets.length()) {
                             val asset = assets.getJSONObject(i)
-                            if (asset.getString("name").endsWith(".apk")) {
-                                downloadUrl = asset.getString("browser_download_url")
-                                break
+                            val name = asset.getString("name")
+                            val url = asset.getString("browser_download_url")
+                            when {
+                                name.endsWith(".apk.sha256") -> shaUrl = url
+                                name.endsWith(".apk") -> downloadUrl = url
                             }
                         }
 
                         if (downloadUrl.isNotEmpty()) {
                             notify(onResult, "Update $tagName found! Downloading...")
-                            downloadAndInstall(context, tagName, downloadUrl, state, onResult)
+                            downloadAndInstall(context, tagName, downloadUrl, shaUrl, state, onResult)
                         } else {
                             resetState(state, onResult, if (forcePrompt) "No APK in release $tagName" else null)
                         }
@@ -113,6 +124,7 @@ object OTAUpdater {
         context: Context,
         tagName: String,
         downloadUrl: String,
+        shaUrl: String,
         state: LauncherState,
         onResult: ((String) -> Unit)?
     ) {
@@ -121,6 +133,18 @@ object OTAUpdater {
             val cacheFile = File(context.cacheDir, "update_cache.apk")
             try {
                 if (cacheFile.exists()) cacheFile.delete()
+
+                // /data full silently kills pm install. cacheDir lives on the
+                // same partition as /data/app, so a StatFs check here gives us
+                // both download room AND install headroom in one call.
+                if (!hasEnoughFreeSpace(context, REQUIRED_FREE_BYTES)) {
+                    resetState(
+                        state,
+                        onResult,
+                        "Not enough free space — need ~${REQUIRED_FREE_BYTES / (1024 * 1024)} MB free on /data",
+                    )
+                    return@Thread
+                }
 
                 // Follow redirects manually (GitHub -> AWS S3 CDN)
                 var currentUrl = downloadUrl
@@ -156,6 +180,32 @@ object OTAUpdater {
 
                 Log.i(TAG, "Downloaded ${cacheFile.length() / 1024}KB to ${cacheFile.absolutePath}")
 
+                // SHA-256 integrity check. Skipped (with a warning log) when
+                // the release has no .sha256 sidecar — older releases predate
+                // the workflow that publishes one. Mismatch aborts BEFORE we
+                // hand the APK to pm install: a corrupt APK that pm rejects
+                // is harder to diagnose than an explicit "checksum failed".
+                if (shaUrl.isNotEmpty()) {
+                    val expectedSha = fetchSha256(shaUrl)
+                    if (expectedSha == null) {
+                        cacheFile.delete()
+                        resetState(state, onResult, "Could not fetch checksum — aborting")
+                        return@Thread
+                    }
+                    val actualSha = computeSha256(cacheFile)
+                    if (!actualSha.equals(expectedSha, ignoreCase = true)) {
+                        Log.w(TAG, "SHA mismatch: expected=$expectedSha actual=$actualSha")
+                        cacheFile.delete()
+                        // Don't mark last_failed_tag here — corruption is
+                        // transient; let the next check retry the download.
+                        resetState(state, onResult, "Download corrupt (SHA mismatch) — try again")
+                        return@Thread
+                    }
+                    Log.i(TAG, "SHA-256 verified ($expectedSha)")
+                } else {
+                    Log.w(TAG, "No .sha256 sidecar in release — installing without integrity check")
+                }
+
                 val rootFunc = executeRootCommand
                 if (rootFunc != null) {
                     val src = cacheFile.absolutePath
@@ -171,7 +221,15 @@ object OTAUpdater {
                     // tag. Without this check, a silently-failing install ends
                     // up in a boot loop: auto-restart → onCreate check → same
                     // remote version still newer → reinstall → repeat.
-                    rootFunc("pm install -r $dst")
+                    //
+                    // `-d` allows downgrade. The local debug pin keeps
+                    // versionCode at 1000 between releases, so a fresh
+                    // OTA-published versionCode (e.g. 8) would otherwise
+                    // hit INSTALL_FAILED_VERSION_DOWNGRADE and look like a
+                    // total failure — for a launcher where the user
+                    // controls the OS image, downgrade tolerance is the
+                    // pragmatic default.
+                    rootFunc("pm install -r -d $dst")
                     val expected = tagName.removePrefix("v")
                     val verified = verifyInstall(context, expected)
                     val prefs = context.getSharedPreferences("ota_prefs", Context.MODE_PRIVATE)
@@ -197,6 +255,61 @@ object OTAUpdater {
                 resetState(state, onResult, "Download failed: ${e.message}")
             }
         }.start()
+    }
+
+    /** True when at least [requiredBytes] is free on the partition backing
+     *  [Context.cacheDir]. cacheDir lives under /data, so this also reflects
+     *  /data/app's available bytes — single check covers download AND install. */
+    private fun hasEnoughFreeSpace(context: android.content.Context, requiredBytes: Long): Boolean {
+        return runCatching {
+            val stat = android.os.StatFs(context.cacheDir.absolutePath)
+            stat.availableBytes >= requiredBytes
+        }.getOrDefault(true)  // On StatFs failure, fall through — better to attempt than spuriously refuse
+    }
+
+    /** Fetch the SHA-256 sidecar's body. Format: one line, hex digest only
+     *  (extra whitespace tolerated). Returns null on transport/parse failure. */
+    private fun fetchSha256(url: String): String? {
+        return runCatching {
+            var currentUrl = url
+            var conn: HttpURLConnection
+            var attempts = 0
+            while (true) {
+                conn = URL(currentUrl).openConnection() as HttpURLConnection
+                conn.instanceFollowRedirects = false
+                conn.connectTimeout = 5000
+                conn.readTimeout = 10000
+                val status = conn.responseCode
+                if (status in 300..399) {
+                    val loc = conn.getHeaderField("Location") ?: break
+                    conn.disconnect()
+                    currentUrl = loc
+                    if (++attempts > 5) break
+                } else break
+            }
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            conn.disconnect()
+            // Sidecar may be raw hex ("ab12...") or `sha256sum`-formatted
+            // ("ab12...  app-release.apk"). Take the first whitespace-bounded
+            // token and validate it.
+            val token = body.trim().split(Regex("\\s+")).firstOrNull().orEmpty()
+            if (token.matches(Regex("[0-9a-fA-F]{64}"))) token.lowercase() else null
+        }.getOrNull()
+    }
+
+    /** Stream-hash the file (8 KiB buffer) so a 20 MB APK doesn't sit in
+     *  memory all at once. Returns lower-case hex. */
+    private fun computeSha256(file: File): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buf = ByteArray(8 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
     }
 
     /** Poll PackageManager until `versionName` matches `expected` (the
