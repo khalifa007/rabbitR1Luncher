@@ -532,6 +532,17 @@ fun LauncherRoot(
             Topbar(state = state)
         }
 
+        // Notification banner — floats above every panel except NOTIFICATIONS
+        // itself. Tap to jump to the notifications list. Self-dismisses ~4s.
+        NotificationBanner(
+            state = state,
+            onClick = {
+                state.openNotifications()
+                state.notificationBanner = null
+                host.selectTone()
+            },
+        )
+
         // Toast overlay — top of the z-stack so it floats above every panel
         // and the topbar. Self-dismissing; see ToastOverlay.kt.
         ToastOverlay(state = state)

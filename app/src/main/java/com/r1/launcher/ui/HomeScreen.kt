@@ -125,10 +125,6 @@ fun HomeScreen(
 
         }
     }
-
-    // Banner overlay — slides in from the top whenever a fresh notification
-    // arrives while HOME is visible. Self-clears after ~4s via LaunchedEffect.
-    NotificationBanner(state = state, onClick = onOpenNotifications)
 }
 
 @Composable
@@ -175,19 +171,19 @@ private fun NotificationBadge(count: Int, onClick: () -> Unit) {
     }
 }
 
-/** Top-of-screen toast for a single freshly-landed notification. Only renders
- *  while HOME is the active panel — every other panel does its own thing and
- *  we don't want a banner stamping over a chat/recording UI. */
+/** Top-of-screen toast for a single freshly-landed notification. Renders on
+ *  every panel except NOTIFICATIONS itself (no point banner-ing the user about
+ *  a notif while they're staring at the list). Rendered at the top of the
+ *  LauncherRoot z-stack so it overlays whatever panel is active. */
 @Composable
-private fun NotificationBanner(state: LauncherState, onClick: () -> Unit) {
+fun NotificationBanner(state: LauncherState, onClick: () -> Unit) {
     val type = LocalR1Type.current
     val banner = state.notificationBanner
-    val visible = banner != null && state.panel == Panel.HOME
-    // Drop the banner the moment HOME stops being the active panel — otherwise
-    // a fresh notif could pop back into view after the user returned to HOME
-    // within the 4s auto-dismiss window, even though they've already moved on.
+    val visible = banner != null && state.panel != Panel.NOTIFICATIONS
+    // Drop the banner immediately if the user opens NOTIFICATIONS — the list
+    // already shows the same entry, so the banner is redundant.
     LaunchedEffect(state.panel) {
-        if (state.panel != Panel.HOME && state.notificationBanner != null) {
+        if (state.panel == Panel.NOTIFICATIONS && state.notificationBanner != null) {
             state.notificationBanner = null
         }
     }
