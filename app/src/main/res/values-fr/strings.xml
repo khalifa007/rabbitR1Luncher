@@ -20,7 +20,6 @@
     <string name="app_label_openclaw">openclaw</string>
     <string name="app_label_messages">messages</string>
     <string name="app_label_terminal">terminal</string>
-    <string name="app_label_claude">claude code</string>
     <string name="app_label_meetings">réunions</string>
 
     <!-- Settings root -->
@@ -194,13 +193,6 @@
     <string name="terminal_status_idle">inactif</string>
 
     <!-- Claude -->
-    <string name="claude_back_label">applis</string>
-    <string name="claude_thinking">réfléchit</string>
-    <string name="claude_input_hint">tapez ici...</string>
-    <string name="claude_empty_hint">demandez à claude code\n\nmolette-clic pour envoyer\nmaintenez le bouton latéral pour dicter</string>
-    <string name="claude_panel_subtitle">plus pratique au navigateur</string>
-    <string name="claude_panel_open_anyway">ouvrir ici</string>
-    <string name="claude_exit_no_output">claude s\'est arrêté %1$d (aucune sortie)</string>
 
     <!-- OpenClaw chat -->
     <string name="openclaw_back_home">accueil</string>

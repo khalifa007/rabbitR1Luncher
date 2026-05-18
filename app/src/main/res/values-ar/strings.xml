@@ -20,7 +20,6 @@
     <string name="app_label_openclaw">OpenClaw</string>
     <string name="app_label_messages">الرسائل</string>
     <string name="app_label_terminal">الطرفية</string>
-    <string name="app_label_claude">Claude Code</string>
     <string name="app_label_meetings">الاجتماعات</string>
 
     <!-- Settings root -->
@@ -194,13 +193,6 @@
     <string name="terminal_status_idle">خامل</string>
 
     <!-- Claude -->
-    <string name="claude_back_label">التطبيقات</string>
-    <string name="claude_thinking">يفكّر</string>
-    <string name="claude_input_hint">اكتب هنا...</string>
-    <string name="claude_empty_hint">اسأل Claude Code أي شيء\n\nاضغط العجلة للإرسال\nاضغط مطوّلاً الزر الجانبي للإملاء</string>
-    <string name="claude_panel_subtitle">الاستخدام من المتصفح أسهل</string>
-    <string name="claude_panel_open_anyway">فتح هنا</string>
-    <string name="claude_exit_no_output">خرج Claude بالرمز %1$d (بدون مخرجات)</string>
 
     <!-- OpenClaw chat -->
     <string name="openclaw_back_home">الرئيسية</string>
