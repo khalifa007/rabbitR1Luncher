@@ -52,7 +52,16 @@ fun NetworkPanel(
             SettingsItem.Toggle(
                 stringResource(R.string.network_row_remote),
                 state.webServerEnabled,
-                subtitle = if (state.webServerEnabled) "http://${state.webServerIp.ifEmpty { "?" }}:${state.webServerPort}" else "",
+                subtitle = if (state.webServerEnabled) {
+                    // Short, screen-friendly URL — the passcode is shown on
+                    // the next row so users don't have to read a long token.
+                    "http://${state.webServerIp.ifEmpty { "?" }}:${state.webServerPort}"
+                } else "",
+            ),
+            // 4-digit passcode the user types on their phone to unlock the
+            // panel. Shown as a row so the value is always glance-able.
+            SettingsItem.Standard(
+                "panel passcode: ${state.panelPasscode}",
             ),
             SettingsItem.Toggle(
                 stringResource(R.string.network_row_terminal),

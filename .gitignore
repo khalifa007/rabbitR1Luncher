@@ -33,3 +33,7 @@ carroot.rc
 *.jks
 *.pk8
 *.pem
+
+# code review loop artifacts — local-only
+REVIEW_PROGRESS.md
+REVIEW_FINDINGS.md

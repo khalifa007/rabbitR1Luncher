@@ -2,8 +2,8 @@
  * r1 // remote — companion web app
  *
  * Single-page launcher-style UI: home view shows clock + apps grid;
- * tapping a tile reveals one of the sub-views (claude code, terminal,
- * sms, send text, system). Back-pill returns to home. RPC over the
+ * tapping a tile reveals one of the sub-views (terminal, sms, send
+ * text, system, meetings). Back-pill returns to home. RPC over the
  * existing WebSocket at /api/rpc; topbar reflects live state snapshots.
  * ==================================================================== */
 
@@ -18,6 +18,172 @@ const setLocale = (code) => window.R1I18n && window.R1I18n.setLocale(code);
 // Apply once with default English so static markup is consistent before the
 // first state.snapshot lands.
 setLocale('en');
+
+// ============== panel token ==============
+// The long-lived bearer that gates WS upgrades + sensitive HTTP endpoints
+// (/api/state, /api/transcriber/*). We obtain it one of two ways:
+//   1. Legacy path: a `?t=<token>` query parameter on the URL (still
+//      supported so older QR codes / typed URLs keep working).
+//   2. Current path: the user types a 4-digit passcode in the unlock
+//      overlay; we POST to /api/auth and store the returned token in
+//      sessionStorage. This is the recommended UX — typing 32 hex chars
+//      on a phone is awful.
+// `panelToken` is `let` (not `const`) because it may be set after init by
+// the unlock flow.
+let panelToken = (() => {
+    const fromUrl = new URLSearchParams(location.search).get('t');
+    if (fromUrl) {
+        try { sessionStorage.setItem('r1.panelToken', fromUrl); } catch (_) {}
+        return fromUrl;
+    }
+    try { return sessionStorage.getItem('r1.panelToken') || ''; } catch (_) { return ''; }
+})();
+// Append `?t=TOKEN` (or `&t=TOKEN`) to URLs that the server requires it on.
+// Skip when token is empty — server returns 401 and the SPA surfaces it as
+// offline, which is the correct visible state.
+function withToken(url) {
+    if (!panelToken) return url;
+    return url + (url.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(panelToken);
+}
+
+// ============== unlock overlay ==============
+// Shown when we don't have a token; hidden once authentication completes.
+// Drives a tiny state machine: typing digits builds `unlockBuffer`, the
+// 4th digit triggers an auto-submit, on success we save the token and let
+// the rest of the SPA come online. On failure we clear the buffer and
+// either show "X tries left" or kick into a lockout countdown.
+const unlockOverlay = document.getElementById('unlock');
+const unlockMsg = document.getElementById('unlock-msg');
+const unlockDots = Array.from(document.querySelectorAll('#unlock-dots .unlock-dot'));
+const unlockKeys = Array.from(document.querySelectorAll('.unlock-key[data-digit]'));
+const unlockBack = document.querySelector('.unlock-key[data-back]');
+let unlockBuffer = '';
+let unlockBusy = false;
+let unlockLockoutUntil = 0;
+
+function renderUnlockDots() {
+    unlockDots.forEach((dot, i) => {
+        dot.classList.toggle('filled', i < unlockBuffer.length);
+    });
+}
+
+function setUnlockMsg(text, ok = false) {
+    if (!unlockMsg) return;
+    unlockMsg.textContent = text || '';
+    unlockMsg.classList.toggle('ok', !!ok);
+}
+
+function lockUnlockKeys(disabled) {
+    unlockKeys.forEach((k) => { k.disabled = disabled; });
+    if (unlockBack) unlockBack.disabled = disabled;
+}
+
+function showUnlock(reason) {
+    unlockOverlay.classList.remove('hidden');
+    unlockOverlay.setAttribute('aria-hidden', 'false');
+    unlockBuffer = '';
+    renderUnlockDots();
+    if (reason) setUnlockMsg(reason);
+}
+
+function hideUnlock() {
+    unlockOverlay.classList.add('hidden');
+    unlockOverlay.setAttribute('aria-hidden', 'true');
+    setUnlockMsg('');
+}
+
+async function submitPasscode(code) {
+    if (unlockBusy) return;
+    unlockBusy = true;
+    lockUnlockKeys(true);
+    setUnlockMsg('checking…');
+    try {
+        const r = await fetch('/api/auth', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ passcode: code }),
+        });
+        const body = await r.json().catch(() => ({}));
+        if (r.status === 200 && body.ok && body.token) {
+            panelToken = body.token;
+            try { sessionStorage.setItem('r1.panelToken', panelToken); } catch (_) {}
+            setUnlockMsg('unlocked', true);
+            setTimeout(() => { hideUnlock(); connect(); }, 250);
+            return;
+        }
+        if (r.status === 429 && typeof body.retry_after_ms === 'number') {
+            unlockLockoutUntil = Date.now() + body.retry_after_ms;
+            startLockoutCountdown();
+            return;
+        }
+        const left = (body && typeof body.attempts_left === 'number') ? body.attempts_left : null;
+        setUnlockMsg(
+            left === null ? 'wrong passcode' :
+            left === 1 ? 'wrong — 1 try left' :
+            'wrong — ' + left + ' tries left'
+        );
+        unlockBuffer = '';
+        renderUnlockDots();
+    } catch (e) {
+        setUnlockMsg('network error');
+        unlockBuffer = '';
+        renderUnlockDots();
+    } finally {
+        unlockBusy = false;
+        if (Date.now() >= unlockLockoutUntil) lockUnlockKeys(false);
+    }
+}
+
+function startLockoutCountdown() {
+    lockUnlockKeys(true);
+    unlockBuffer = '';
+    renderUnlockDots();
+    const tick = () => {
+        const remaining = Math.max(0, Math.ceil((unlockLockoutUntil - Date.now()) / 1000));
+        if (remaining <= 0) {
+            setUnlockMsg('try again');
+            lockUnlockKeys(false);
+            return;
+        }
+        setUnlockMsg('locked out — ' + remaining + 's');
+        setTimeout(tick, 1000);
+    };
+    tick();
+}
+
+unlockKeys.forEach((btn) => {
+    btn.addEventListener('click', () => {
+        if (unlockBusy || Date.now() < unlockLockoutUntil) return;
+        if (unlockBuffer.length >= 4) return;
+        unlockBuffer += btn.dataset.digit;
+        renderUnlockDots();
+        if (unlockBuffer.length === 4) submitPasscode(unlockBuffer);
+    });
+});
+if (unlockBack) {
+    unlockBack.addEventListener('click', () => {
+        if (unlockBusy || Date.now() < unlockLockoutUntil) return;
+        unlockBuffer = unlockBuffer.slice(0, -1);
+        renderUnlockDots();
+        setUnlockMsg('');
+    });
+}
+// Hardware keyboard fallback — handy on desktop browsers during dev.
+window.addEventListener('keydown', (e) => {
+    if (unlockOverlay.classList.contains('hidden')) return;
+    if (unlockBusy || Date.now() < unlockLockoutUntil) return;
+    if (e.key >= '0' && e.key <= '9') {
+        if (unlockBuffer.length < 4) {
+            unlockBuffer += e.key;
+            renderUnlockDots();
+            if (unlockBuffer.length === 4) submitPasscode(unlockBuffer);
+        }
+    } else if (e.key === 'Backspace') {
+        unlockBuffer = unlockBuffer.slice(0, -1);
+        renderUnlockDots();
+        setUnlockMsg('');
+    }
+});
 
 // ============== WebSocket RPC ==============
 let ws = null;
@@ -41,16 +207,26 @@ function setConn(state) {
 
 function connect() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const url = `${proto}://${location.host}/api/rpc`;
+    const url = withToken(`${proto}://${location.host}/api/rpc`);
     setConn('connecting');
     ws = new WebSocket(url);
     ws.addEventListener('open', () => {
         setConn('live');
         reconnectDelay = 500;
     });
-    ws.addEventListener('close', () => {
+    ws.addEventListener('close', (e) => {
         setConn('error');
         ws = null;
+        // 1008 PolicyViolation = server rejected the WS handshake on auth.
+        // The token in sessionStorage is stale (rotated on the device, or
+        // we never had one). Kick straight to the unlock overlay rather
+        // than burning CPU on reconnect attempts that will all fail.
+        if (e && e.code === 1008) {
+            panelToken = '';
+            try { sessionStorage.removeItem('r1.panelToken'); } catch (_) {}
+            showUnlock('session expired');
+            return;
+        }
         setTimeout(connect, reconnectDelay);
         reconnectDelay = Math.min(reconnectDelay * 2, 10000);
     });
@@ -114,15 +290,6 @@ function setView(name) {
     // Lazy-load when opening certain panels.
     if (name === 'sms') refreshSmsList();
     if (name === 'terminal') refreshTerminalHistory();
-    if (name === 'claude') {
-        refreshClaudeHistory();
-        // Auth status decides whether the login banner shows above the
-        // chat — refresh on every entry so creds dropped via adb show up
-        // immediately the next time the view opens.
-        if (typeof refreshClaudeAuth === 'function') refreshClaudeAuth();
-        // Drop focus into the textarea so the user can start typing immediately.
-        setTimeout(() => document.getElementById('claude-input')?.focus(), 220);
-    }
     if (name === 'meetings') refreshMeetings();
 }
 
@@ -161,9 +328,9 @@ async function refreshMeetings() {
                 + '<span style="color:#FF6A00;font-size:14px;">' + escapeHtml(m.title) + '</span>'
                 + '<span style="color:#888;font-size:11px;">' + escapeHtml(sub) + '</span>'
                 + '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">'
-                + '<a href="/api/transcriber/audio/' + m.uuid + '.m4a" class="primary-btn" download>audio</a>'
-                + '<a href="/api/transcriber/transcript/' + m.uuid + '.txt" class="primary-btn" download>transcript</a>'
-                + '<a href="/api/transcriber/transcript/' + m.uuid + '.json" class="primary-btn" download>json</a>'
+                + '<a href="' + withToken('/api/transcriber/audio/' + m.uuid + '.m4a') + '" class="primary-btn" download>audio</a>'
+                + '<a href="' + withToken('/api/transcriber/transcript/' + m.uuid + '.txt') + '" class="primary-btn" download>transcript</a>'
+                + '<a href="' + withToken('/api/transcriber/transcript/' + m.uuid + '.json') + '" class="primary-btn" download>json</a>'
                 + (data.hasSmtp
                     ? '<button class="primary-btn" type="button" data-mt-email="' + m.uuid + '">email</button>'
                     : '<span style="color:#888;font-size:11px;align-self:center;">smtp not set on device</span>')
@@ -226,23 +393,6 @@ window.addEventListener('keydown', (e) => {
 function handleEvent(event, payload) {
     if (event === 'state.snapshot') applySnapshot(payload);
     else if (event === 'terminal.output') appendTerminalLine(payload);
-    else if (event === 'claude.message') appendClaudeMessage(payload);
-    else if (event === 'claude.streaming') applyClaudeStreaming(payload);
-    else if (event === 'claude.busy') applyClaudeBusy(payload);
-    else if (event === 'claude.cleared') clearClaudeMessages();
-    else if (event === 'claude.setup.progress') appendSetupLog(payload.line || '');
-    else if (event === 'claude.setup.done') applyClaudeSetupDone(payload);
-}
-
-function applyClaudeSetupDone(payload) {
-    const ok = !!(payload && payload.ok);
-    if (setupStartBtn) setupStartBtn.disabled = false;
-    setSetupStatus(
-        ok ? t('claude.setup.success') : t('claude.setup.failed'),
-        ok ? 'ok' : 'err',
-    );
-    // Re-pull auth status so the UI flips from setup → login pane.
-    if (ok) setTimeout(() => refreshClaudeAuth(), 600);
 }
 
 function setToggle(id, v) {
@@ -528,440 +678,18 @@ termClear.addEventListener('click', async () => {
     } catch (err) { showErr(err); }
 });
 
-// ============== claude code ==============
-const claudeMessages = document.getElementById('claude-messages');
-const claudeForm = document.getElementById('claude-form');
-const claudeInput = document.getElementById('claude-input');
-const claudeSendBtn = document.getElementById('claude-send');
-const claudeClearBtn = document.getElementById('claude-clear');
-let claudeStreamingEl = null;
 
-function escapeHtmlMd(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
-function renderMarkdown(src) {
-    if (!src) return '';
-    const codeBlocks = [];
-    let s = src.replace(/```([a-zA-Z0-9_+-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
-        const id = codeBlocks.length;
-        codeBlocks.push({ lang: lang || '', code: code.replace(/\n+$/, '') });
-        return ` CODEBLOCK${id} `;
-    });
-    s = escapeHtmlMd(s);
-    s = s.replace(/`([^`\n]+)`/g, (_, c) => `<code class="md-icode">${c}</code>`);
-    s = s.replace(/^###### (.+)$/gm, '<h6 class="md-h">$1</h6>');
-    s = s.replace(/^##### (.+)$/gm, '<h5 class="md-h">$1</h5>');
-    s = s.replace(/^#### (.+)$/gm, '<h4 class="md-h">$1</h4>');
-    s = s.replace(/^### (.+)$/gm, '<h3 class="md-h">$1</h3>');
-    s = s.replace(/^## (.+)$/gm, '<h2 class="md-h">$1</h2>');
-    s = s.replace(/^# (.+)$/gm, '<h1 class="md-h">$1</h1>');
-    s = s.replace(/(^|\n)((?:&gt; .*(?:\n|$))+)/g, (_, lead, block) => {
-        const inner = block.replace(/^&gt; ?/gm, '').replace(/\n$/, '');
-        return `${lead}<blockquote class="md-quote">${inner}</blockquote>\n`;
-    });
-    {
-        const lines = s.split('\n');
-        const out = [];
-        let listType = null;
-        const flush = () => { if (listType) { out.push(`</${listType}>`); listType = null; } };
-        for (const line of lines) {
-            const ulMatch = /^[ \t]*[-*] (.+)$/.exec(line);
-            const olMatch = /^[ \t]*\d+\. (.+)$/.exec(line);
-            if (ulMatch) {
-                if (listType !== 'ul') { flush(); out.push('<ul class="md-list">'); listType = 'ul'; }
-                out.push(`<li>${ulMatch[1]}</li>`);
-            } else if (olMatch) {
-                if (listType !== 'ol') { flush(); out.push('<ol class="md-list">'); listType = 'ol'; }
-                out.push(`<li>${olMatch[1]}</li>`);
-            } else {
-                flush();
-                out.push(line);
-            }
-        }
-        flush();
-        s = out.join('\n');
-    }
-    s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
-    s = s.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?:;]|$)/g, '$1<em>$2</em>');
-    s = s.replace(/__([^_\n]+)__/g, '<strong>$1</strong>');
-    s = s.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_, text, url) => {
-        const safe = /^(https?:|mailto:|\/|#)/i.test(url) ? url : '#';
-        return `<a href="${safe}" target="_blank" rel="noopener noreferrer">${text}</a>`;
-    });
-    s = s.split(/\n{2,}/).map((chunk) => {
-        const trimmed = chunk.trim();
-        if (!trimmed) return '';
-        if (/^<(h\d|ul|ol|blockquote|pre| CODEBLOCK)/.test(trimmed)) return trimmed;
-        return `<p class="md-p">${trimmed.replace(/\n/g, '<br>')}</p>`;
-    }).join('\n');
-    s = s.replace(/ CODEBLOCK(\d+) /g, (_, id) => {
-        const b = codeBlocks[+id];
-        const langAttr = b.lang ? ` data-lang="${escapeHtmlMd(b.lang)}"` : '';
-        const langLabel = b.lang ? `<span class="md-code-lang">${escapeHtmlMd(b.lang)}</span>` : '';
-        return `<div class="md-code-wrap">${langLabel}<pre class="md-code"${langAttr}>${escapeHtmlMd(b.code)}</pre></div>`;
-    });
-    return s;
-}
-
-function bubbleEl(role, text, error) {
-    const el = document.createElement('div');
-    el.className = 'claude-bubble ' + role + (error ? ' error' : '');
-    if (role.startsWith('assistant') && !error) el.innerHTML = renderMarkdown(text);
-    else el.textContent = text;
-    return el;
-}
-
-function appendClaudeMessage(payload) {
-    if (!payload || typeof payload.text !== 'string') return;
-    if (payload.role === 'assistant' && claudeStreamingEl) {
-        claudeStreamingEl.remove();
-        claudeStreamingEl = null;
-    }
-    claudeMessages.appendChild(bubbleEl(payload.role, payload.text, payload.error));
-    while (claudeMessages.childElementCount > 200) {
-        claudeMessages.removeChild(claudeMessages.firstChild);
-    }
-    claudeMessages.scrollTop = claudeMessages.scrollHeight;
-    // The CLI ships its own "not logged in" message even when a stale
-    // .credentials.json exists on disk. claude.auth.status keys off file
-    // presence, so it reports authed=true and the banner stays hidden, leaving
-    // the user with no recourse. Snap the banner back open whenever the CLI
-    // surfaces this so the reset/relogin actions are reachable.
-    if (payload.role === 'assistant' && /not logged in|please run \/login/i.test(payload.text || '')) {
-        if (authBanner) authBanner.classList.remove('hidden');
-        if (setupBanner) setupBanner.classList.add('hidden');
-        setAuthStatus(t('claude.auth.reset.done'), 'err');
-    }
-}
-
-function applyClaudeStreaming(payload) {
-    if (!payload) return;
-    const text = typeof payload.text === 'string' ? payload.text : '';
-    if (!text) {
-        if (claudeStreamingEl) { claudeStreamingEl.remove(); claudeStreamingEl = null; }
-        return;
-    }
-    if (!claudeStreamingEl) {
-        claudeStreamingEl = bubbleEl('assistant streaming', text, false);
-        claudeMessages.appendChild(claudeStreamingEl);
-    } else {
-        claudeStreamingEl.innerHTML = renderMarkdown(text);
-    }
-    claudeMessages.scrollTop = claudeMessages.scrollHeight;
-}
-
-function applyClaudeBusy(payload) {
-    const busy = !!(payload && payload.busy);
-    claudeSendBtn.disabled = busy;
-    claudeSendBtn.textContent = busy ? '…' : t('claude.send');
-    // Update the per-app status text in the claude header.
-    const status = document.querySelector('#view-claude .app-status');
-    if (status) status.textContent = busy ? t('claude.thinking') : '';
-}
-
-function clearClaudeMessages() {
-    claudeMessages.innerHTML = '';
-    claudeStreamingEl = null;
-}
-
-async function refreshClaudeHistory() {
-    try {
-        const h = await rpc('claude.history');
-        clearClaudeMessages();
-        if (h && Array.isArray(h.messages)) {
-            h.messages.forEach((m) => {
-                claudeMessages.appendChild(bubbleEl(m.role, m.text, m.error));
-            });
-        }
-        if (h && h.streaming) applyClaudeStreaming({ text: h.streaming });
-        applyClaudeBusy({ busy: !!(h && h.busy) });
-        claudeMessages.scrollTop = claudeMessages.scrollHeight;
-    } catch (err) { showErr(err); }
-}
-
-claudeForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const text = claudeInput.value.trim();
-    if (!text) return;
-    claudeInput.value = '';
-    try { await rpc('claude.send', { text }); } catch (err) { showErr(err); }
-});
-
-claudeInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        claudeForm.requestSubmit();
-    }
-});
-
-claudeClearBtn.addEventListener('click', async () => {
-    try { await rpc('claude.clear'); clearClaudeMessages(); } catch (err) { showErr(err); }
-});
-
-// ============== claude auth ==============
-// The banner is hidden until refreshClaudeAuth() decides we need it. Claude
-// is usable as long as either OAuth or API-key creds are present.
-const authBanner    = document.getElementById('claude-auth-banner');
-const authStartBtn  = document.getElementById('claude-auth-start');
-const authUrlRow    = document.getElementById('claude-auth-url-row');
-const authUrlLink   = document.getElementById('claude-auth-url');
-const authCodeInput = document.getElementById('claude-auth-code');
-const authSubmitBtn = document.getElementById('claude-auth-submit');
-const authKeyInput  = document.getElementById('claude-auth-key');
-const authKeyBtn    = document.getElementById('claude-auth-key-submit');
-const authStatusEl  = document.getElementById('claude-auth-status');
-const authResetBtn  = document.getElementById('claude-auth-reset');
-const authVerifyBtn = document.getElementById('claude-auth-verify');
-const authVerifyLog = document.getElementById('claude-auth-verify-log');
-
-function setAuthStatus(msg, kind) {
-    if (!authStatusEl) return;
-    authStatusEl.textContent = msg || '';
-    authStatusEl.classList.remove('ok', 'err');
-    if (kind) authStatusEl.classList.add(kind);
-}
-
-// Tab switching between OAuth + API-key panes.
-document.querySelectorAll('.claude-auth-tab').forEach((tab) => {
-    tab.addEventListener('click', () => {
-        const target = tab.dataset.authTab;
-        document.querySelectorAll('.claude-auth-tab').forEach(
-            (t) => t.classList.toggle('active', t === tab),
-        );
-        document.querySelectorAll('.claude-auth-pane').forEach(
-            (p) => p.classList.toggle('active', p.dataset.authPane === target),
-        );
-        setAuthStatus('');
-    });
-});
-
-// Setup banner refs — populated below; auth refresh keys off them too.
-const setupBanner   = document.getElementById('claude-setup-banner');
-const setupStartBtn = document.getElementById('claude-setup-start');
-const setupLogEl    = document.getElementById('claude-setup-log');
-const setupStatusEl = document.getElementById('claude-setup-status');
-
-function setSetupStatus(msg, kind) {
-    if (!setupStatusEl) return;
-    setupStatusEl.textContent = msg || '';
-    setupStatusEl.classList.remove('ok', 'err');
-    if (kind) setupStatusEl.classList.add(kind);
-}
-
-function appendSetupLog(line) {
-    if (!setupLogEl) return;
-    setupLogEl.classList.remove('hidden');
-    // Each line is its own <span> so we can color phase headers, failures,
-    // and the final DONE marker without spending a CSS rule per pattern.
-    // textContent on the span guards against any weird control bytes the
-    // chroot's tar/apk output might emit.
-    const span = document.createElement('span');
-    span.className = 'log-line ' + classifyLogLine(line);
-    span.textContent = (setupLogEl.childElementCount ? '\n' : '') + line;
-    setupLogEl.appendChild(span);
-    // Cap at 400 lines so a verbose install (apk index, npm) doesn't grow
-    // the DOM unbounded — drop oldest spans, not by truncating textContent
-    // (which would strip our class colorization).
-    while (setupLogEl.childElementCount > 400) {
-        setupLogEl.removeChild(setupLogEl.firstChild);
-    }
-    setupLogEl.scrollTop = setupLogEl.scrollHeight;
-}
-
-function classifyLogLine(line) {
-    if (!line) return '';
-    if (line.startsWith('--- ')) return 'log-phase';
-    if (line.startsWith('[FAIL]') || /\b(error|failed|fatal)\b/i.test(line)) return 'log-fail';
-    if (/\b(DONE|installed|success|OK)\b/i.test(line)) return 'log-ok';
-    if (line.startsWith('[r1-')) return 'log-info';
-    return '';
-}
-
-async function refreshClaudeAuth() {
-    if (!authBanner) return;
-    try {
-        const s = await rpc('claude.auth.status');
-        const setupRunning = await rpc('claude.setup.status').catch(() => ({ running: false }));
-        if (s && !s.chrootReady) {
-            // Chroot missing — show the setup banner instead of the auth one.
-            // The login flow has nothing to talk to until alpine is in place.
-            authBanner.classList.add('hidden');
-            setupBanner.classList.remove('hidden');
-            if (setupStartBtn) {
-                setupStartBtn.disabled = !!setupRunning.running;
-                if (setupRunning.running) setSetupStatus(t('claude.setup.running'));
-            }
-        } else {
-            // Chroot is ready — hide setup, decide whether to show login.
-            setupBanner.classList.add('hidden');
-            const authed = !!(s && (s.hasOAuth || s.hasApiKey));
-            authBanner.classList.toggle('hidden', authed);
-            if (authStartBtn) authStartBtn.disabled = false;
-            if (authKeyBtn) authKeyBtn.disabled = false;
-        }
-    } catch (err) {
-        // Don't blow up the whole Claude view if status fails — just leave
-        // the banner in its current state and surface the error.
-        showErr(err);
-    }
-}
-
-setupStartBtn?.addEventListener('click', async () => {
-    setupStartBtn.disabled = true;
-    setupLogEl.textContent = '';
-    setupLogEl.classList.remove('hidden');
-    setSetupStatus(t('claude.setup.running'));
-    try {
-        await rpc('claude.setup.start');
-        // Server now streams `claude.setup.progress` + `claude.setup.done`
-        // events; appendSetupLog handles them. Don't re-enable the button
-        // here — the done event flips state.
-    } catch (err) {
-        setSetupStatus(String(err?.message || err), 'err');
-        setupStartBtn.disabled = false;
-    }
-});
-
-authStartBtn?.addEventListener('click', async () => {
-    setAuthStatus(t('claude.auth.oauth.starting'));
-    authStartBtn.disabled = true;
-    try {
-        const r = await rpc('claude.auth.start');
-        if (r && r.url) {
-            authUrlLink.href = r.url;
-            authUrlLink.textContent = r.url;
-            authUrlRow.classList.remove('hidden');
-            setAuthStatus('');
-            authCodeInput.focus();
-        } else {
-            setAuthStatus(r?.error || 'no url returned', 'err');
-        }
-    } catch (err) {
-        setAuthStatus(String(err?.message || err), 'err');
-    } finally {
-        authStartBtn.disabled = false;
-    }
-});
-
-authSubmitBtn?.addEventListener('click', async () => {
-    const code = (authCodeInput.value || '').trim();
-    if (!code) {
-        setAuthStatus(t('claude.auth.oauth.empty'), 'err');
-        authCodeInput.focus();
-        return;
-    }
-    setAuthStatus(t('claude.auth.oauth.submitting'));
-    authSubmitBtn.disabled = true;
-    try {
-        const r = await rpc('claude.auth.finish', { code });
-        if (r && r.ok) {
-            setAuthStatus(t('claude.auth.success'), 'ok');
-            // Hide the banner; claude.send is now usable.
-            setTimeout(() => {
-                authBanner.classList.add('hidden');
-                authCodeInput.value = '';
-            }, 800);
-        } else {
-            setAuthStatus(r?.error || 'finish failed', 'err');
-        }
-    } catch (err) {
-        setAuthStatus(String(err?.message || err), 'err');
-    } finally {
-        authSubmitBtn.disabled = false;
-    }
-});
-
-authVerifyBtn?.addEventListener('click', async () => {
-    authVerifyBtn.disabled = true;
-    authVerifyLog.classList.remove('hidden');
-    authVerifyLog.textContent = '';
-    setAuthStatus(t('claude.auth.verify.running'));
-    try {
-        const r = await rpc('claude.auth.verify');
-        authVerifyLog.textContent = (r && r.log ? r.log : '').trim() || '(no output)';
-        if (r && r.ok) {
-            setAuthStatus(t('claude.auth.verify.ok'), 'ok');
-        } else {
-            setAuthStatus(r?.error || t('claude.auth.verify.fail'), 'err');
-        }
-    } catch (err) {
-        setAuthStatus(String(err?.message || err), 'err');
-    } finally {
-        authVerifyBtn.disabled = false;
-    }
-});
-
-authResetBtn?.addEventListener('click', async () => {
-    // Two-step confirm so a stray click doesn't blow away a working session.
-    if (authResetBtn.dataset.confirm !== '1') {
-        authResetBtn.dataset.confirm = '1';
-        const original = authResetBtn.textContent;
-        authResetBtn.textContent = t('claude.auth.reset.confirm');
-        setTimeout(() => {
-            if (authResetBtn.dataset.confirm === '1') {
-                authResetBtn.dataset.confirm = '';
-                authResetBtn.textContent = original;
-            }
-        }, 4000);
-        return;
-    }
-    authResetBtn.dataset.confirm = '';
-    authResetBtn.disabled = true;
-    setAuthStatus(t('claude.auth.reset.running'));
-    try {
-        const r = await rpc('claude.auth.reset');
-        if (r && r.ok) {
-            setAuthStatus(t('claude.auth.reset.done'), 'ok');
-            authUrlRow.classList.add('hidden');
-            authUrlLink.href = '#';
-            authUrlLink.textContent = '—';
-            authCodeInput.value = '';
-            authKeyInput.value = '';
-            // Force the banner open even if the status RPC race lags behind.
-            authBanner.classList.remove('hidden');
-            await refreshClaudeAuth();
-        } else {
-            setAuthStatus(t('claude.auth.reset.failed'), 'err');
-        }
-    } catch (err) {
-        setAuthStatus(String(err?.message || err), 'err');
-    } finally {
-        authResetBtn.disabled = false;
-        authResetBtn.textContent = t('claude.auth.reset');
-    }
-});
-
-authKeyBtn?.addEventListener('click', async () => {
-    const key = (authKeyInput.value || '').trim();
-    if (!key) {
-        setAuthStatus(t('claude.auth.key.empty'), 'err');
-        authKeyInput.focus();
-        return;
-    }
-    if (!key.startsWith('sk-ant-')) {
-        setAuthStatus(t('claude.auth.key.bad'), 'err');
-        return;
-    }
-    authKeyBtn.disabled = true;
-    try {
-        const r = await rpc('claude.auth.api_key', { key });
-        if (r && r.ok) {
-            setAuthStatus(t('claude.auth.success'), 'ok');
-            setTimeout(() => {
-                authBanner.classList.add('hidden');
-                authKeyInput.value = '';
-            }, 800);
-        } else {
-            setAuthStatus('save failed', 'err');
-        }
-    } catch (err) {
-        setAuthStatus(String(err?.message || err), 'err');
-    } finally {
-        authKeyBtn.disabled = false;
-    }
-});
 // ============== boot ==============
 setView('home');
-connect();
+renderUnlockDots();
+if (panelToken) {
+    // We already have a token (sessionStorage or legacy `?t=` URL) — hide
+    // the overlay and dive straight into the live UI. If the token turns
+    // out to be stale, the WS close handler (code 1008) will re-surface
+    // the unlock prompt automatically.
+    hideUnlock();
+    connect();
+} else {
+    showUnlock();
+}
 })();

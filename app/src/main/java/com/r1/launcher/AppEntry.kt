@@ -8,7 +8,6 @@ sealed class AppEntry {
     object OpenClaw : AppEntry()
     object Messages : AppEntry()
     object Terminal : AppEntry()
-    object Claude : AppEntry()
     object Hermes : AppEntry()
     object Meetings : AppEntry()
 }

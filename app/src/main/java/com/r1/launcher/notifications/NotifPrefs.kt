@@ -91,6 +91,49 @@ class NotifPrefs private constructor(ctx: Context) {
         return fresh
     }
 
+    /** Pre-shared token gating the embedded web panel. Separate from
+     *  [webhookToken] on purpose — webhooks are inbound from third parties
+     *  (GitHub, ntfy.sh, the user's own scripts); the panel token is the
+     *  user's own browser session credential. Mixing them would mean rotating
+     *  the panel kicks out webhooks and vice versa. Same lazy-generate +
+     *  synchronized pattern; bytes are persisted in the encrypted store. */
+    val panelToken: String
+        @Synchronized
+        get() {
+            val existing = secure.getString(KEY_PANEL_TOKEN, null)
+            if (!existing.isNullOrBlank()) return existing
+            val fresh = generateToken()
+            secure.edit().putString(KEY_PANEL_TOKEN, fresh).commit().also {
+                if (!it) android.util.Log.w("NotifPrefs", "panel token commit failed")
+            }
+            return fresh
+        }
+
+    @Synchronized
+    fun regeneratePanelToken(): String {
+        val fresh = generateToken()
+        secure.edit().putString(KEY_PANEL_TOKEN, fresh).commit()
+        return fresh
+    }
+
+    /** Human-friendly 4-digit passcode the user types on their phone to unlock
+     *  the embedded web panel. Exchanged for [panelToken] via POST /api/auth.
+     *  Default "0000" — the user is expected to change it from Settings. The
+     *  4-digit keyspace is only safe behind the per-IP rate limiter in
+     *  R1WebServer; do not skip that. */
+    var panelPasscode: String
+        @Synchronized
+        get() = secure.getString(KEY_PANEL_PASSCODE, null)?.takeIf { isValidPasscode(it) }
+            ?: DEFAULT_PASSCODE
+        @Synchronized
+        set(value) {
+            require(isValidPasscode(value)) { "passcode must be exactly 4 digits" }
+            secure.edit().putString(KEY_PANEL_PASSCODE, value).commit()
+        }
+
+    private fun isValidPasscode(s: String): Boolean =
+        s.length == 4 && s.all { it.isDigit() }
+
     /** Synchronous write that returns the underlying `Editor.commit()` boolean
      *  so callers can branch on success. The kotlin `edit { }` extension
      *  swallows this value, which is dangerous for the migration path where
@@ -110,6 +153,9 @@ class NotifPrefs private constructor(ctx: Context) {
     companion object {
         private const val KEY_SOUND = "sound.enabled"
         private const val KEY_TOKEN = "webhook.token"
+        private const val KEY_PANEL_TOKEN = "panel.token"
+        private const val KEY_PANEL_PASSCODE = "panel.passcode"
+        const val DEFAULT_PASSCODE = "0000"
 
         @Volatile private var instance: NotifPrefs? = null
         fun get(ctx: Context): NotifPrefs =

@@ -153,10 +153,12 @@ class NtfySubscriber(
         // write happens entirely before we bump+clear (then we overwrite
         // it), or entirely after (then its own gen-check inside the lock
         // sees the new generation and skips the write).
+        val priorId = prefs.lastMessageId
         synchronized(cursorLock) {
             generation++
             prefs.lastMessageId = ""
         }
+        Log.i(TAG, "resetCursorAndResync gen->$generation lastId '$priorId' -> '' cleared=${prefs.clearedAtMs}ms")
         if (userStopped.get()) return
         runCatching { inflight?.cancel() }
         inflight = null
@@ -274,26 +276,65 @@ class NtfySubscriber(
     private fun handleFrameLocked(line: String, myGen: Int) {
         val obj = runCatching { json.parseToJsonElement(line) as? JsonObject }.getOrNull() ?: return
         val event = obj["event"]?.jsonPrimitive?.contentOrNull
+        val frameId = obj["id"]?.jsonPrimitive?.contentOrNull
+        val frameTimeSec = obj["time"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L
         // Advance the resume cursor for *every* frame with an id, not just
         // messages — so an idle stream of keepalives still moves forward
         // and we don't replay them on reconnect. Gen-check + write happens
         // under cursorLock so it interlocks with resetCursorAndResync's
         // bump+clear; without the lock a frame whose loop-level gen check
         // already passed could still write a stale id over the user clear.
-        obj["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let { id ->
+        if (frameId != null && frameId.isNotBlank()) {
             synchronized(cursorLock) {
-                if (myGen == generation) prefs.lastMessageId = id
+                if (myGen == generation) prefs.lastMessageId = frameId
             }
         }
         if (event != "message") return
         val body = obj["message"]?.jsonPrimitive?.contentOrNull.orEmpty()
         val title = obj["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
         if (body.isBlank() && title.isBlank()) return
+        // Time fence: ntfy.sh's `time` is Unix seconds. If the message was
+        // sent before the user's most recent clear, drop it — defense in
+        // depth against any path that could replay cached frames despite
+        // our empty `?since=` (server quirks, in-flight buffers, scheduler
+        // races we haven't accounted for). The fence is the only barrier
+        // a frame can't pass by re-acquiring stale state.
+        //
+        // The +CLEAR_FENCE_GRACE_MS slack does two things at once:
+        //   1. Closes the same-second truncation hole: `time` is the start
+        //      of a 1 s bucket, so a frame sent at T+0.7s and a clear at
+        //      T+0.3s would (without grace) wrongly drop the later frame.
+        //   2. Absorbs device-vs-server clock skew (NTP lag, etc.) — we'd
+        //      rather let a slightly-old replay through than swallow a
+        //      legitimate post-clear message.
+        // 5 s is well above realistic skew on a working device and tight
+        // enough that an actual replay (often hours-old) is still caught.
+        val clearedAtMs = prefs.clearedAtMs
+        if (clearedAtMs > 0L && frameTimeSec > 0L) {
+            val frameMs = frameTimeSec * 1000L
+            if (frameMs + CLEAR_FENCE_GRACE_MS < clearedAtMs) {
+                Log.i(TAG, "drop pre-clear frame id=$frameId time=${frameTimeSec}s cleared=${clearedAtMs}ms")
+                return
+            }
+        } else if (clearedAtMs > 0L) {
+            // Message frame with no usable `time` after a clear is anomalous —
+            // ntfy.sh always stamps `time` on message frames per the API
+            // spec. Log so a future regression surfaces in logcat instead
+            // of silently sneaking past the fence.
+            Log.w(TAG, "post-clear frame missing time id=$frameId — letting through")
+        }
+        Log.d(TAG, "deliver id=$frameId time=${frameTimeSec}s gen=$myGen/$generation")
         // Gate the UI delivery too: if the user clears between this post
         // and the Looper draining it, the queued onMessage would re-add a
         // notification to the just-cleared list. The check runs on the UI
         // thread so it's coherent with notificationsClear()'s gen bump.
-        ui.post { if (myGen == generation) onMessage(title, body) }
+        ui.post {
+            if (myGen == generation) {
+                onMessage(title, body)
+            } else {
+                Log.i(TAG, "drop stale-gen ui post id=$frameId gen=$myGen vs $generation")
+            }
+        }
     }
 
     private fun scheduleReconnect() {
@@ -314,5 +355,10 @@ class NtfySubscriber(
 
     companion object {
         private const val TAG = "NtfySubscriber"
+        /** Slack on the post-clear time fence. Closes the same-second
+         *  truncation gap (since `time` is whole seconds) and absorbs
+         *  device-vs-server clock skew. Bigger than realistic NTP drift,
+         *  smaller than ntfy.sh's 12 h cache retention. */
+        private const val CLEAR_FENCE_GRACE_MS = 5_000L
     }
 }

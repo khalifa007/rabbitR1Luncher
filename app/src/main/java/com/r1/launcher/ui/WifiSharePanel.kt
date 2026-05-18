@@ -145,12 +145,20 @@ fun WifiSharePanel(
                                 fontSize = 12.sp,
                                 fontFamily = type.appCard.fontFamily,
                             )
+                            // Short, screen-friendly URL. The unlock passcode
+                            // (default 0000) is shown in Settings → Network.
                             Text(
                                 text = "http://${state.webServerIp}:${state.webServerPort}",
                                 color = Color(0xFFFF6B00),
                                 fontSize = 14.sp,
                                 fontFamily = type.appCard.fontFamily,
                                 fontWeight = FontWeight.Medium,
+                            )
+                            Text(
+                                text = "passcode ${state.panelPasscode}",
+                                color = Color.Gray,
+                                fontSize = 12.sp,
+                                fontFamily = type.appCard.fontFamily,
                             )
                         }
                     }

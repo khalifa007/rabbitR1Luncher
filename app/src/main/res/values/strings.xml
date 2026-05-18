@@ -20,7 +20,6 @@
     <string name="app_label_openclaw">openclaw</string>
     <string name="app_label_messages">messages</string>
     <string name="app_label_terminal">terminal</string>
-    <string name="app_label_claude">claude code</string>
     <string name="app_label_hermes">hermes</string>
     <string name="app_label_meetings">meetings</string>
 
@@ -94,6 +93,7 @@
     <string name="common_loading">loading…</string>
     <string name="common_paste">paste</string>
     <string name="common_send">send</string>
+    <string name="common_copy">copy</string>
     <string name="common_clear">clear</string>
     <string name="common_save">save</string>
     <string name="common_close">close</string>
@@ -194,15 +194,6 @@
     <string name="terminal_status_rec">rec</string>
     <string name="terminal_status_stt">stt</string>
     <string name="terminal_status_idle">idle</string>
-
-    <!-- Claude -->
-    <string name="claude_back_label">apps</string>
-    <string name="claude_thinking">thinking</string>
-    <string name="claude_input_hint">type here...</string>
-    <string name="claude_empty_hint">ask claude code anything\n\nwheel-press to send\nlong-press side button to dictate</string>
-    <string name="claude_panel_subtitle">easier from a browser</string>
-    <string name="claude_panel_open_anyway">open anyway</string>
-    <string name="claude_exit_no_output">claude exited %1$d (no output)</string>
 
     <!-- OpenClaw chat -->
     <string name="openclaw_back_home">home</string>

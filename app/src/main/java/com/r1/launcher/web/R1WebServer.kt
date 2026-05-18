@@ -19,6 +19,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.io.ByteArrayInputStream
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 
@@ -31,9 +32,18 @@ import java.util.concurrent.Executors
  * `start()` when the user toggles "remote panel" on, `stop()` on toggle off
  * or activity destroy.
  *
- * Auth: physical proximity. The hotspot's WPA2 password gates who can reach
- * the IP; on regular Wi-Fi the user must explicitly opt in via the toggle.
- * No additional token exchange in v1.
+ * Auth (two-tier, phone-friendly):
+ *  - The user-facing credential is a 4-digit `panelPasscode` (default 0000,
+ *    editable in Settings). The phone POSTs it to `/api/auth`; on match the
+ *    server returns the strong, long-lived `panelToken`. The phone stores the
+ *    token in sessionStorage and uses it on every WS connect + sensitive HTTP
+ *    request (Bearer or `?t=`).
+ *  - The 4-digit keyspace is brute-forceable in seconds without a guard, so
+ *    `/api/auth` is rate-limited per remote IP — 5 failures within a 60s
+ *    sliding window triggers a 30s lockout. The map is in-memory (cleared on
+ *    server restart). See [authAttempts] / [handleAuthPost].
+ *  - SPA assets (/, /app.js, /style.css, /i18n.js) are intentionally ungated —
+ *    chicken-and-egg, the page has to load to render the passcode prompt.
  */
 class R1WebServer(
     private val ctx: Context,
@@ -46,6 +56,24 @@ class R1WebServer(
         const val DEFAULT_PORT = 8080
         private const val TAG = "R1WebServer"
         private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+        // /api/auth rate-limit knobs — chosen so a brute-forcer can only test
+        // ~10 codes/minute (5 attempts, then 30s lockout). At that rate, an
+        // exhaustive 10k-code search takes ~16 hours — well beyond any human
+        // attention threshold. Tighter values would frustrate fat-fingering.
+        private const val AUTH_MAX_ATTEMPTS = 5
+        private const val AUTH_WINDOW_MS = 60_000L
+        private const val AUTH_LOCKOUT_MS = 30_000L
+    }
+
+    /** Per-remote-IP failed-attempt log. Reset on each successful auth, and
+     *  pruned lazily on every new attempt. The map itself is intentionally
+     *  in-memory and ephemeral — a server restart wipes lockouts, which is
+     *  fine because rebooting requires physical access in our threat model. */
+    private val authAttempts = ConcurrentHashMap<String, AuthAttemptState>()
+
+    private class AuthAttemptState {
+        val failures: ArrayDeque<Long> = ArrayDeque()
+        var lockUntilMs: Long = 0L
     }
 
     private val ui = Handler(Looper.getMainLooper())
@@ -124,23 +152,140 @@ class R1WebServer(
         val uri = session.uri ?: "/"
         return runCatching {
             when {
+                // SPA assets — ungated, see class-doc auth section
                 uri == "/" || uri == "/index.html" -> serveAsset("web/index.html", "text/html")
                 uri.startsWith("/static/") -> serveAsset("web/" + uri.removePrefix("/static/"), guessMime(uri))
                 uri == "/app.js" -> serveAsset("web/app.js", "application/javascript")
                 uri == "/i18n.js" -> serveAsset("web/i18n.js", "application/javascript")
                 uri == "/style.css" -> serveAsset("web/style.css", "text/css")
-                uri == "/api/state" -> jsonResponse(WebRpc.buildSnapshot(state, ctx))
-                uri == "/api/notify" -> handleNotifyPost(session)
                 uri == "/favicon.ico" -> notFound()
-                uri.startsWith("/api/transcriber/audio/") ->
-                    serveTranscriberAudio(uri.removePrefix("/api/transcriber/audio/"))
-                uri.startsWith("/api/transcriber/transcript/") ->
-                    serveTranscriberTranscript(uri.removePrefix("/api/transcriber/transcript/"))
+                // Passcode exchange — rate-limited, see [handleAuthPost]
+                uri == "/api/auth" -> handleAuthPost(session)
+                // Notify endpoint has its own bearer-token auth (see [handleNotifyPost])
+                uri == "/api/notify" -> handleNotifyPost(session)
+                // Sensitive endpoints — gated on the panel token
+                uri == "/api/state" -> requirePanelToken(session)
+                    ?: jsonResponse(WebRpc.buildSnapshot(state, ctx))
+                uri.startsWith("/api/transcriber/audio/") -> requirePanelToken(session)
+                    ?: serveTranscriberAudio(uri.removePrefix("/api/transcriber/audio/"))
+                uri.startsWith("/api/transcriber/transcript/") -> requirePanelToken(session)
+                    ?: serveTranscriberTranscript(uri.removePrefix("/api/transcriber/transcript/"))
                 else -> notFound()
             }
         }.getOrElse { e ->
             Log.w(TAG, "serve $uri failed: ${e.message}")
             errorResponse(Response.Status.INTERNAL_ERROR, e.message ?: "error")
+        }
+    }
+
+    /** Validate the panel token from this request. Accepts the token in either
+     *  the `Authorization: Bearer <token>` header or a `?t=<token>` query
+     *  parameter. Returns `null` when the token is valid (caller proceeds to
+     *  serve the response), or a 401 Response when it's missing/wrong. Uses
+     *  the null-as-success / Response-as-failure shape so call sites can use
+     *  the Elvis operator `requirePanelToken(session) ?: <serve>`. */
+    private fun requirePanelToken(session: IHTTPSession): Response? {
+        val expected = com.r1.launcher.notifications.NotifPrefs.get(ctx).panelToken
+        val auth = session.headers["authorization"].orEmpty()
+        val headerToken = if (auth.startsWith("Bearer ", ignoreCase = true)) {
+            auth.removePrefix("Bearer ").trim()
+        } else null
+        val queryToken = session.parameters["t"]?.firstOrNull()
+            ?: session.parameters["token"]?.firstOrNull()
+        val provided = headerToken ?: queryToken
+        if (provided.isNullOrBlank() || provided != expected) {
+            return errorResponse(Response.Status.UNAUTHORIZED, "bad panel token")
+        }
+        return null
+    }
+
+    /** Exchange a 4-digit passcode for the long panel token.
+     *
+     *  Body: `{"passcode": "1234"}`. On match returns `{"ok":true,"token":"..."}`,
+     *  the phone stashes the token in sessionStorage and uses it for all
+     *  subsequent WS + HTTP calls. On mismatch returns 401 with the number of
+     *  attempts remaining before lockout. Once the per-IP attempt count hits
+     *  [AUTH_MAX_ATTEMPTS] within [AUTH_WINDOW_MS], that IP is locked out for
+     *  [AUTH_LOCKOUT_MS] and gets 429 + a `retry_after_ms` field so the SPA
+     *  can render a countdown. */
+    private fun handleAuthPost(session: IHTTPSession): Response {
+        if (session.method != NanoHTTPD.Method.POST) {
+            return errorResponse(Response.Status.METHOD_NOT_ALLOWED, "POST required")
+        }
+        val ip = session.remoteIpAddress ?: "unknown"
+        val now = System.currentTimeMillis()
+        val attemptState = authAttempts.computeIfAbsent(ip) { AuthAttemptState() }
+
+        synchronized(attemptState) {
+            if (attemptState.lockUntilMs > now) {
+                val retryMs = attemptState.lockUntilMs - now
+                Log.w(TAG, "auth from $ip BLOCKED — lockout ${retryMs}ms left")
+                val body = json.encodeToString(JsonElement.serializer(), buildJsonObject {
+                    put("ok", false)
+                    put("error", "rate limited")
+                    put("retry_after_ms", retryMs)
+                })
+                return newFixedLengthResponse(
+                    Response.Status.TOO_MANY_REQUESTS, "application/json", body,
+                )
+            }
+        }
+
+        val files = mutableMapOf<String, String>()
+        runCatching { session.parseBody(files) }
+        val rawBody = files["postData"]
+            ?: session.parameters["body"]?.firstOrNull()
+            ?: ""
+        val obj = runCatching { json.parseToJsonElement(rawBody).jsonObject }.getOrNull()
+            ?: return errorResponse(Response.Status.BAD_REQUEST, "bad json")
+        val passcode = obj["passcode"]?.jsonPrimitive?.contentOrNull.orEmpty()
+
+        val prefs = com.r1.launcher.notifications.NotifPrefs.get(ctx)
+        val expected = prefs.panelPasscode
+
+        if (passcode.length == 4 && passcode == expected) {
+            // Successful login — clear state so retry counter doesn't bleed
+            // into the next session.
+            authAttempts.remove(ip)
+            Log.i(TAG, "auth ok from $ip")
+            val body = json.encodeToString(JsonElement.serializer(), buildJsonObject {
+                put("ok", true)
+                put("token", prefs.panelToken)
+            })
+            return newFixedLengthResponse(Response.Status.OK, "application/json", body)
+        }
+
+        synchronized(attemptState) {
+            // Drop attempts that fell out of the sliding window before recording
+            // the new one — the window is rolling, not fixed.
+            val cutoff = now - AUTH_WINDOW_MS
+            while (attemptState.failures.isNotEmpty() && attemptState.failures.first() < cutoff) {
+                attemptState.failures.removeFirst()
+            }
+            attemptState.failures.addLast(now)
+            val attemptsLeft = AUTH_MAX_ATTEMPTS - attemptState.failures.size
+            if (attemptState.failures.size >= AUTH_MAX_ATTEMPTS) {
+                attemptState.lockUntilMs = now + AUTH_LOCKOUT_MS
+                attemptState.failures.clear()
+                Log.w(TAG, "auth from $ip LOCKED OUT for ${AUTH_LOCKOUT_MS}ms")
+                val body = json.encodeToString(JsonElement.serializer(), buildJsonObject {
+                    put("ok", false)
+                    put("error", "rate limited")
+                    put("retry_after_ms", AUTH_LOCKOUT_MS)
+                })
+                return newFixedLengthResponse(
+                    Response.Status.TOO_MANY_REQUESTS, "application/json", body,
+                )
+            }
+            Log.w(TAG, "auth FAIL from $ip — attemptsLeft=$attemptsLeft")
+            val body = json.encodeToString(JsonElement.serializer(), buildJsonObject {
+                put("ok", false)
+                put("error", "bad passcode")
+                put("attempts_left", attemptsLeft)
+            })
+            return newFixedLengthResponse(
+                Response.Status.UNAUTHORIZED, "application/json", body,
+            )
         }
     }
 
@@ -282,10 +427,38 @@ class R1WebServer(
 
     override fun openWebSocket(handshake: IHTTPSession): WebSocket {
         val uri = handshake.uri ?: ""
-        // We only expect /api/rpc but accept any path for simplicity.
+        // Validate the panel token from `?t=<token>` query param. NanoWSD
+        // doesn't let us reject a handshake with 401 — by the time
+        // openWebSocket is called, the upgrade has already been accepted.
+        // So a rejected client gets an immediate close frame in onOpen; the
+        // browser sees the WS connect "succeed" then close, which the SPA
+        // surfaces as offline. The token is never echoed in logs.
+        val expected = com.r1.launcher.notifications.NotifPrefs.get(ctx).panelToken
+        val provided = handshake.parameters["t"]?.firstOrNull()
+            ?: handshake.parameters["token"]?.firstOrNull()
+        val authed = !provided.isNullOrBlank() && provided == expected
+        if (!authed) {
+            Log.w(TAG, "ws open $uri REJECTED — bad/missing panel token")
+            return RejectedSocket(handshake)
+        }
         val sock = RpcSocket(handshake)
         Log.i(TAG, "ws open $uri (${sockets.size + 1} live)")
         return sock
+    }
+
+    /** WebSocket that closes itself immediately on open. Used to reject
+     *  handshakes that failed token validation — see [openWebSocket]. The
+     *  RFC 6455 close code 1008 (PolicyViolation) is the closest fit. */
+    inner class RejectedSocket(handshake: IHTTPSession) : WebSocket(handshake) {
+        override fun onOpen() {
+            runCatching {
+                close(WebSocketFrame.CloseCode.PolicyViolation, "bad panel token", false)
+            }
+        }
+        override fun onClose(code: WebSocketFrame.CloseCode?, reason: String?, initiatedByRemote: Boolean) {}
+        override fun onMessage(message: WebSocketFrame) {}
+        override fun onPong(pong: WebSocketFrame) {}
+        override fun onException(exception: IOException) {}
     }
 
     inner class RpcSocket(handshake: IHTTPSession) : WebSocket(handshake) {
@@ -406,61 +579,6 @@ class R1WebServer(
             put("cwd", cwd)
         }
         sockets.toList().forEach { it.sendEvent("terminal.output", payload) }
-    }
-
-    /** Push a freshly-committed Claude Code chat message to every connected
-     *  client so the web Claude tab mirrors the on-device bubble list. Both
-     *  user (echo) and assistant (reply) turns flow through here. */
-    fun broadcastClaudeMessage(role: String, text: String, error: Boolean) {
-        if (sockets.isEmpty()) return
-        val payload = buildJsonObject {
-            put("role", role)
-            put("text", text)
-            put("error", error)
-        }
-        sockets.toList().forEach { it.sendEvent("claude.message", payload) }
-    }
-
-    /** Live streaming preview (claude --print emits line-by-line; we render
-     *  the accumulated tail before commit). Empty `text` means "stream done,
-     *  preview gone" — the web client clears its live bubble. */
-    fun broadcastClaudeStreaming(text: String) {
-        if (sockets.isEmpty()) return
-        val payload = buildJsonObject { put("text", text) }
-        sockets.toList().forEach { it.sendEvent("claude.streaming", payload) }
-    }
-
-    /** Busy indicator transitions (true on send, false on completion) so
-     *  the web tab can flip its `...` indicator + disable the send button. */
-    fun broadcastClaudeBusy(busy: Boolean) {
-        if (sockets.isEmpty()) return
-        val payload = buildJsonObject { put("busy", busy) }
-        sockets.toList().forEach { it.sendEvent("claude.busy", payload) }
-    }
-
-    /** Wipe signal — fires when the on-device `clr` pill clears history so
-     *  web clients drop their bubble list too. */
-    fun broadcastClaudeCleared() {
-        if (sockets.isEmpty()) return
-        sockets.toList().forEach { it.sendEvent("claude.cleared", buildJsonObject {}) }
-    }
-
-    /** Single line of bootstrap stdout — pushed to the setup view's log pane
-     *  in real time so the user sees `apk add` / `tar -xz` / `[r1-claude]`
-     *  output instead of a 5-minute spinner with no feedback. */
-    fun broadcastClaudeSetupProgress(line: String) {
-        if (sockets.isEmpty()) return
-        val payload = buildJsonObject { put("line", line) }
-        sockets.toList().forEach { it.sendEvent("claude.setup.progress", payload) }
-    }
-
-    /** Terminal signal for the bootstrap chain — `ok=true` means the chroot
-     *  is now usable and the web UI should swap the setup pane for the
-     *  login pane. */
-    fun broadcastClaudeSetupDone(ok: Boolean) {
-        if (sockets.isEmpty()) return
-        val payload = buildJsonObject { put("ok", ok) }
-        sockets.toList().forEach { it.sendEvent("claude.setup.done", payload) }
     }
 
     /** New notification landed — push to every web client so the companion

@@ -65,14 +65,14 @@ fun LauncherRoot(
                 val items = state.notifications.asReversed()
                 when {
                     idx == 0 -> { state.back(); host.backTone() }
-                    idx - 1 in items.indices -> {
-                        val n = items[idx - 1]
-                        host.notificationActivate(n.id)
-                        host.selectTone()
-                    }
-                    items.isNotEmpty() && idx == items.size + 1 -> {
+                    items.isNotEmpty() && idx == 1 -> {
                         host.notificationsClear()
                         host.popTone()
+                    }
+                    idx - 2 in items.indices -> {
+                        val n = items[idx - 2]
+                        host.notificationActivate(n.id)
+                        host.selectTone()
                     }
                 }
             },
@@ -253,9 +253,10 @@ fun LauncherRoot(
                     3 -> { host.toggleBluetooth(!state.btOn); host.popTone() }
                     4 -> { state.openWifiShare(); host.selectTone() }
                     5 -> { host.toggleWebServer(!state.webServerEnabled); host.popTone() }
-                    6 -> { host.setWebTerminalEnabled(!state.webTerminalEnabled); host.popTone() }
-                    7 -> { state.openNtfyConfig(); host.selectTone() }
-                    8 -> { host.startWifiScan(); state.openWifiScan(); host.selectTone() }
+                    6 -> { state.openPanelPasscodeEditor(); host.selectTone() }
+                    7 -> { host.setWebTerminalEnabled(!state.webTerminalEnabled); host.popTone() }
+                    8 -> { state.openNtfyConfig(); host.selectTone() }
+                    9 -> { host.startWifiScan(); state.openWifiScan(); host.selectTone() }
                 }
             },
         )
@@ -316,6 +317,15 @@ fun LauncherRoot(
             state = state,
             onBack = { state.back(); host.backTone() },
             onSubmit = { host.wifiShareSaveEdit() },
+        )
+
+        PanelPasscodeEditor(
+            state = state,
+            onBack = { state.back(); host.backTone() },
+            onSubmit = { code ->
+                host.panelPasscodeSave(code)
+                state.back(); host.selectTone()
+            },
         )
 
         BrightnessPanel(
@@ -421,19 +431,6 @@ fun LauncherRoot(
                 host.popTone()
             },
             onPaste = { host.terminalPasteFromClipboard(); host.popTone() },
-        )
-
-        ClaudePanel(
-            state = state,
-            onBack = { state.back(); host.backTone() },
-            onSend = { text ->
-                if (text.isNotEmpty()) {
-                    host.claudeSend(text)
-                    host.popTone()
-                }
-            },
-            onClear = { host.claudeClear(); host.popTone() },
-            onPaste = { host.claudePasteFromClipboard(); host.popTone() },
         )
 
         HermesChatPanel(

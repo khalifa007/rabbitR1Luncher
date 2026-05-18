@@ -186,12 +186,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     // can delete it (it's no longer in the slots map once playback starts).
     private var openClawSpeechCurrentFile: File? = null
 
-    // Voice/STT state — shared across chat / terminal / claude.
+    // Voice/STT state — shared across chat / terminal / hermes.
     private val voicePrefs by lazy { com.r1.launcher.voice.VoicePrefs.get(this) }
     private var voiceCapture: com.r1.launcher.voice.StreamingAudioCapture? = null
     private var voiceSession: com.r1.launcher.voice.ElevenLabsRealtimeClient? = null
     /** Which sink to deliver the STT transcript to. */
-    private enum class VoiceSink { CHAT, TERMINAL, CLAUDE, HERMES_CHAT }
+    private enum class VoiceSink { CHAT, TERMINAL, HERMES_CHAT }
     private var voiceSink: VoiceSink? = null
 
     // --- meetings (transcriber) ---
@@ -476,6 +476,10 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         // Hydrate notifications from disk so the HOME badge is correct on
         // first paint after a cold start. Append-only JSON, oldest-first.
         state.notificationSoundEnabled = notifPrefs.soundEnabled
+        // 4-digit web-panel passcode — shown in Settings → Network so the user
+        // can read what to type on their phone. Loaded once at start; updated
+        // in-place by [panelPasscodeSave].
+        state.panelPasscode = notifPrefs.panelPasscode
         runCatching {
             val persisted = com.r1.launcher.notifications.NotificationStore.all(this)
             state.notifications.clear()
@@ -499,17 +503,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         // Default the remote panel and Bluetooth to off on every cold start —
         // user opts in via the Network panel.
         toggleBluetooth(false)
-
-        // Make sure the alpine bootstrap helpers are present at /data/local/tmp/.
-        // Bundling them as launcher assets means a fresh device (post-`fastboot
-        // -w`) boots with the launcher already able to install Claude Code on
-        // demand — no adb push, no shell intervention. Background thread so
-        // we never block the UI on first launch.
-        Thread { runCatching { deployClaudeScripts() } }.start()
-        // Also probe Claude's auth state in the background so the on-device
-        // tile knows whether to show the QR-redirect (logged out) or drop
-        // straight into chat (logged in). Cheap — single carroot test calls.
-        refreshClaudeAuthFlag()
 
         if (!com.r1.launcher.onboarding.OnboardingPrefs.isDone(this)) {
             state.openOnboarding()
@@ -538,7 +531,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.apps.add(AppEntry.Messages)
         state.apps.add(AppEntry.OpenClaw)
         state.apps.add(AppEntry.Terminal)
-        state.apps.add(AppEntry.Claude)
         state.apps.add(AppEntry.Hermes)
         state.apps.add(AppEntry.Meetings)
         state.apps.add(AppEntry.Settings)
@@ -815,20 +807,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             AppEntry.Terminal -> {
                 selectTone()
                 state.openTerminal()
-            }
-            AppEntry.Claude -> {
-                selectTone()
-                state.openClaude()
-                // Don't auto-start the remote panel — that's the user's
-                // explicit choice via Settings → Network → "remote panel".
-                // The Claude redirect-to-web-companion screen now only
-                // shows when the user has already turned remote panel on,
-                // so we never present a dead QR.
-                // Re-probe auth on every entry — the user may have just
-                // logged in from the web companion in another tab without
-                // hitting any of the auth-action callbacks. Cheap; runs on
-                // a background thread.
-                refreshClaudeAuthFlag()
             }
             AppEntry.Hermes -> {
                 selectTone()
@@ -1669,9 +1647,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
         toast("Connecting to $ssid...")
         Thread {
-            val escapedSsid = ssid.replace("\"", "\\\"")
-            val escapedPass = pass.replace("\"", "\\\"")
-            val cmd = "cmd wifi connect-network \"$escapedSsid\" wpa2 \"$escapedPass\""
+            // shellQuote: SSID comes from `cmd wifi list-scan-results` which
+            // returns whatever local APs broadcast — a nearby attacker can
+            // plant an SSID like `$(reboot)` and bypass the prior `"`-only
+            // escape (carroot's outer shell expanded $() before
+            // `cmd wifi connect-network` ever ran).
+            val cmd = "cmd wifi connect-network ${shellQuote(ssid)} wpa2 ${shellQuote(pass)}"
             sendToCarroot(cmd)
             Thread.sleep(2000)
             ui.post { refreshNetwork() }
@@ -1688,13 +1669,16 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             state.wifiShareConnectedClients.clear()
         }
         Thread {
-            val ssid = state.wifiShareSsid.replace("\"", "\\\"")
-            val pass = state.wifiSharePassword.replace("\"", "\\\"")
+            val ssid = state.wifiShareSsid
+            val pass = state.wifiSharePassword
             // Single one-shot form on this build: `cmd wifi start-softap <ssid> wpa2 <pass>`.
             // Capture stdout/stderr so we can surface real failure reasons.
+            // shellQuote: SSID and password are user-configured locally and
+            // less attacker-influenced than scan-result SSIDs, but apply the
+            // same safe-quoting for consistency with [connectToWifi].
             val cmdOut = "/data/local/tmp/softap_cmd.txt"
             val cmd = if (enable) {
-                "cmd wifi start-softap \"$ssid\" wpa2 \"$pass\" > $cmdOut 2>&1; chmod 666 $cmdOut"
+                "cmd wifi start-softap ${shellQuote(ssid)} wpa2 ${shellQuote(pass)} > $cmdOut 2>&1; chmod 666 $cmdOut"
             } else {
                 "cmd wifi stop-softap > $cmdOut 2>&1; chmod 666 $cmdOut"
             }
@@ -1751,18 +1735,42 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     .onFailure { android.util.Log.e("LauncherActivity", "startServer failed", it) }
                 ui.post {
                     state.webServerIp = discoverLocalIp()
+                    // The token still gates the WS handshake — exposed so
+                    // existing legacy `?t=` URLs keep working. The new UX
+                    // is the 4-digit passcode exchange at /api/auth, which
+                    // the SPA's unlock overlay handles.
+                    state.webServerToken = com.r1.launcher.notifications.NotifPrefs.get(this).panelToken
                     state.webServerEnabled = true
-                    android.util.Log.i("LauncherActivity", "web server up at ${state.webServerIp}:${state.webServerPort}")
-                    toast("remote panel: http://${state.webServerIp}:${state.webServerPort}")
+                    android.util.Log.i("LauncherActivity", "web server up at ${state.webServerIp}:${state.webServerPort} (passcode gated)")
+                    toast("remote panel: http://${state.webServerIp}:${state.webServerPort} · passcode ${state.panelPasscode}")
                 }
             }.start()
         } else {
             val srv = webServer
             webServer = null
             state.webServerEnabled = false
+            state.webServerToken = ""
             state.webServerIp = ""
             Thread { runCatching { srv?.stopServer() } }.start()
         }
+    }
+
+    override fun panelPasscodeSave(passcode: String) {
+        if (passcode.length != 4 || !passcode.all { it.isDigit() }) {
+            toast("passcode must be 4 digits")
+            return
+        }
+        val prefs = com.r1.launcher.notifications.NotifPrefs.get(this)
+        prefs.panelPasscode = passcode
+        state.panelPasscode = passcode
+        // Rotating the token kicks out any already-authenticated browsers —
+        // a passcode change is effectively a logout. Re-mirror so the
+        // Settings subtitle picks up the new token if the server is on.
+        val newToken = prefs.regeneratePanelToken()
+        if (state.webServerEnabled) {
+            state.webServerToken = newToken
+        }
+        toast("panel passcode updated")
     }
 
     /**
@@ -2100,15 +2108,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             return
         }
 
-        // Auto-route Alpine-only commands (npm, node, python, …) through the
-        // chroot wrapper so the user can type `npm install foo` directly
-        // instead of `sh /data/local/tmp/r1-alpine "npm install foo"`. Use
-        // `alpine: <anything>` to force-route any other command.
-        val resolved = resolveAlpineWrapping(trimmed)
-
+        // Terminal panel runs commands directly against Android's shell via
+        // carroot — no more alpine chroot wrapping. Users who need a real
+        // Linux env (node/npm/python/claude) open Termux.
         state.terminalBusy = true
         terminalActiveThread = sendToCarrootStreaming(
-            userCmd = resolved,
+            userCmd = trimmed,
             cwd = state.terminalCwd,
             onLine = { line -> ui.post { appendTerminalLine(line) } },
             onDone = { exitCode, newCwd ->
@@ -2180,10 +2185,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 state.terminalRecording = true
                 state.terminalPartial = ""
             }
-            VoiceSink.CLAUDE -> {
-                state.claudeRecording = true
-                state.claudePartial = ""
-            }
             VoiceSink.HERMES_CHAT -> {
                 state.hermesRecording = true
                 state.hermesPartialText = ""
@@ -2199,7 +2200,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     when (sink) {
                         VoiceSink.CHAT -> state.chatPartialText = text
                         VoiceSink.TERMINAL -> state.terminalPartial = text
-                        VoiceSink.CLAUDE -> state.claudePartial = text
                         VoiceSink.HERMES_CHAT -> state.hermesPartialText = text
                     }
                 }
@@ -2257,7 +2257,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 state.chatInputLevel = 0
             }
             VoiceSink.TERMINAL -> state.terminalRecording = false
-            VoiceSink.CLAUDE -> state.claudeRecording = false
             VoiceSink.HERMES_CHAT -> {
                 state.hermesRecording = false
                 state.hermesInputLevel = 0
@@ -2283,10 +2282,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 state.terminalRecording = false
                 state.terminalPartial = ""
             }
-            VoiceSink.CLAUDE -> {
-                state.claudeRecording = false
-                state.claudePartial = ""
-            }
             VoiceSink.HERMES_CHAT -> {
                 state.hermesRecording = false
                 state.hermesPartialText = ""
@@ -2309,13 +2304,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 if (clean.isNotEmpty()) {
                     state.terminalInput = if (state.terminalInput.isBlank()) clean
                         else state.terminalInput.trimEnd() + " " + clean
-                }
-            }
-            VoiceSink.CLAUDE -> {
-                state.claudePartial = ""
-                if (clean.isNotEmpty()) {
-                    state.claudeInput = if (state.claudeInput.isBlank()) clean
-                        else state.claudeInput.trimEnd() + " " + clean
                 }
             }
             VoiceSink.HERMES_CHAT -> {
@@ -2343,547 +2331,6 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             else state.terminalInput.trimEnd() + " " + raw
     }
 
-    // --- LauncherHost: claude code app (Panel.CLAUDE) ---
-
-    private var claudeActiveThread: Thread? = null
-
-    private fun appendClaudeMessage(msg: com.r1.launcher.claude.ClaudeMessage) {
-        state.claudeMessages.add(msg)
-        while (state.claudeMessages.size > state.claudeMessagesMax) {
-            state.claudeMessages.removeAt(0)
-        }
-        // Mirror to the web companion's claude tab (no-op when no clients).
-        runCatching { webServer?.broadcastClaudeMessage(msg.role, msg.text, msg.error) }
-    }
-
-    override fun claudeSend(text: String) {
-        val trimmed = text.trim()
-        if (trimmed.isEmpty()) return
-        if (state.claudeBusy) {
-            toast("busy — wait for reply")
-            return
-        }
-        appendClaudeMessage(com.r1.launcher.claude.ClaudeMessage(role = "user", text = trimmed))
-        state.claudeInput = ""
-        state.claudeScrollIndex = 0
-        state.claudeBusy = true
-        state.claudeStreamingText = ""
-        runCatching { webServer?.broadcastClaudeBusy(true) }
-
-        // Encode user text via base64 so any quotes / special chars / newlines
-        // round-trip cleanly through the carroot socket → ash → chroot → ash
-        // → claude pipeline without any escaping headaches. base64 is in
-        // busybox on Android and present in alpine.
-        val b64 = android.util.Base64.encodeToString(
-            trimmed.toByteArray(Charsets.UTF_8),
-            android.util.Base64.NO_WRAP,
-        )
-        // First turn omits `--continue` (no prior session); subsequent turns
-        // use `-c` to continue the most recent session, giving claude full
-        // memory of prior turns. Reset on "clear chat" pill.
-        val resumeFlag = if (state.claudeFirstTurn) "" else "-c"
-        // Pipe decoded prompt through claude --print as stdin; --output-format
-        // text gives us plain UTF-8 with no JSON wrapping. claude streams
-        // tokens to stdout line-by-line (well, mostly; we accept whatever
-        // arrives). Each line goes into state.claudeStreamingText until done.
-        val script = "echo '$b64' | base64 -d | " +
-            "sh /data/local/tmp/r1-alpine 'claude --print $resumeFlag --output-format text 2>&1'"
-
-        claudeActiveThread = sendToCarrootStreaming(
-            userCmd = script,
-            cwd = "/sdcard",
-            onLine = { line -> ui.post {
-                // Accumulate streamed lines into the live preview cell.
-                val sep = if (state.claudeStreamingText.isEmpty()) "" else "\n"
-                state.claudeStreamingText = state.claudeStreamingText + sep + line
-                runCatching { webServer?.broadcastClaudeStreaming(state.claudeStreamingText) }
-            } },
-            onDone = { exitCode, _ ->
-                ui.post {
-                    val body = state.claudeStreamingText
-                    state.claudeStreamingText = ""
-                    if (body.isNotBlank()) {
-                        appendClaudeMessage(
-                            com.r1.launcher.claude.ClaudeMessage(
-                                role = "assistant",
-                                text = body,
-                                error = exitCode != 0 && exitCode != -1,
-                            ),
-                        )
-                    } else if (exitCode != 0 && exitCode != -1) {
-                        appendClaudeMessage(
-                            com.r1.launcher.claude.ClaudeMessage(
-                                role = "assistant",
-                                text = getString(R.string.claude_exit_no_output, exitCode),
-                                error = true,
-                            ),
-                        )
-                    }
-                    state.claudeBusy = false
-                    state.claudeFirstTurn = false
-                    claudeActiveThread = null
-                    runCatching {
-                        webServer?.broadcastClaudeStreaming("")
-                        webServer?.broadcastClaudeBusy(false)
-                    }
-                }
-            },
-        )
-    }
-
-    override fun claudeClear() {
-        state.claudeMessages.clear()
-        state.claudeStreamingText = ""
-        state.claudeScrollIndex = 0
-        // Next send starts a fresh session (no `-c`) so the cleared UI
-        // matches a cleared conversation context on the claude side too.
-        state.claudeFirstTurn = true
-        runCatching {
-            webServer?.broadcastClaudeStreaming("")
-            webServer?.broadcastClaudeCleared()
-        }
-    }
-
-    override fun claudePasteFromClipboard() {
-        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
-        val raw = cm?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
-        if (raw.isEmpty()) {
-            toast("clipboard empty")
-            return
-        }
-        state.claudeInput = if (state.claudeInput.isBlank()) raw
-            else state.claudeInput.trimEnd() + " " + raw
-    }
-
-    override fun claudeRecordStart() = startVoiceCapture(VoiceSink.CLAUDE)
-    override fun claudeRecordStop()  = stopVoiceCapture()
-
-    // --- LauncherHost: claude bootstrap (alpine + claude binary deploy) ---
-
-    /**
-     * Names of every script we ship as a launcher asset. Each lives at
-     * `assets/scripts/<name>` and gets copied to `/data/local/tmp/<name>`
-     * via carroot on first run. Order doesn't matter — they're independent
-     * files. The bootstrap chain only runs `bootstrap-alpine.sh` →
-     * `setup-claude-agent.sh` → `setup-claude-user.sh` (see [claudeSetupRun]).
-     */
-    private val claudeAssetScripts = listOf(
-        "bootstrap-alpine.sh",
-        "setup-claude-agent.sh",
-        "setup-claude-user.sh",
-        "claude-auth-start.sh",
-        "claude-auth-finish.sh",
-        "r1-alpine",
-    )
-
-    /**
-     * Stage every helper script under `/data/local/tmp/` if it isn't already
-     * there, or if the bytes don't match the asset (so a launcher upgrade
-     * picks up newer script versions). Runs as `shell` for the asset → app
-     * dir copy, then carroots a `cp` to land the file in `/data/local/tmp/`
-     * (which `shell` cannot write to).
-     */
-    private fun deployClaudeScripts() {
-        val stagingDir = java.io.File(filesDir, "scripts").apply { mkdirs() }
-        claudeAssetScripts.forEach { name ->
-            val staged = java.io.File(stagingDir, name)
-            val bytes = runCatching {
-                assets.open("scripts/$name").use { it.readBytes() }
-            }.getOrNull() ?: return@forEach
-
-            // Only rewrite when content drifts — keeps the writeText cheap on
-            // boot if the launcher version didn't change the script.
-            val current = runCatching { staged.readBytes() }.getOrNull()
-            if (current == null || !current.contentEquals(bytes)) {
-                staged.writeBytes(bytes)
-            }
-        }
-        // Bridge from the launcher's private dir to /data/local/tmp/ via
-        // carroot. carroot is root, so it can read /data/data/<pkg>/files/
-        // (mode 700, owner u0_a*) and write to /data/local/tmp/. Single
-        // carroot call to amortise the socket overhead.
-        val cmd = buildString {
-            append("mkdir -p /data/local/tmp && ")
-            claudeAssetScripts.forEach { name ->
-                append("cp -f ${stagingDir.absolutePath}/$name /data/local/tmp/$name && ")
-            }
-            append("chmod 755 /data/local/tmp/*.sh /data/local/tmp/r1-alpine 2>/dev/null && ")
-            append("echo SCRIPTS_DEPLOYED")
-        }
-        val log = runCarrootBlocking(cmd, timeoutMs = 8_000)
-        if (!log.contains("SCRIPTS_DEPLOYED")) {
-            android.util.Log.w(
-                "LauncherActivity",
-                "deployClaudeScripts: carroot copy did not confirm — log: ${log.take(400)}",
-            )
-        }
-    }
-
-    // --- LauncherHost: claude OAuth + API-key auth ---
-
-    /**
-     * Run a one-shot script via carroot, capturing all stdout+stderr until
-     * the shell EOFs or [timeoutMs] elapses. Used for the auth helper scripts
-     * which print a few lines and exit. Blocks the calling thread; callers
-     * MUST be on a background thread (web RPC handler is fine).
-     */
-    private fun runCarrootBlocking(cmd: String, timeoutMs: Long = 15_000): String {
-        val sb = StringBuilder()
-        val done = java.util.concurrent.CountDownLatch(1)
-        val script = "$cmd ; printf '\\n__R1_END__\\n'"
-        val t = Thread {
-            try {
-                Socket().use { s ->
-                    s.connect(InetSocketAddress("127.0.0.1", 1337), 1500)
-                    s.soTimeout = timeoutMs.toInt()
-                    val out = s.getOutputStream()
-                    out.write((script + "\n").toByteArray())
-                    out.flush()
-                    s.shutdownOutput()
-                    val reader = s.getInputStream().bufferedReader()
-                    while (true) {
-                        val line = reader.readLine() ?: break
-                        if (line.contains("__R1_END__")) break
-                        sb.appendLine(line)
-                    }
-                }
-            } catch (e: Exception) {
-                sb.appendLine("[carroot-error] ${e.message ?: e.javaClass.simpleName}")
-            } finally {
-                done.countDown()
-            }
-        }
-        t.start()
-        if (!done.await(timeoutMs + 2_000, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-            sb.appendLine("[carroot-error] timeout")
-        }
-        return sb.toString()
-    }
-
-    /**
-     * Pull the first OAuth URL from a script log. The Anthropic flow prints
-     * URLs like https://claude.ai/oauth/authorize?... — we accept anything
-     * that starts with https:// to be lenient with future format changes.
-     */
-    private fun parseOAuthUrl(log: String): String {
-        val rx = Regex("""https://[^\s'"<>]+""")
-        return rx.findAll(log)
-            .map { it.value }
-            .firstOrNull { it.contains("oauth") || it.contains("claude.ai") || it.contains("anthropic") }
-            ?: rx.find(log)?.value
-            ?: ""
-    }
-
-    private fun chrootReady(): Boolean {
-        // "Ready" means: (1) the wrapper is staged at /data/local/tmp/r1-alpine,
-        // (2) alpine is extracted (alpine/usr exists), AND (3) the claude binary
-        // is installed (its symlink at /root/.local/bin/claude resolves). The
-        // third check is critical — without it, the auth scripts fail the
-        // moment they try to launch `claude auth login`. Mid-bootstrap we want
-        // chrootReady=false so the web UI keeps showing the "installing"
-        // state instead of prematurely flipping to the login form.
-        val log = runCarrootBlocking(
-            "test -x /data/local/tmp/r1-alpine && " +
-                "test -d /data/local/tmp/alpine/usr && " +
-                "{ test -e /data/local/tmp/alpine/root/.local/bin/claude || test -L /data/local/tmp/alpine/root/.local/bin/claude; } && " +
-                "echo READY || echo NOT_READY",
-            timeoutMs = 5_000,
-        )
-        return log.contains("READY") && !log.contains("NOT_READY")
-    }
-
-    override fun claudeAuthStatus(): com.r1.launcher.claude.ClaudeAuthStatus {
-        // OAuth surface is `claude auth login --claudeai` (FIFO flow, see
-        // claude-auth-{start,finish}.sh). It writes credentials.json under
-        // the chroot's /root/.claude/ then we sync to /home/claude/.claude/
-        // for the unprivileged claude user. Either path being non-empty is
-        // proof of an OAuth login.
-        val log = runCarrootBlocking(
-            """
-            CHROOT=NO; OAUTH=NO; KEY=NO
-            test -x /data/local/tmp/r1-alpine && \
-                test -d /data/local/tmp/alpine/usr && \
-                { test -e /data/local/tmp/alpine/root/.local/bin/claude || test -L /data/local/tmp/alpine/root/.local/bin/claude; } && CHROOT=YES
-            test -s /data/local/tmp/alpine/home/claude/.claude/.credentials.json && OAUTH=YES
-            test -s /data/local/tmp/alpine/root/.claude/.credentials.json && OAUTH=YES
-            test -s /data/local/tmp/.anthropic_key && KEY=YES
-            echo CHROOT=${'$'}CHROOT OAUTH=${'$'}OAUTH KEY=${'$'}KEY
-            """.trimIndent(),
-            timeoutMs = 5_000,
-        )
-        return com.r1.launcher.claude.ClaudeAuthStatus(
-            hasOAuth = log.contains("OAUTH=YES"),
-            hasApiKey = log.contains("KEY=YES"),
-            chrootReady = log.contains("CHROOT=YES"),
-        )
-    }
-
-    /**
-     * Background-thread refresh of [LauncherState.claudeAuthed]. Drives the
-     * "show QR redirect vs. drop into chat" decision in the Claude tile.
-     * Runs cheap carroot test calls; safe to fire from onCreate, after
-     * bootstrap completion, and after every auth-action handler.
-     */
-    private fun refreshClaudeAuthFlag() {
-        Thread {
-            runCatching {
-                val s = claudeAuthStatus()
-                runOnUiThread { state.claudeAuthed = s.hasOAuth || s.hasApiKey }
-            }
-        }.apply { isDaemon = true }.start()
-    }
-
-    override fun claudeAuthStart(): com.r1.launcher.claude.ClaudeAuthStartResult {
-        if (!chrootReady()) {
-            return com.r1.launcher.claude.ClaudeAuthStartResult(
-                url = "", log = "",
-                error = "alpine chroot not bootstrapped on this device",
-            )
-        }
-        // The script blocks for ~4s after kicking off the daemon then cats
-        // the log it has captured so far. 12s gives ample slack for slow
-        // first-token TLS handshakes to claude.ai.
-        val log = runCarrootBlocking(
-            "sh /data/local/tmp/claude-auth-start.sh",
-            timeoutMs = 12_000,
-        )
-        val url = parseOAuthUrl(log)
-        return com.r1.launcher.claude.ClaudeAuthStartResult(
-            url = url,
-            log = log,
-            error = if (url.isEmpty()) {
-                "no OAuth URL printed — check log (claude binary may be missing)"
-            } else null,
-        )
-    }
-
-    override fun claudeAuthFinish(code: String): com.r1.launcher.claude.ClaudeAuthFinishResult {
-        val trimmed = code.trim()
-        if (trimmed.isEmpty()) {
-            return com.r1.launcher.claude.ClaudeAuthFinishResult(
-                ok = false, log = "", error = "empty code",
-            )
-        }
-        // Single-quote the code so the '#' it contains doesn't start a shell
-        // comment. The script itself uses double quotes around $1 so single
-        // quotes round-trip safely.
-        val safe = trimmed.replace("'", "'\\''")
-        val log = runCarrootBlocking(
-            "sh /data/local/tmp/claude-auth-finish.sh '$safe'",
-            // Script polls up to 20s for /root/.claude/.credentials.json
-            // to land *and* runs a `claude --print` probe as the
-            // unprivileged user to verify the credentials actually
-            // authenticate. 50s gives both phases plenty of room without
-            // dropping the socket mid-verify on a slow uplink.
-            timeoutMs = 50_000,
-        )
-        // Two-tier success: the file must land AND the verify probe inside
-        // finish.sh must not surface "Not logged in". File-only success was
-        // the source of the "I logged in but it still says not logged in"
-        // bug — a code-reuse / expired-token attempt writes a partial
-        // .credentials.json (> 0 bytes) but `claude --print` rejects it.
-        val status = claudeAuthStatus()
-        val probeFailed = log.contains("Not logged in", ignoreCase = true) ||
-            log.contains("Please run /login", ignoreCase = true) ||
-            log.contains("CREDS_READABLE=NO")
-        val ok = status.hasOAuth && !probeFailed
-        runOnUiThread { state.claudeAuthed = status.hasOAuth || status.hasApiKey }
-        return com.r1.launcher.claude.ClaudeAuthFinishResult(
-            ok = ok,
-            log = log,
-            error = when {
-                !status.hasOAuth -> "no .credentials.json after finish — code may be expired or already used"
-                probeFailed -> "credentials saved but claude rejected them — use 'reset credentials' and retry with a fresh url"
-                else -> null
-            },
-        )
-    }
-
-    override fun claudeAuthVerify(): com.r1.launcher.claude.ClaudeAuthVerifyResult {
-        // Light end-to-end probe: launches `claude --print 'pong'` as the
-        // unprivileged `claude` user (the one the chat panel actually uses)
-        // and reports back whether the auth succeeded. Used by the web
-        // companion's "test login" action to disambiguate
-        // "credentials file present" from "credentials actually work".
-        if (!chrootReady()) {
-            return com.r1.launcher.claude.ClaudeAuthVerifyResult(
-                ok = false, log = "", error = "alpine chroot not bootstrapped",
-            )
-        }
-        // Just route through the r1-alpine wrapper — it handles bind-mount
-        // restoration, auth env-var assembly (skipping empties so OAuth
-        // precedence isn't poisoned), and the drop to the unprivileged
-        // claude user. Asking it to run `claude auth status` first gives a
-        // structured JSON we can parse for the actual loggedIn state, then
-        // a real `--print` round-trip confirms inference works end-to-end.
-        val cmd = "sh /data/local/tmp/r1-alpine \"claude auth status 2>&1; " +
-            "echo --probe--; claude --print 'reply only with PONG' 2>&1 | head -5\""
-        val log = runCarrootBlocking(cmd, timeoutMs = 30_000)
-        val notLoggedIn = log.contains("Not logged in", ignoreCase = true) ||
-            log.contains("Please run /login", ignoreCase = true)
-        return com.r1.launcher.claude.ClaudeAuthVerifyResult(
-            ok = !notLoggedIn && log.isNotBlank(),
-            log = log,
-            error = if (notLoggedIn) "claude says it's not logged in" else null,
-        )
-    }
-
-    @Volatile private var claudeSetupThread: Thread? = null
-
-    override fun claudeSetupRunning(): Boolean = claudeSetupThread?.isAlive == true
-
-    override fun claudeSetupStart(): Boolean {
-        if (claudeSetupRunning()) return false
-        // Run sequentially: bootstrap-alpine (downloads + extracts ~84 MB) →
-        // setup-claude-agent (writes r1-root + CLAUDE.md, installs claude
-        // binary side-effect via the install.sh fetch in step 1's chroot —
-        // here we explicitly fetch it as a separate stage so the progress UI
-        // can show distinct phases) → setup-claude-user (creates `claude`
-        // user, syncs creds dir, fixes inet gid + resolv.conf perms).
-        // Each phase wraps in `( … ) 2>&1` so stderr lands in the carroot
-        // socket → progress event stream. Without this, apk lock errors
-        // and missing-bash failures during the install go to /dev/null and
-        // the user sees a silent stall in the log pane.
-        //
-        // Phase 2 uses `/bin/ash` (not bash) to launch the installer because
-        // a freshly-bootstrapped alpine minirootfs ships only ash; bash gets
-        // installed by phase 1 (apk add bash). The installer's `#!/bin/bash`
-        // shebang resolves at exec time *inside* the curl|bash pipe, where
-        // bash IS now present.
-        // Phase 2 is gated on phase 1's chroot existing — if we just blast the
-        // chroot command, a missing /bin/ash either no-ops the export line or
-        // silently uses host bins (curl/bash not found is what the user saw).
-        // The leading `test -x` makes the failure mode loud and short-circuits
-        // the install step before it spews confusing "command not found" noise.
-        val phases = listOf(
-            "[1/4] alpine rootfs"   to "( sh /data/local/tmp/bootstrap-alpine.sh ) 2>&1",
-            "[2/4] claude binary"   to "( test -x /data/local/tmp/alpine/bin/ash || " +
-                "{ echo '[FAIL] alpine /bin/ash missing — phase 1 did not complete'; exit 1; }; " +
-                "chroot /data/local/tmp/alpine /bin/ash -c " +
-                "'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; " +
-                "export HOME=/root; cd /root && curl -fsSL https://claude.ai/install.sh | bash' ) 2>&1",
-            "[3/4] r1-root bridge"  to "( sh /data/local/tmp/setup-claude-agent.sh ) 2>&1",
-            "[4/4] claude user"     to "( sh /data/local/tmp/setup-claude-user.sh ) 2>&1",
-        )
-        val t = Thread {
-            try {
-                webServer?.broadcastClaudeSetupProgress("starting bootstrap...")
-                // Sentinel-driven short-circuit: any phase that prints a line
-                // beginning with "[FAIL]" aborts the loop. The scripts emit
-                // this on validated-failure conditions (network down, corrupt
-                // tarball, missing chroot prereq), so we can stop before
-                // chaining noise from later phases.
-                var aborted = false
-                for ((label, cmd) in phases) {
-                    if (aborted) {
-                        webServer?.broadcastClaudeSetupProgress("--- $label SKIPPED (previous phase failed) ---")
-                        continue
-                    }
-                    webServer?.broadcastClaudeSetupProgress("--- $label ---")
-                    streamCarroot(cmd) { line ->
-                        if (line.startsWith("[FAIL]")) aborted = true
-                        webServer?.broadcastClaudeSetupProgress(line)
-                    }
-                }
-                val status = claudeAuthStatus()
-                val finalMsg = if (status.chrootReady) {
-                    "DONE — claude code is ready, log in next"
-                } else {
-                    "ERROR — chroot still missing after bootstrap (check log above)"
-                }
-                webServer?.broadcastClaudeSetupProgress(finalMsg)
-                webServer?.broadcastClaudeSetupDone(status.chrootReady)
-                runOnUiThread { state.claudeAuthed = status.hasOAuth || status.hasApiKey }
-            } catch (e: Exception) {
-                webServer?.broadcastClaudeSetupProgress("[error] ${e.message ?: e.javaClass.simpleName}")
-                webServer?.broadcastClaudeSetupDone(false)
-            } finally {
-                claudeSetupThread = null
-            }
-        }
-        claudeSetupThread = t
-        t.isDaemon = true
-        t.start()
-        return true
-    }
-
-    /**
-     * Streaming carroot helper used by [claudeSetupStart]. Same shape as
-     * [sendToCarrootStreaming] but without the cwd / sentinel / pwdFile
-     * scaffolding, since these scripts don't care about cwd persistence and
-     * each one ends with an explicit `echo DONE` we don't need to gate on.
-     */
-    private fun streamCarroot(cmd: String, onLine: (String) -> Unit) {
-        try {
-            Socket().use { s ->
-                s.connect(InetSocketAddress("127.0.0.1", 1337), 1500)
-                s.soTimeout = 600_000  // 10 min ceiling per phase — alpine extract is slow
-                val out = s.getOutputStream()
-                out.write((cmd + "\n").toByteArray())
-                out.flush()
-                s.shutdownOutput()
-                val reader = s.getInputStream().bufferedReader()
-                while (true) {
-                    val line = reader.readLine() ?: break
-                    onLine(line)
-                }
-            }
-        } catch (e: Exception) {
-            onLine("[carroot] ${e.message ?: e.javaClass.simpleName}")
-        }
-    }
-
-    override fun claudeAuthReset(): Boolean {
-        // Wipe every credential surface so the next start.sh / api-key paste
-        // begins from a clean slate: both .credentials.json paths (root +
-        // claude user), the cached projects dir (which can pin a stale
-        // identity), the auth FIFO/log, and the API key file. Also kills
-        // any half-finished `claude auth login` daemon — its FIFO writer
-        // would otherwise block start.sh from creating a fresh pipe. The
-        // `|| true` tail keeps the reset idempotent for users who never got
-        // past the chroot bootstrap.
-        val log = runCarrootBlocking(
-            """
-            ALPINE=/data/local/tmp/alpine
-            for p in 'claude auth login' 'sleep 86400'; do
-                pids=${'$'}(ps -ef 2>/dev/null | grep "${'$'}p" | grep -v grep | awk '{print ${'$'}2}')
-                [ -n "${'$'}pids" ] && kill -9 ${'$'}pids 2>/dev/null || true
-            done
-            rm -f /data/local/tmp/.anthropic_key 2>/dev/null || true
-            rm -f "${'$'}ALPINE/root/.claude/.credentials.json" 2>/dev/null || true
-            rm -f "${'$'}ALPINE/home/claude/.claude/.credentials.json" 2>/dev/null || true
-            rm -rf "${'$'}ALPINE/root/.claude/projects" 2>/dev/null || true
-            rm -rf "${'$'}ALPINE/home/claude/.claude/projects" 2>/dev/null || true
-            rm -f "${'$'}ALPINE/tmp/claude-auth.log" 2>/dev/null || true
-            rm -f "${'$'}ALPINE/tmp/claude-auth.pipe" 2>/dev/null || true
-            echo RESET_OK
-            """.trimIndent(),
-            timeoutMs = 8_000,
-        )
-        val ok = log.contains("RESET_OK")
-        if (ok) runOnUiThread { state.claudeAuthed = false }
-        return ok
-    }
-
-    override fun claudeSaveApiKey(key: String): Boolean {
-        val k = key.trim()
-        if (k.isEmpty()) return false
-        // Light validation: real keys start with `sk-ant-`. Don't be strict
-        // about exact length (Anthropic has rotated formats). Reject anything
-        // with a newline or quote — we shell-interpolate this.
-        if (k.contains('\n') || k.contains('\'') || k.contains('"')) return false
-        // Write via carroot so the file is owned by root and readable by the
-        // r1-alpine wrapper (which sources it as ANTHROPIC_API_KEY).
-        val log = runCarrootBlocking(
-            "printf '%s\\n' '$k' > /data/local/tmp/.anthropic_key && " +
-                "chmod 600 /data/local/tmp/.anthropic_key && echo OK",
-            timeoutMs = 5_000,
-        )
-        val ok = log.contains("OK")
-        if (ok) runOnUiThread { state.claudeAuthed = true }
-        return ok
-    }
-
     override fun copyToClipboard(text: String, label: String) {
         if (text.isEmpty()) {
             toast("nothing to copy")
@@ -2907,32 +2354,15 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         return "$short \$"
     }
 
-    /** Commands that only exist inside the Alpine chroot. Typing one of these
-     *  in the terminal panel transparently re-routes through the r1-alpine
-     *  wrapper so the user doesn't need the `sh /data/local/tmp/r1-alpine "…"`
-     *  prefix every time. */
-    private val alpineCommands = setOf(
-        "npm", "node", "npx", "yarn", "pnpm",
-        "python", "python3", "pip", "pip3",
-        "apk", "openclaw", "claude",
-    )
-
-    private fun resolveAlpineWrapping(cmd: String): String {
-        // Explicit override: `alpine: <anything>` always routes through chroot.
-        if (cmd.startsWith("alpine:")) {
-            return wrapAlpine(cmd.removePrefix("alpine:").trim())
-        }
-        // Auto-route on the first whitespace-separated token.
-        val firstToken = cmd.split(Regex("\\s+")).firstOrNull().orEmpty()
-        return if (firstToken in alpineCommands) wrapAlpine(cmd) else cmd
-    }
-
-    private fun wrapAlpine(cmd: String): String {
-        // Escape backslashes first, then double quotes, so the shell sees
-        // the original command verbatim inside the wrapper's "$*" arg.
-        val esc = cmd.replace("\\", "\\\\").replace("\"", "\\\"")
-        return "sh /data/local/tmp/r1-alpine \"$esc\""
-    }
+    /** Quote `s` for safe inclusion in a shell command that will be evaluated
+     *  by sh/bash. Wraps in single quotes and escapes any embedded `'` as
+     *  `'\''` (close, escape, reopen) — the canonical POSIX-shell quoting
+     *  pattern. Inside single quotes the shell treats every character
+     *  literally: no $VAR expansion, no backtick, no \-escape. Use this
+     *  anywhere user-supplied or attacker-controlled strings (SSIDs, file
+     *  names, passwords, terminal commands) are interpolated into a shell
+     *  command sent to carroot. */
+    private fun shellQuote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
 
     // --- LauncherHost: openclaw ---
 
@@ -4264,8 +3694,6 @@ override fun hermesPasteServerUrlFromClipboard() {
                             // Push-to-talk dictation. Stop fires on the matching UP
                             // (handled below in the sideLongFired branch).
                             terminalRecordStart()
-                        } else if (state.panel == Panel.CLAUDE) {
-                            claudeRecordStart()
                         }
                     }
                 }
@@ -4275,7 +3703,6 @@ override fun hermesPasteServerUrlFromClipboard() {
                         // start side-effect on UP for the terminal PTT path so
                         // recording stops when the user releases.
                         if (state.panel == Panel.TERMINAL) terminalRecordStop()
-                        else if (state.panel == Panel.CLAUDE) claudeRecordStop()
                         sideLongFired = false
                         return true
                     }
@@ -4953,10 +4380,22 @@ override fun hermesPasteServerUrlFromClipboard() {
     }
 
     override fun notificationsClear() {
+        val before = state.notifications.size
+        // Stamp the clear time BEFORE wiping anything else — NtfySubscriber's
+        // frame handler reads this as a time fence; any frame whose server
+        // `time` is older than this gets dropped on the way in. Synchronous
+        // commit so a process death between here and the next reconnect
+        // can't lose the fence.
+        ntfyPrefs.clearedAtMs = System.currentTimeMillis()
         com.r1.launcher.notifications.NotificationStore.clear(this)
         state.notifications.clear()
         state.notificationsUnread = 0
         state.notificationBanner = null
+        // Reset wheel focus back to the back-pill: the header-clear row only
+        // renders while items.isNotEmpty(), so leaving focus at 1 here would
+        // strand the user on a row that no longer paints anything until they
+        // wheel away.
+        state.notificationsFocus = 0
         // Drop the ntfy resume cursor AND fence the live subscriber: explicit
         // clear is the user's signal that they don't want any more history.
         // Bumping the subscriber's generation cancels the in-flight stream so
@@ -4965,6 +4404,10 @@ override fun hermesPasteServerUrlFromClipboard() {
         // repost a cleared notification. Falls back to a direct cursor wipe
         // if the subscriber isn't running.
         ntfySubscriber?.resetCursorAndResync() ?: run { ntfyPrefs.lastMessageId = "" }
+        android.util.Log.i(
+            "NotifClear",
+            "cleared=$before stateNow=${state.notifications.size} fenceMs=${ntfyPrefs.clearedAtMs} cursor='${ntfyPrefs.lastMessageId}'",
+        )
     }
 
     override fun toggleNotificationSound(enabled: Boolean) {
@@ -4975,12 +4418,9 @@ override fun hermesPasteServerUrlFromClipboard() {
     // --- credentials panel ---
 
     /** Refresh every credential display mirror in [state] from its backing
-     *  store. Cheap — three prefs reads + one carroot probe for the file
-     *  on disk. Called from onCreate + after every credentialsSaveField /
-     *  credentialsClearField. */
+     *  store. Cheap — two prefs reads + one token tail. Called from onCreate
+     *  + after every credentialsSaveField / credentialsClearField. */
     private fun refreshCredentialsDisplay() {
-        state.hasAnthropicKey = anthropicKeyFileExists()
-        state.anthropicKeyTail = if (state.hasAnthropicKey) readAnthropicKeyTail() else ""
         // ElevenLabs key — reuse existing hasVoiceKey/voiceKeyTail since
         // refreshVoiceKeyState() already maintains them.
         // Hermes key
@@ -4990,21 +4430,6 @@ override fun hermesPasteServerUrlFromClipboard() {
         // Webhook token — always visible (gen-on-read), no "set" gate.
         state.webhookTokenDisplay = notifPrefs.webhookToken.takeLast(8)
     }
-
-    /** Probe `/data/local/tmp/.anthropic_key` via carroot — file lives
-     *  outside the app sandbox because the alpine wrapper reads it as root. */
-    private fun anthropicKeyFileExists(): Boolean = runCatching {
-        // Best-effort sync probe — use the existing carroot helper but with
-        // a tight read window. Don't block UI for long; the result feeds a
-        // status pill, stale-on-error is acceptable.
-        val out = sendToCarrootCapture("test -s /data/local/tmp/.anthropic_key && echo Y")
-        out.contains("Y")
-    }.getOrDefault(false)
-
-    private fun readAnthropicKeyTail(): String = runCatching {
-        val out = sendToCarrootCapture("tail -c 5 /data/local/tmp/.anthropic_key 2>/dev/null").trim()
-        out.takeLast(4)
-    }.getOrDefault("")
 
     /** Short blocking carroot helper for the small probes above. Distinct
      *  from sendToCarrootStreaming because we want the captured stdout for
@@ -5024,17 +4449,15 @@ override fun hermesPasteServerUrlFromClipboard() {
 
     override fun credentialsRowActivate(idx: Int) {
         // Row layout (kept in sync with SettingsCredentialsPanel):
-        //   1=anthropic, 2=elevenlabs, 3=hermes, 4=ntfy_topic,
-        //   5=webhook (regenerate action, no keyboard)
+        //   1=elevenlabs, 2=hermes, 3=ntfy_topic, 4=webhook (regenerate)
         when (idx) {
-            1 -> { state.credentialsEditField = "anthropic"; state.credentialsEditInput = "" }
-            2 -> { state.credentialsEditField = "elevenlabs"; state.credentialsEditInput = "" }
-            3 -> { state.credentialsEditField = "hermes"; state.credentialsEditInput = "" }
-            4 -> {
+            1 -> { state.credentialsEditField = "elevenlabs"; state.credentialsEditInput = "" }
+            2 -> { state.credentialsEditField = "hermes"; state.credentialsEditInput = "" }
+            3 -> {
                 state.credentialsEditField = "ntfy_topic"
                 state.credentialsEditInput = ntfyPrefs.topic
             }
-            5 -> {
+            4 -> {
                 // Webhook token — regenerate in place, no keyboard.
                 regenerateWebhookToken()
                 toast("new webhook token: …${state.webhookTokenDisplay}")
@@ -5045,19 +4468,6 @@ override fun hermesPasteServerUrlFromClipboard() {
     override fun credentialsSaveField(field: String, value: String) {
         val v = value.trim()
         when (field) {
-            "anthropic" -> {
-                if (v.isEmpty()) {
-                    toastFail("paste a key first")
-                    return
-                }
-                if (claudeSaveApiKey(v)) {
-                    toast("anthropic key saved")
-                    refreshCredentialsDisplay()
-                    refreshClaudeAuthFlag()
-                } else {
-                    toastFail("save failed (carroot)")
-                }
-            }
             "elevenlabs" -> {
                 voiceSaveKey(v)
                 refreshCredentialsDisplay()
@@ -5087,12 +4497,6 @@ override fun hermesPasteServerUrlFromClipboard() {
 
     override fun credentialsClearField(field: String) {
         when (field) {
-            "anthropic" -> {
-                runCatching { sendToCarroot("rm -f /data/local/tmp/.anthropic_key") }
-                toast("anthropic key cleared")
-                refreshCredentialsDisplay()
-                refreshClaudeAuthFlag()
-            }
             "elevenlabs" -> {
                 voiceClearKey()
                 refreshCredentialsDisplay()
@@ -5167,11 +4571,11 @@ override fun hermesPasteServerUrlFromClipboard() {
                 // surface it from NTFY_CONFIG (where it would silently
                 // never render), jump to the credentials panel with the
                 // ntfy.sh topic row focused and the keyboard pre-opened.
-                // Row order in SettingsCredentialsPanel:
-                //   0=header, 1=anthropic, 2=elevenlabs, 3=hermes,
-                //   4=ntfy.sh topic, 5=webhook token
+                // Row order in SettingsCredentialsPanel (post-Termux rework):
+                //   0=header, 1=elevenlabs, 2=hermes, 3=ntfy.sh topic,
+                //   4=webhook token
                 state.openSettingsCredentials()
-                state.credentialsFocus = 4
+                state.credentialsFocus = 3
                 state.credentialsEditField = "ntfy_topic"
                 state.credentialsEditInput = ntfyPrefs.topic
             }
@@ -5235,7 +4639,7 @@ override fun hermesPasteServerUrlFromClipboard() {
     private fun playNotificationChime() {
         if (!state.notificationSoundEnabled) return
         val recording = state.chatRecording || state.terminalRecording ||
-            state.claudeRecording || state.hermesRecording
+            state.hermesRecording
         if (recording) return
         // MediaPlayer.isPlaying throws IllegalStateException when the player
         // is in the END / error state (post-release). The TTS slots may hold

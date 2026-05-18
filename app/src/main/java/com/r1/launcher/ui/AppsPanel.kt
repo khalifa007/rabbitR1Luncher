@@ -171,7 +171,6 @@ private fun AppCard(
         AppEntry.OpenClaw -> "_r1_openclaw"
         AppEntry.Messages -> "_r1_messages"
         AppEntry.Terminal -> "_r1_terminal"
-        AppEntry.Claude -> "_r1_claude"
         AppEntry.Hermes -> "_r1_hermes"
         AppEntry.Meetings -> "_r1_meetings"
     }
@@ -179,14 +178,12 @@ private fun AppCard(
     val isOpenClaw = entry is AppEntry.OpenClaw
     val isMessages = entry is AppEntry.Messages
     val isTerminal = entry is AppEntry.Terminal
-    val isClaude = entry is AppEntry.Claude
     val isHermes = entry is AppEntry.Hermes
     val isMeetings = entry is AppEntry.Meetings
     val settingsPainter = if (isSettings) painterResource(R.drawable.ic_settings) else null
     val openClawPainter = if (isOpenClaw) painterResource(R.drawable.ic_wifi_arc) else null
     val messagesPainter = if (isMessages) painterResource(R.drawable.ic_messages) else null
     val terminalPainter = if (isTerminal) painterResource(R.drawable.ic_terminal) else null
-    val claudePainter = if (isClaude) painterResource(R.drawable.ic_claude) else null
     val hermesPainter = if (isHermes) painterResource(R.drawable.ic_hermes) else null
     val meetingsPainter = if (isMeetings) painterResource(R.drawable.ic_meetings) else null
 
@@ -200,7 +197,6 @@ private fun AppCard(
         AppEntry.OpenClaw -> stringResource(R.string.app_label_openclaw)
         AppEntry.Messages -> stringResource(R.string.app_label_messages)
         AppEntry.Terminal -> stringResource(R.string.app_label_terminal)
-        AppEntry.Claude -> stringResource(R.string.app_label_claude)
         AppEntry.Hermes -> stringResource(R.string.app_label_hermes)
         AppEntry.Meetings -> stringResource(R.string.app_label_meetings)
     }
@@ -305,7 +301,7 @@ private fun AppCard(
                 .fillMaxWidth()
                 .padding(start = 16.dp, end = 16.dp, top = 16.dp),
         ) {
-            val effectivePainter = settingsPainter ?: openClawPainter ?: messagesPainter ?: terminalPainter ?: claudePainter ?: hermesPainter ?: meetingsPainter ?: iconPainter
+            val effectivePainter = settingsPainter ?: openClawPainter ?: messagesPainter ?: terminalPainter ?: hermesPainter ?: meetingsPainter ?: iconPainter
             Text(
                 text = label.replaceFirstChar { it.titlecase() },
                 color = Color.Black,
@@ -334,7 +330,6 @@ private fun cardBackground(entry: AppEntry, idx: Int): Color = when (entry) {
     AppEntry.OpenClaw -> AppThemes.OpenClaw
     AppEntry.Messages -> AppThemes.Messages
     AppEntry.Terminal -> AppThemes.Terminal
-    AppEntry.Claude -> AppThemes.Claude
     AppEntry.Hermes -> AppThemes.Hermes
     AppEntry.Meetings -> AppThemes.Meetings
 }
@@ -345,7 +340,6 @@ private fun appKey(entry: AppEntry): String = when (entry) {
     AppEntry.OpenClaw -> "openclaw/openclaw"
     AppEntry.Messages -> "messages/messages"
     AppEntry.Terminal -> "terminal/terminal"
-    AppEntry.Claude -> "claude/claude"
     AppEntry.Hermes -> "hermes/hermes"
     AppEntry.Meetings -> "meetings/meetings"
 }
@@ -356,7 +350,6 @@ private fun appContentType(entry: AppEntry): String = when (entry) {
     AppEntry.OpenClaw -> "openclaw"
     AppEntry.Messages -> "messages"
     AppEntry.Terminal -> "terminal"
-    AppEntry.Claude -> "claude"
     AppEntry.Hermes -> "hermes"
     AppEntry.Meetings -> "meetings"
 }

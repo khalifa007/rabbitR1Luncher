@@ -41,34 +41,11 @@ Single Activity (`LauncherActivity`) with one `setContent { R1Theme { LauncherRo
 
 **State** (`LauncherState`): plain Kotlin class with `mutableStateOf`/`mutableIntStateOf`/`mutableStateListOf` fields. No ViewModel — Activity has `configChanges="keyboardHidden|orientation|screenSize|uiMode"` + `launchMode=singleTask`, so it never recreates.
 
-**Panel state machine** on `state.panel`:
-`HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, CLAUDE, HERMES_CHAT, HERMES_CONFIG, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS`
+**Panel state machine** on `state.panel`: ~35 panels — HOME, ONBOARDING, APPS, SETTINGS+subscreens (DISPLAY/SOUND/DEVICE/ABOUT/VOICE/LANGUAGE…), NETWORK + WIFI_SCAN/PASSWORD/SHARE, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_* (QR/CHAT/CAMERA/SETTINGS/SESSIONS), MESSAGES/MESSAGES_THREAD, TERMINAL, CLAUDE, HERMES_CHAT/CONFIG, TRANSCRIBER_* (LIST/RECORDING/DETAIL/SETTINGS). Authoritative list in `LauncherState.Panel`.
 
-Each panel has its own focus int; brightness/volume use level fields. Home dock + system-tray sheet were removed in 3.16; wheel press on clock jumps straight to apps grid. `back()` unwind is intentional and asymmetric:
+Each panel has its own focus int. `back()` unwinds asymmetrically (e.g. BRIGHTNESS → SETTINGS_DISPLAY → SETTINGS → APPS → HOME; WIFI_PASSWORD → WIFI_SCAN → NETWORK; HERMES_CONFIG → HERMES_CHAT if `hermesConfigCameFromChat` else APPS; TRANSCRIBER_RECORDING back also calls `host.transcriberStopRecording`). Full table in `LauncherNav.kt`. Home dock + system-tray sheet removed in 3.16; wheel press on clock jumps straight to apps grid.
 
-- `BRIGHTNESS → SETTINGS_DISPLAY → SETTINGS → APPS → HOME`, `VOLUME / UI_VOLUME → SETTINGS_SOUND → SETTINGS`, `FACTORY_CONFIRM → SETTINGS_DEVICE → SETTINGS`
-- `NETWORK → SETTINGS` (or `ONBOARDING` if `isOnboarding`); `SETTINGS_LANGUAGE → SETTINGS_DEVICE`
-- `WIFI_SCAN → NETWORK` (or `ONBOARDING`), `WIFI_PASSWORD → WIFI_SCAN`
-- `WIFI_SHARE → NETWORK`, `WIFI_SHARE_EDIT → WIFI_SHARE`
-- `OPENCLAW_QR → APPS` (or `OPENCLAW_SETTINGS` when `qrScanMode == OPENAI_KEY`)
-- `OPENCLAW_CHAT → APPS`, `OPENCLAW_SETTINGS / OPENCLAW_SESSIONS → OPENCLAW_CHAT`, `OPENCLAW_CAMERA → OPENCLAW_CHAT`
-- `MESSAGES → APPS`, `MESSAGES_THREAD → MESSAGES`, `TERMINAL → APPS`, `CLAUDE → APPS`
-- `HERMES_CHAT → APPS`, `HERMES_CONFIG → HERMES_CHAT` (if `hermesConfigCameFromChat`) else `APPS`
-- `SETTINGS_VOICE_TUNING / SETTINGS_VOICE_SUBSCRIPTION → SETTINGS_VOICE`
-- `TRANSCRIBER_LIST → APPS`, `TRANSCRIBER_RECORDING / TRANSCRIBER_DETAIL / TRANSCRIBER_SETTINGS → TRANSCRIBER_LIST` (back from RECORDING also stops the FGS via `host.transcriberStopRecording`)
-
-**Apps list is typed**: `state.apps : MutableList<AppEntry>`, sealed class with `Real(ResolveInfo)`, `Settings`, `OpenClaw`, `Messages`, `Terminal`, `Claude`, `Hermes`, `Meetings`. `LauncherActivity.loadApps()` appends synthetics after real apps in order: `Messages`, `OpenClaw`, `Terminal`, `Claude`, `Hermes`, `Meetings`, `Settings`. `launchApp(idx)` switches on type:
-
-- `Real` — fires the launcher intent
-- `Settings` — `WRITE_SETTINGS` grant check, then `state.openSettings()`
-- `OpenClaw` — paired → `openClawStartSession()` + `openOpenClawChat()`; else camera-perm + `openOpenClawQr()`
-- `Messages` — `READ_SMS` grant + `openMessages()` + `loadSmsConversations()`
-- `Terminal` — `openTerminal()` (no perm; uses carroot)
-- `Claude` — `openClaude()` (routes user text → `claude --print [-c]` via carroot+chroot)
-- `Hermes` — `hydrateHermesStateFromPrefs()` + `openHermesChat()` if `hermesPrefs.hasConfig()`, else `openHermesConfig()` (no perm; pure HTTPS to a user-provided gateway)
-- `Meetings` — `RECORD_AUDIO` grant + `transcriberOpen()` (binds the microphone-typed FGS, opens `TRANSCRIBER_LIST`)
-
-Adding a synthetic: every `when` branch in `AppsPanel.kt` (key, painter, label, `appKey`, `appContentType`) needs the new case — sealed class enforces it but the icon switch is easy to miss.
+**Apps list is typed**: `state.apps : MutableList<AppEntry>`, sealed class — `Real(ResolveInfo)`, `Settings`, `OpenClaw`, `Messages`, `Terminal`, `Claude`, `Hermes`, `Meetings`. `LauncherActivity.loadApps()` appends synthetics after real apps in order: Messages, OpenClaw, Terminal, Claude, Hermes, Meetings, Settings. `launchApp(idx)` dispatches by type with the appropriate runtime-perm check (`WRITE_SETTINGS`, camera, `READ_SMS`, `RECORD_AUDIO`) before calling its `openX()` host method. Adding a synthetic: every `when` branch in `AppsPanel.kt` (key, painter, label, `appKey`, `appContentType`) needs the new case — sealed class enforces it but the icon switch is easy to miss.
 
 **Navigation** lives in `LauncherNav.kt` as extension functions on `LauncherState`: `wheelUp(host)`, `wheelDown(host)`, `activate(host)`, `backPressed(host)`. Pure state mutations; side effects go through the `LauncherHost` interface implemented by `LauncherActivity` (app launch, system intents, brightness/volume, tones, OpenClaw, SMS, web-server, terminal, claude, clipboard).
 
@@ -76,15 +53,7 @@ Adding a synthetic: every `when` branch in `AppsPanel.kt` (key, painter, label, 
 
 **Key dispatch**: `Activity.dispatchKeyEvent` routes the same superset as the old launcher (volume, dpad, page up/down, headsethook, media_play_pause, call, assist, voice_assist) into `state.wheelUp/wheelDown/activate/backPressed`. The isHandled allowlist must stay in sync with the dispatcher. Debug overlay prints `key <code> sc <scan> NAME` on every keydown.
 
-**Side button (BUTTON_1)**: keylayout (`device/rabbit/r1/keylayout/mtk-kpd.kl`) remaps physical KEY_POWER (116) → `BUTTON_1 WAKE` so the launcher sees raw DOWN/UP events instead of `onNewIntent`. State machine in `dispatchKeyEvent`:
-
-- **Single tap on HOME** → `lockScreen()` (PowerService accessibility action)
-- **Single tap elsewhere** → `state.activate(host)`
-- **Double tap anywhere** → `state.goHome()` (window: `SIDE_DOUBLE_PRESS_MS = 350`)
-- **Long press on HOME** → `PowerService.openPowerDialog()` (window: `SIDE_LONG_PRESS_MS = 500`)
-- **Long press in OPENCLAW_CHAT** — push-to-talk; long-press fires `openClawRecordStart()`, UP fires `openClawRecordStop()`. Same dispatch model in TERMINAL and CLAUDE panels for dictation.
-
-State: `sideDownAtMs`/`sideLastShortUpMs`/`sideLongFired`/`pendingSideSingle`. **Don't map to HOME or POWER** — HOME collapses DOWN/UP into one `onNewIntent` (kills timing); POWER is intercepted by `PhoneWindowManager`.
+**Side button (BUTTON_1)**: keylayout (`device/rabbit/r1/keylayout/mtk-kpd.kl`) remaps physical KEY_POWER (116) → `BUTTON_1 WAKE` so the launcher sees raw DOWN/UP events. State machine in `dispatchKeyEvent`: single-tap on HOME = `lockScreen()`, single-tap elsewhere = `state.activate(host)`, double-tap = `state.goHome()` (`SIDE_DOUBLE_PRESS_MS=350`), long-press on HOME = `PowerService.openPowerDialog()` (`SIDE_LONG_PRESS_MS=500`), long-press in OPENCLAW_CHAT/TERMINAL/CLAUDE/HERMES_CHAT = push-to-talk via `*RecordStart()`/`*RecordStop()`. State vars: `sideDownAtMs`/`sideLastShortUpMs`/`sideLongFired`/`pendingSideSingle`. **Don't map to HOME or POWER** — HOME collapses DOWN/UP into one `onNewIntent`; POWER is intercepted by `PhoneWindowManager`.
 
 **Animation tokens** (`ui/Common.kt`): `ANIM_OPEN_MS = 220`, `ANIM_CLOSE_MS = 170`, `ANIM_FOCUS_MS = 140`, `FOCUS_SCALE = 1.04f`, `UNFOCUS_ALPHA = 0.55f`. `Modifier.focusAnim(focused)` applies scale+alpha via `animateFloatAsState`.
 
@@ -191,76 +160,41 @@ Server auto-starts in `onCreate`; toggle via Settings → Network → "remote pa
 
 ## OpenClaw chat panel
 
-Built-in client for an [openclaw](https://github.com/openclaw/openclaw) AI gateway. Pair via QR, chat with streaming replies. Voice input + assistant readback go through ElevenLabs (see **Voice (Settings → Voice)** section below). OpenClaw-specific files in `app/src/main/java/com/r1/launcher/openclaw/`:
-
-| File | Role |
-|---|---|
-| `SetupCode.kt` | Decode URL-safe Base64 QR → `{url, bootstrapToken?, token?, password?}`. |
-| `OpenClawPrefs.kt` | EncryptedSharedPreferences (`openclaw.secure`) for `gateway.url`, `gateway.bootstrap`, `gateway.deviceToken`, `gateway.token`. Plain prefs (`openclaw.plain`) for random `node.instanceId`, `chat.hide`, `chat.fontSize`. |
-| `DeviceIdentityStore.kt` | Ed25519 keypair via Bouncy Castle lightweight; persisted at `filesDir/openclaw/identity/device.json`. Builds the pipe-delimited v3 auth payload. |
-| `GatewaySession.kt` | OkHttp WebSocket + JSON-RPC. One client, one socket, `pending: Map<id, CompletableDeferred>`, `onEvent` callback. |
-| `ChatMessage.kt` | `data class ChatMessage(role, text, streaming, timestamp)` + JsonArray flatteners. |
+Built-in client for an [openclaw](https://github.com/openclaw/openclaw) AI gateway. Pair via QR, chat with streaming replies. Voice input + assistant readback go through ElevenLabs (see Voice below). Files in `app/src/main/java/com/r1/launcher/openclaw/`: `SetupCode.kt` (URL-safe Base64 QR decode), `OpenClawPrefs.kt` (EncryptedSharedPreferences `openclaw.secure` for url/bootstrap/deviceToken/token + plain `openclaw.plain` for `node.instanceId`/`chat.hide`/`chat.fontSize`), `DeviceIdentityStore.kt` (Ed25519 via Bouncy Castle, persisted at `filesDir/openclaw/identity/device.json`, pipe-delimited v3 auth payload), `GatewaySession.kt` (OkHttp WS + JSON-RPC), `ChatMessage.kt`.
 
 ### Protocol gotchas
 
-- **Role + scopes**: connect as `role: "operator"` with `scopes: ["operator.read", "operator.write", "operator.talk.secrets"]`. The `node` role can't access chat methods. `PAIRING_SETUP_BOOTSTRAP_PROFILE` only allows `operator.*`.
-- **Server-issued nonce**: don't generate your own. Wait for the `connect.challenge` event after opening the socket; use that nonce in the signed payload + `device.nonce`.
-- **`chat.subscribe` requires admin** unless wrapped in `node.event`: `request("node.event", {event: "chat.subscribe", payloadJSON: "..."})`. `chat.send` and `chat.history` work directly.
-- **`client.id` is allowlisted** — use `"openclaw-android"`. Anything else gets rejected.
-- **No URL port mangling** — gateway URL may be plain `wss://host`. OkHttp picks 443/80 from scheme. `withDefaultPort(18789)` from earlier broke `wss://claw.luma.om`.
-- **Audio attachments are NOT auto-transcribed** by the gateway — forwarded to LLM as multimodal input. With a text-only LLM you get "I didn't receive any text". That's why we transcribe client-side before `chat.send`.
+- **Role + scopes**: connect as `role: "operator"` with `scopes: ["operator.read", "operator.write", "operator.talk.secrets"]`. `node` role can't access chat methods; `PAIRING_SETUP_BOOTSTRAP_PROFILE` only grants `operator.*`.
+- **Server-issued nonce**: wait for `connect.challenge` after opening the socket; use that nonce in the signed payload + `device.nonce`. Don't generate your own.
+- **`chat.subscribe` requires admin** unless wrapped: `request("node.event", {event: "chat.subscribe", payloadJSON: "..."})`. `chat.send` and `chat.history` work directly.
+- **`client.id` allowlisted** — use `"openclaw-android"`.
+- **No URL port mangling** — gateway URL may be plain `wss://host`; OkHttp picks 443/80 from scheme.
+- **Audio attachments are NOT auto-transcribed** by the gateway — transcribe client-side before `chat.send` or text-only LLMs return "I didn't receive any text".
+- Admin session methods (`sessions.compact/reset/delete/cleanup/restore/patch`) are unreachable for operator clients — use new-thread switch, not `sessions.reset`. See memory `project_openclaw_admin_methods_unreachable.md`.
 
 ## Voice (Settings → Voice)
 
-Single source of truth for ElevenLabs key + voice picker + auto-speak toggle. Used by **OpenClaw chat / Terminal / Claude** for STT, and by **OpenClaw chat** for assistant TTS readback. Files in `app/src/main/java/com/r1/launcher/voice/`:
-
-| File | Role |
-|---|---|
-| `VoicePrefs.kt` | EncryptedSharedPreferences (`voice.secure`) for `elevenlabs.key`. Plain prefs (`voice.plain`) for `voice.enabled` (auto-speak toggle) + `voice.id` (Rachel default). 4-voice catalog hardcoded in companion. |
-| `StreamingAudioCapture.kt` | Mic → live PCM frames (16 kHz mono PCM_16BIT, VOICE_RECOGNITION). Emits `onPcm(chunk)` per ~80ms. 60s session cap. |
-| `ElevenLabsRealtimeClient.kt` | Scribe v2 Realtime WS: `wss://api.elevenlabs.io/v1/speech-to-text/realtime?model_id=scribe_v2_realtime&audio_format=pcm_16000&language_code=en&commit_strategy=vad`. `xi-api-key` header. PCM sent base64-in-JSON (`message_type=input_audio_chunk`). Server emits `partial_transcript` (live) and `committed_transcript` (final, on VAD silence or explicit commit). |
-| `ElevenLabsTtsClient.kt` | Flash v2.5 REST `/stream`: POST `/v1/text-to-speech/{voice_id}/stream?output_format=mp3_22050_32&optimize_streaming_latency=4` with `{"text":..., "model_id":"eleven_flash_v2_5"}`. Streams chunked MP3 → `cacheDir/openclaw-voice/assistant.mp3` → MediaPlayer. Returns OkHttp `Call` for mid-flight `cancel()`. `mp3_22050_32` (~3 KB/s) is ~4× smaller than `mp3_44100_128`, intelligible for speech. Errors parsed from `{"detail":{"status":...,"message":...}}`. |
+Single source of truth for ElevenLabs key + voice picker + auto-speak toggle. Used by **OpenClaw chat / Terminal / Claude / Hermes** for STT, and by chat panels (OpenClaw / Hermes) for assistant TTS readback. Files in `voice/`: `VoicePrefs.kt` (EncryptedSharedPreferences `voice.secure` for `elevenlabs.key`, plain `voice.plain` for `voice.enabled` + `voice.id`; 4-voice catalog hardcoded — rachel `21m00Tcm4TlvDq8ikWAM` default, adam `pNInz6obpgDQGcFmaJgB`, aria `9BWtsMINqrJLrRacOk9x`, sarah `EXAVITQu4vr4xnSDxMaL`), `StreamingAudioCapture.kt` (mic → 16 kHz mono PCM_16BIT VOICE_RECOGNITION frames, ~80ms chunks, 60s cap), `ElevenLabsRealtimeClient.kt` (Scribe v2 WS `wss://api.elevenlabs.io/v1/speech-to-text/realtime?model_id=scribe_v2_realtime&audio_format=pcm_16000&language_code=en&commit_strategy=vad`, `xi-api-key` header, PCM base64-in-JSON, emits `partial_transcript`/`committed_transcript`), `ElevenLabsTtsClient.kt` (Flash v2.5 REST `/v1/text-to-speech/{voice_id}/stream?output_format=mp3_22050_32&optimize_streaming_latency=4`, streams MP3 → `cacheDir/openclaw-voice/assistant.mp3` → MediaPlayer, returns `Call` for `cancel()`; `mp3_22050_32` ~3 KB/s, ~4× smaller than 44100_128 and intelligible for speech).
 
 ### Voice flow
 
-`LauncherActivity.startVoiceCapture(sink)` is the single entry — opens an `ElevenLabsRealtimeClient`, drives a `StreamingAudioCapture` into it, and routes the committed transcript to one of three sinks:
+`LauncherActivity.startVoiceCapture(sink)` is the single entry. Sinks: `CHAT` (renders `state.chatPartialText`, auto-sends via `openClawSendText`), `TERMINAL` (renders `state.terminalPartial`, pastes into `state.terminalInput` — no auto-exec), `CLAUDE` (renders `state.claudePartial`, pastes into `state.claudeInput`), `HERMES_CHAT` (parallel to CHAT). Side-button long-press in those panels calls the relevant `*RecordStart()` host method; release calls `stopVoiceCapture()` which sends `commit:true` and waits for `committed_transcript`.
 
-| Sink | UI render | Action on committed transcript |
-|---|---|---|
-| `CHAT` | `state.chatPartialText` (live text overlay above input) | Auto-send via `openClawSendText` ("release to send") |
-| `TERMINAL` | `state.terminalPartial` | Paste into `state.terminalInput` (don't auto-execute) |
-| `CLAUDE` | `state.claudePartial` | Paste into `state.claudeInput` (don't auto-execute) |
+**Recording cue & mic-open delay**: `startVoiceCapture` plays `playRecordingTone()` (moving.mp3 + `ToneGenerator.TONE_PROP_BEEP` fallback for MTK SoundPool drops), then delays AudioRecord open by 200 ms — opening `VOICE_RECOGNITION` reroutes the audio path and silences in-flight MEDIA samples.
 
-Side button long-press in any of those panels invokes the relevant `*RecordStart()` host method, which delegates to `startVoiceCapture(sink)`. Release calls `stopVoiceCapture()` which sends `commit:true` and waits for `committed_transcript`.
+**Pending bubble UX (chat sinks)**: partial-text bubble renders gated on `chatPartialText.isNotBlank()` (NOT `chatRecording` — that flips false on release ~200-500 ms before `committed_transcript` and produces a flicker gap). `handleCommittedTranscript` clears partial AND adds persisted bubble in the same frame. Same pattern for streaming assistant bubble: `chatStreamingText` cleared inside `applyOpenClawHistory` (and Hermes equivalent), not on `onChatTerminal`.
 
-**Recording cue & mic-open delay**: `startVoiceCapture` plays `playRecordingTone()` (moving.mp3 + `ToneGenerator.TONE_PROP_BEEP` fallback for MTK SoundPool drops during audio-routing transitions), then delays AudioRecord open by 200 ms so the cue plays through (opening `VOICE_RECOGNITION` reroutes the audio path and silences in-flight MEDIA samples).
-
-**Pending bubble UX (chat sink)**: `state.chatPartialText` renders as a gray user-side bubble at the bottom of the chat list (`reverseLayout=true`). Render gate is `chatPartialText.isNotBlank()` — *not* `chatRecording` — so the bubble persists across release → `committed_transcript`. `handleCommittedTranscript` clears the partial AND adds the orange persisted bubble in the same frame (clean color flip, not flicker). Same pattern for streaming assistant bubble: `chatStreamingText` is cleared inside `applyOpenClawHistory` after the persisted message lands, not in `onChatTerminal`.
-
-**TTS auto-speak**: `speakLatestAssistantIfNeeded()` fires on assistant message arrival. Gated on `voiceEnabled && panel == OPENCLAW_CHAT && openClawSpeakNextAssistant` (gate set in `openClawSendText`). Tracks OkHttp `Call` in `openClawTtsCall`. `cancelOpenClawSpeech()` aborts both in-flight HTTP and MediaPlayer; called from `startVoiceCapture` (PTT over playing reply silences it), `speakLatestAssistantIfNeeded` (no stacking), `openClawCloseSessionInternal`, `onDestroy`. ElevenLabs locks character billing at request submission, so cancel = bandwidth + UX win, not guaranteed credit refund.
-
-**TTS volume**: `USAGE_MEDIA` → `STREAM_MUSIC`, controlled by Settings → Sound → Volume. Don't force-set MAX before playback.
-
-**OpenClaw settings inline "speak replies" toggle** at row index 1 flips the same `voicePrefs.enabled` flag as Settings → Voice. `openClawSettingsRowActivate` uses indices 0..5 — careful when reshuffling.
+**TTS auto-speak**: `speakLatestAssistantIfNeeded()` fires on assistant arrival, gated on `voiceEnabled && panel == OPENCLAW_CHAT && openClawSpeakNextAssistant` (gate set in `openClawSendText`). `cancelOpenClawSpeech()` aborts in-flight HTTP `Call` + MediaPlayer; called from `startVoiceCapture` (PTT silences playing reply), no-stacking guard, session close, `onDestroy`. Volume: `USAGE_MEDIA` → `STREAM_MUSIC`, controlled by Settings → Sound. Hermes has parallel `speakLatestHermesAssistantIfNeeded()` / `cancelHermesSpeech()`. ElevenLabs locks billing at submission — cancel saves bandwidth + UX, not guaranteed credit refund.
 
 ### ElevenLabs key — five ways to set it
 
-1. **Settings → Voice** → "elevenlabs key" row → RetroKeyboard
-2. **adb broadcast**: `adb shell "am broadcast -a com.r1.launcher.SET_ELEVENLABS_KEY --es key 'sk_...'"` (receiver: `LauncherActivity.voiceKeyRx`)
-3. **Clipboard paste** — "paste" pill in the Settings → Voice keyboard overlay
-4. **QR scan** — Settings → Voice → "scan key from qr" sets `qrScanMode = OPENAI_KEY` (enum name kept for back-compat); `LauncherActivity.openClawScanned` validates and saves to `voicePrefs.elevenlabsKey`
-5. **Web companion** — paste into "send text" tab with target = `voice_key`
+1. Settings → Voice → "elevenlabs key" row → RetroKeyboard
+2. adb broadcast: `am broadcast -a com.r1.launcher.SET_ELEVENLABS_KEY --es key 'sk_...'` (receiver: `voiceKeyRx`)
+3. Clipboard paste — "paste" pill in the keyboard overlay
+4. QR scan — Settings → Voice → "scan key from qr" sets `qrScanMode = OPENAI_KEY` (enum name kept for back-compat)
+5. Web companion — "send text" tab with target = `voice_key`
 
-Validation: accepts either `sk_<29+ chars>` prefix form OR a 32-char hex string (lowercase or upper).
-
-### Voice catalog (Settings → Voice → "voice: <name>" row cycles through)
-
-| name | voice_id |
-|---|---|
-| rachel (default) | `21m00Tcm4TlvDq8ikWAM` |
-| adam | `pNInz6obpgDQGcFmaJgB` |
-| aria | `9BWtsMINqrJLrRacOk9x` |
-| sarah | `EXAVITQu4vr4xnSDxMaL` |
+Validation: accepts `sk_<29+ chars>` prefix OR 32-char hex (any case).
 
 ## Terminal panel (Panel.TERMINAL)
 
@@ -270,7 +204,7 @@ Layout: back pill + cwd + `hide`/`kbd` toggle + status (`idle`/`rec`/`stt`/`...`
 
 **Execution model**: each command is one carroot connection. cwd tracked client-side in `state.terminalCwd`, prepended as `cd <cwd> && (<cmd>) ; pwd > <pwdFile> ; printf SENTINEL` so `cd /system` then `pwd` works across fresh `sh` instances. Streaming helper: `sendToCarrootStreaming(userCmd, cwd, onLine, onDone)` opens socket, writes wrapped script, `socket.shutdownOutput()`, reads stdout line-by-line on a background thread until EOF or sentinel. Lines flow into `state.terminalOutput` (cap 500, FIFO) AND `webServer?.broadcastTerminalOutput(line, cwd)`.
 
-**Auto-routing**: `npm install foo` is rewritten to `sh /data/local/tmp/r1-alpine "npm install foo"`. Set in `LauncherActivity.alpineCommands`: `npm`, `node`, `npx`, `yarn`, `pnpm`, `python`, `python3`, `pip`, `pip3`, `apk`, `openclaw`, `claude`. `alpine: <anything>` is the explicit force-route prefix. `clear`/`cls` intercepted client-side.
+**No more alpine auto-routing.** The terminal panel runs commands directly against Android's shell via carroot — no chroot, no `r1-alpine` wrapper, no `npm`/`node`/`python` rewrites. Users who need a real Linux env open Termux (separate app, real PTY). `clear`/`cls` still intercepted client-side.
 
 **Voice dictation**: long-press side button while terminal is open → `terminalRecordStart()` → `startVoiceCapture(VoiceSink.TERMINAL)` (ElevenLabs Realtime) → committed transcript appends to `state.terminalInput`. Doesn't auto-submit. Live partial transcripts appear in `state.terminalPartial`. Single ElevenLabs key shared with chat + claude panels — see Voice section.
 
@@ -278,29 +212,32 @@ Layout: back pill + cwd + `hide`/`kbd` toggle + status (`idle`/`rec`/`stt`/`...`
 
 ## Claude Code app (Panel.CLAUDE)
 
-Synthetic app + chat panel that turns the launcher into a Claude Code chat client. Source: `ui/ClaudePanel.kt`, `claude/ClaudeMessage.kt`.
+Synthetic app + chat panel that talks to the `claude` CLI via Termux's `RUN_COMMAND` intent API. Source: `ui/ClaudePanel.kt`, `claude/ClaudeMessage.kt`, `claude/TermuxBridge.kt`. Replaces the v1.1.x alpine-chroot path which kept breaking at the toybox↔Linux-userspace boundary (see memory `project_claude_via_termux.md` for the migration story).
 
-**Why a separate app, not the terminal panel**: tried socat-PTY chat mode (`scripts/install-socat.sh`, AnsiStripper) and it failed. claude's TUI uses Ink, which (a) needs arrow-keys for picker prompts the RetroKeyboard can't send, and (b) shows a "trust this directory" prompt that **cannot be skipped in interactive mode** (only `--print` skips it). PTY approach scrubbed in v3.26.0.
+**Setup contract** (one-time, inside Termux on the device):
 
-**Execution model**: each user turn fires `echo '<base64>' | base64 -d | sh /data/local/tmp/r1-alpine 'claude --print [-c] --output-format text 2>&1'` via `sendToCarrootStreaming`. base64 sidesteps every escaping issue (carroot → ash → chroot → ash → claude). First turn omits `-c`; turn 2+ uses `-c` to continue the most recent session. The `clr` pill resets `claudeMessages` AND flips `claudeFirstTurn = true`. claude's stdout streams into `state.claudeStreamingText` (live preview bubble at tail), commits to `claudeMessages` on completion.
+```
+echo "allow-external-apps=true" >> ~/.termux/termux.properties
+pkg update -y && pkg install -y nodejs
+npm install -g @anthropic-ai/claude-code
+claude auth login --claudeai
+```
 
-**UX**: orange-right user / gray-left assistant bubbles, capped at 200 FIFO. Header: back / clear / kbd-toggle / status. Input row with `>` prompt + paste pill + send pill, collapsible RetroKeyboard. Long-press side → Whisper dictation. Wheel-press to send; wheel-up/down to scroll. Side back → APPS.
+`allow-external-apps=true` is the critical line — Termux's RUN_COMMAND permission is `signatureOrSystem`; our launcher (LineageOS platform key) and Termux (its own key) don't share signatures, so the flag bypasses the check. Manifest declaration of `com.termux.permission.RUN_COMMAND` is still required (AndroidManifest.xml).
 
-**Limitations**: `claude --print` uses subscription rate limits per turn. No tool-use UI (output folded into text). No per-token streaming animation (chunky). For full feature set (slash commands, `/resume`, plan mode), drop to terminal and run `claude --print "..."` directly.
+The ClaudePanel renders a setup hint (`ClaudeSetupHint` composable) whenever `state.claudeAuthed` is false; "open termux" pill `am start`s Termux, "copy" pill copies the 4-line block to the clipboard, "retry" re-probes via `TermuxBridge.probeClaude()`.
+
+**Execution model**: `LauncherActivity.claudeSend(text)` builds `[--print, (-c)?, <text>]` and fires `TermuxBridge.run(path = "$TERMUX_BIN/claude", args, background=true, callback)`. Termux runs the binary in a real PTY in its sandbox; the `PendingIntent` fires once with `result` bundle (`stdout`/`stderr`/`exitCode`/`err`/`errmsg`) when the process exits. Single assistant bubble appended on completion — no per-token streaming (RUN_COMMAND result is buffered). First turn omits `-c`; turn 2+ uses `-c` to continue the most recent claude session. `clr` pill resets `claudeMessages` + flips `claudeFirstTurn = true`.
+
+**state.claudeAuthed** semantics changed: now means "Termux installed AND `claude --version` exits 0". Auth state (logged in / not) is not separately tracked — failed turns surface their own "Please run /login" message and the setup banner re-opens automatically (see `app.js` heuristic in `appendClaudeMessage`).
+
+**Web RPCs**: `claude.send`, `claude.clear`, `claude.history`, `claude.status` (returns `{ready: bool}`). The old `claude.auth.*` and `claude.setup.*` family is gone — setup happens inside Termux on the device, not from a browser.
+
+**Limitations vs the previous chroot path**: no per-token streaming animation; output is buffered until `claude --print` exits. For interactive features (`/resume`, slash commands, plan mode), open Termux directly — `claude` works there with a full TTY.
 
 ## Hermes Agent app (Panel.HERMES_CHAT / HERMES_CONFIG)
 
 See memory `project_hermes_agent_app.md` for the full implementation map. One-line recap: synthetic app that talks to a self-hosted **Hermes Agent** (`github.com/NousResearch/hermes-agent`) via its OpenAI-compatible HTTP gateway (`POST /v1/chat/completions?stream=true`, SSE deltas, `Authorization: Bearer` + `X-Hermes-Session-Id` headers). Files: `hermes/HermesPrefs.kt` / `HermesMessage.kt` / `HermesClient.kt`, panels at `ui/HermesChatPanel.kt` / `ui/HermesConfigPanel.kt`. Voice integration adds `VoiceSink.HERMES_CHAT` + `speakLatestHermesAssistantIfNeeded()` + `cancelHermesSpeech()`, parallel to the OpenClaw plumbing. Wire is **REST+SSE only**, no WebSocket — don't try to reuse `GatewaySession`. Config rows accept typed URL + bearer token; no QR pairing this round. Theme color `AppThemes.Hermes = #FFB300` (amber).
-
-## Alpine arm64 chroot + Claude Code agent
-
-See memory `project_alpine_chroot.md` and `project_claude_agent_on_r1.md` for full setup. Quick recap:
-
-- Alpine 3.20 rootfs at `/data/local/tmp/alpine`; wrapper `/data/local/tmp/r1-alpine` re-binds `/proc`/`/sys`/`/dev` per invocation and `chroot`s with PATH `/root/.local/bin:...:/bin` + `ANTHROPIC_API_KEY` from `/data/local/tmp/.anthropic_key`. No proot — `chroot` + `mount --bind` are in `/system/bin` and carroot is root.
-- Each `r1-alpine "<cmd>"` is a fresh `ash -c` — no cwd/env persistence, no PTY (REPLs unusable).
-- `claude` user (uid 1000) created by `scripts/setup-claude-user.sh` because Claude Code refuses `bypassPermissions` when uid==0. Wrapper detects `claude ...` as first token and uses `su -l claude -s /bin/ash -c "$*"`. `/root/.local/{lib,share,state}` chmod 755 so the symlinked claude binary is reachable.
-- Agent chain: terminal panel → carroot → alpine → `claude --print` → `r1-root <cmd>` (3-line `nc 127.0.0.1 1337`) → carroot → Android root. `/home/claude/CLAUDE.md` is device context + guardrails. OAuth via `scripts/claude-auth-{start,finish}.sh` (FIFO at `/tmp/claude-auth.pipe`); PKCE binds `code_challenge` to one login attempt — don't reuse URLs.
-- Each `claude --print` = one task, one agent loop, no state between invocations.
 
 ## Resources
 
@@ -322,46 +259,46 @@ Copied from `../mylauncher/res/` except layouts:
 
 ## Do not waste time re-attempting
 
-- **Going Gradle-less.** Old pipeline doesn't know Kotlin/Compose/compose-compiler-plugin. Keep Gradle.
-- **Running without bootstrap.** `gradle-wrapper.jar` isn't checked in; `bootstrap.sh` populates it. `build.sh` auto-invokes on first run.
-- **AGP < 8.6 with Kotlin 2.0.** AGP 8.5- doesn't recognize `kotlin.plugin.compose`. Keep AGP ≥ 8.7.
-- **Checking in `gradle-wrapper.jar`.** Bootstrap takes ~8s; jar changes with Gradle upgrades. Keep out of tree.
-- **Material3 components with default styling.** R1 look is custom — Material3 is in only because `MaterialTheme` populates CompositionLocals. Use raw `Box`/`Row`/`Column`/`Text`, not `Button`/`Card`.
+Build/release (most build/version traps are in **Bootstrap & build** + **Release compatibility** — read those first):
+- **Going Gradle-less / checking in `gradle-wrapper.jar` / AGP < 8.6 with Kotlin 2.0.** Keep Gradle, run `bootstrap.sh`, keep AGP ≥ 8.7.
+- **Material3 components with default styling.** Material3 is in only so `MaterialTheme` populates CompositionLocals. Use raw `Box`/`Row`/`Column`/`Text`, not `Button`/`Card`.
 - **Skipping `state.back()` after `host.*` side-effect calls.** Self-closing panels expect the state machine to unwind.
-- **Trusting framework toggle APIs.** `setWifiEnabled`/`setDataEnabled`/`Bluetooth.enable` silently no-op without system perm. Route through carroot. Brightness/volume *do* work programmatically; brightness needs `WRITE_SETTINGS` grant.
-- **`svc data` / `svc wifi`.** Dead shims on this build.
-- **Stripping `com.android.phone`/`TeleService.apk`/`com.android.providers.telephony`/`mediatek-telephony-*`.** `DataNetworkController` lives in `com.android.phone`. Removing leaves operator+pill working (from `telephony.registry`) while `mDataConnectionState=-1`. Keep them.
-- **Flashing without `fastboot -w`** when telephony boot jars changed. `oat_primary/` mismatch ANRs `com.android.phone` ("Boot image chunk count mismatch"). Recover: `rm -rf /data/user_de/0/com.android.phone/cache/oat_primary/ /data/dalvik-cache/*phone*` + reboot. Sanity: `service list | grep -E "phone|iphonesubinfo|isub"` shows all three.
+
+System / OS:
+- **Stripping `com.android.phone`/`TeleService.apk`/`com.android.providers.telephony`/`mediatek-telephony-*`.** `DataNetworkController` lives in `com.android.phone`; removing leaves operator+pill working (from `telephony.registry`) while `mDataConnectionState=-1`. Keep them.
+- **Flashing without `fastboot -w` when telephony boot jars changed.** `oat_primary/` mismatch ANRs `com.android.phone` ("Boot image chunk count mismatch"). Recover: `rm -rf /data/user_de/0/com.android.phone/cache/oat_primary/ /data/dalvik-cache/*phone*` + reboot. Sanity: `service list | grep -E "phone|iphonesubinfo|isub"` shows all three.
 - **`am start` to "relaunch" after install.** Only foregrounds existing process. Force-stop via carroot first.
+- **Trusting `am broadcast` results.** `result=0` only means `am` exited cleanly. Verify via `dumpsys activity broadcasts`.
+- **Mapping side button to HOME or POWER.** HOME collapses DOWN/UP into one `onNewIntent`; POWER intercepted. Use `BUTTON_1` — tradeoff: dead inside third-party apps.
+
+Audio / Voice:
 - **`AudioTrack` raw PCM for short clips.** Silently dropped. Wrap in WAV + `MediaPlayer.setDataSource(path)`.
 - **`MediaPlayer.setDataSource(FileInputStream(file).use { it.fd })`.** `.use` closes FD before `prepare()`. Pass the path string.
-- **Force-setting `STREAM_MUSIC` to MAX before TTS.** Overrides user's volume slider. TTS uses `USAGE_MEDIA`, controlled by Settings → Sound → Volume.
-- **Opening `AudioRecord` (esp. `VOICE_RECOGNITION`) immediately after a UI sound.** AudioRecord steals the audio path; in-flight samples get clipped. Delay mic open ~200 ms after any cue.
-- **`SoundPool.play(...)` with `rate != 1.0f` on MTK.** Silently dropped. Keep `rate=1f`. For "must beep" layer `ToneGenerator.startTone(...)` on top.
-- **ElevenLabs `committed_transcript` not arriving while `partial_transcript` works.** Error frame slipped past `message_type` switch. Server emits `quota_exceeded`/`auth_error`/`unauthorized` etc. — catch-all in `onMessage` routes any frame with `error`/`exceed` to `onError`.
-- **Buffering full TTS MP3 before playback.** Use `/stream?output_format=mp3_22050_32&optimize_streaming_latency=4`, hold OkHttp `Call` for `cancel()`. ElevenLabs locks billing at submission — cancel = bandwidth + UX, not guaranteed refund.
-- **Clearing streaming bubble on `onChatTerminal`.** Fires before `chat.history` round-trips → flicker gap. Clear inside `applyOpenClawHistory` after persisted messages land.
-- **Gating partial-transcript bubble on `chatRecording`.** Flips false on button release, ~200-500 ms before `committed_transcript`. Gate on `chatPartialText.isNotBlank()` alone.
-- **Auto-transcribing audio attachments via `chat.send`.** Gateway forwards as multimodal, no STT. Transcribe client-side first.
-- **OpenClaw role `node` for chat / direct `chat.subscribe` / self-generated connect nonce / `:18789` port suffix.** Use `operator` scopes; wrap subscribe in `node.event`; wait for `connect.challenge`; let OkHttp pick port from scheme.
+- **Opening `AudioRecord` (esp. `VOICE_RECOGNITION`) immediately after a UI sound.** AudioRecord steals the audio path; in-flight samples clipped. Delay mic open ~200 ms after any cue.
+- **`SoundPool.play(...)` with `rate != 1.0f` on MTK.** Silently dropped. Keep `rate=1f`; layer `ToneGenerator.startTone(...)` if a beep is mandatory.
+- **ElevenLabs `committed_transcript` not arriving while `partial_transcript` works.** Error frame slipped past `message_type` switch. Catch-all in `onMessage` must route frames with `error`/`exceed` to `onError`.
+- **Buffering full TTS MP3 before playback.** Use `/stream?output_format=mp3_22050_32&optimize_streaming_latency=4`, hold OkHttp `Call` for `cancel()`.
+- **Force-setting `STREAM_MUSIC` to MAX before TTS.** Overrides user's volume slider.
+
+Networking / SMS / Wi-Fi share:
 - **`adb shell cmd clipboard set`.** Not implemented. Use `com.r1.launcher.SET_OPENAI_KEY` broadcast.
-- **Bumping `versionCode` per debug install.** File is skip-worktree pinned to `1000` locally; `adb install -r` at same version is allowed. Only bump if `/system/app/R1Launcher/` floor passes the pin.
-- **Committing local `versionCode` bumps.** File is skip-worktree — `git add app/build.gradle.kts` is a no-op until you `--no-skip-worktree` first. Don't `git checkout app/build.gradle.kts` either; it'll clobber the local pin.
-- **Pushing to main expecting a release.** Workflow trigger is `v*` tags only. `git tag vX.Y.Z && git push --tags` cuts the release; plain `git push` does not.
-- **Mapping side button to HOME or POWER.** HOME collapses DOWN/UP into one `onNewIntent`; POWER is intercepted. Use `BUTTON_1` — tradeoff: dead inside third-party apps.
 - **Delivering SMS via `content://sms` without being default SMS app.** Use legacy `SMS_RECEIVED` + own JSON cache.
 - **`SmsManager.getAllMessagesFromIcc()` direct call.** Hidden `@SystemApi`; reflect + `runCatching`.
-- **`cmd wifi soft-ap-set-ssid` + `start-softap` two-step.** Only one-shot `cmd wifi start-softap "<ssid>" wpa2 "<pass>"` works.
-- **Verifying softap via `dumpsys wifi`.** Strings come from `cmd wifi`'s listener, not dumpsys. Use `ip link show ap0` `state UP` + `LOWER_UP`. Retry ~6s (softap drops STA first on MTK).
-- **Polling softap clients via `iw dev wlan1 station dump`.** Interface is `ap0`. Use `ip neigh show dev ap0`.
-- **NanoHTTPD default 5s socket-read timeout.** Tears down WS. Use `start(0, false)`.
-- **`WebSocket.send()` from main thread.** Route through `sendExecutor`.
+- **`cmd wifi soft-ap-set-ssid` + `start-softap` two-step.** Only one-shot `cmd wifi start-softap "<ssid>" wpa2 "<pass>"` works. Verify via `ip link show ap0` `state UP` + `LOWER_UP` (retry ~6s on MTK), NOT `dumpsys wifi`. Poll clients via `ip neigh show dev ap0` (interface is `ap0`, not `wlan1`).
+- **NanoHTTPD default 5s socket-read timeout.** Tears down WS. Use `start(0, false)`. `WebSocket.send()` from main thread throws — route through `sendExecutor`.
 - **First non-loopback interface for panel IP.** `ccmni0` (10.x CGN) sorts before `wlan0`. Use `discoverLocalIp()`.
+
+OpenClaw / chat UX:
+- **OpenClaw role `node` for chat / direct `chat.subscribe` / self-generated connect nonce / `:18789` port suffix.** Use `operator` scopes; wrap subscribe in `node.event`; wait for `connect.challenge`; let OkHttp pick port from scheme.
+- **Auto-transcribing audio attachments via `chat.send`.** Gateway forwards as multimodal, no STT. Transcribe client-side first.
+- **Clearing streaming bubble on `onChatTerminal`.** Clear inside `applyOpenClawHistory` after persisted messages land.
+- **Gating partial-transcript bubble on `chatRecording`.** Gate on `chatPartialText.isNotBlank()` alone.
+
+Misc:
 - **`*/` inside Kotlin KDoc.** Closes the block.
-- **Trusting `am broadcast` results.** `result=0` only means `am` exited cleanly. Verify via `dumpsys activity broadcasts`.
-- **Bumping `multiplatform-markdown-renderer-m3`.** Every version calls `DrawScope.drawLine-NGM6Ib0$default(...)` missing from compose.ui 1.7.x — hard-crash on `>` blockquote. Workaround: strip `^[ \t]*>[ \t]?` per line before `Markdown(...)`. Real fix needs Compose BOM 2025.x.
+- **Bumping `multiplatform-markdown-renderer-m3`.** Every version calls a `drawLine` signature missing from compose.ui 1.7.x — hard-crash on `>` blockquote. Strip `^[ \t]*>[ \t]?` per line before `Markdown(...)`. Real fix needs Compose BOM 2025.x.
 - **`pgrep -af "<pattern>"`.** Returns nothing (toybox quirk). Use `ps -ef | grep -E "..." | grep -v grep`.
-- **`setsid` + `nohup` + `chroot` from outside the chroot.** Kills cascade across the chroot syscall boundary when nc closes. Background `&` from inside chroot's ash; init reparents.
+- **Forking Termux for UI restyling.** GPLv3 contagion + 50k LOC of native PTY / bootstrap installer / terminal-view. Use `RUN_COMMAND` intent as a service (current path) instead.
 
 ## Testing loop
 

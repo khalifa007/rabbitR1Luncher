@@ -96,67 +96,6 @@ object WebRpc {
             }
         }
 
-        "claude.send" -> {
-            host.claudeSend(params.requireString("text")); JsonNull
-        }
-        "claude.clear" -> {
-            host.claudeClear(); JsonNull
-        }
-        "claude.auth.status" -> {
-            val s = host.claudeAuthStatus()
-            buildJsonObject {
-                put("hasOAuth", s.hasOAuth)
-                put("hasApiKey", s.hasApiKey)
-                put("chrootReady", s.chrootReady)
-            }
-        }
-        "claude.auth.start" -> {
-            // Blocks for several seconds while the Anthropic SDK warms up
-            // and prints the OAuth URL. Web client should show a spinner.
-            val r = host.claudeAuthStart()
-            buildJsonObject {
-                put("url", r.url)
-                put("log", r.log)
-                r.error?.let { put("error", it) }
-            }
-        }
-        "claude.auth.finish" -> {
-            val r = host.claudeAuthFinish(params.requireString("code"))
-            buildJsonObject {
-                put("ok", r.ok)
-                put("log", r.log)
-                r.error?.let { put("error", it) }
-            }
-        }
-        "claude.auth.api_key" -> {
-            val ok = host.claudeSaveApiKey(params.requireString("key"))
-            buildJsonObject { put("ok", ok) }
-        }
-        "claude.auth.reset" -> {
-            // Nukes both credential files + the auth FIFO/log + .anthropic_key
-            // so the user can re-attempt OAuth without a stale code_challenge
-            // or half-written .credentials.json blocking the flow.
-            val ok = host.claudeAuthReset()
-            buildJsonObject { put("ok", ok) }
-        }
-        "claude.auth.verify" -> {
-            val r = host.claudeAuthVerify()
-            buildJsonObject {
-                put("ok", r.ok)
-                put("log", r.log)
-                r.error?.let { put("error", it) }
-            }
-        }
-        "claude.setup.start" -> {
-            // Returns immediately — progress streams as `claude.setup.progress`
-            // events, terminal status as `claude.setup.done`. Web UI subscribes
-            // to those instead of waiting on this response.
-            val started = host.claudeSetupStart()
-            buildJsonObject { put("started", started); put("running", host.claudeSetupRunning()) }
-        }
-        "claude.setup.status" -> buildJsonObject {
-            put("running", host.claudeSetupRunning())
-        }
         "hermes.send" -> {
             if (state.hermesServerUrl.isBlank()) {
                 throw RpcException("hermes_unconfigured", "hermes server url not set")
@@ -175,20 +114,6 @@ object WebRpc {
                     add(buildJsonObject {
                         put("role", m.role)
                         put("text", m.text)
-                    })
-                }
-            })
-        }
-
-        "claude.history" -> buildJsonObject {
-            put("busy", state.claudeBusy)
-            put("streaming", state.claudeStreamingText)
-            put("messages", buildJsonArray {
-                state.claudeMessages.toList().forEach { m ->
-                    add(buildJsonObject {
-                        put("role", m.role)
-                        put("text", m.text)
-                        put("error", m.error)
                     })
                 }
             })
@@ -332,10 +257,6 @@ object WebRpc {
             put("enabled", state.webTerminalEnabled)
             put("cwd", state.terminalCwd)
             put("busy", state.terminalBusy)
-        })
-        put("claude", buildJsonObject {
-            put("busy", state.claudeBusy)
-            put("messageCount", state.claudeMessages.size)
         })
         put("hermes", buildJsonObject {
             put("status", state.hermesStatus)

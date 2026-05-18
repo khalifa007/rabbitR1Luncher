@@ -65,6 +65,8 @@ fun AppPageHeader(
     onPlus: (() -> Unit)? = null,
     gearFocused: Boolean = false,
     onGear: (() -> Unit)? = null,
+    clearFocused: Boolean = false,
+    onClear: (() -> Unit)? = null,
     themeColor: Color = DEFAULT_THEME,
     compact: Boolean = false,
     floating: Boolean = false,
@@ -100,6 +102,8 @@ fun AppPageHeader(
                 onPlus = onPlus,
                 gearFocused = gearFocused,
                 onGear = onGear,
+                clearFocused = clearFocused,
+                onClear = onClear,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(start = 10.dp, end = 10.dp, top = 10.dp, bottom = 4.dp),
@@ -119,6 +123,8 @@ fun AppPageHeader(
             onPlus = onPlus,
             gearFocused = gearFocused,
             onGear = onGear,
+            clearFocused = clearFocused,
+            onClear = onClear,
             modifier = modifier
                 .fillMaxWidth()
                 .padding(start = 10.dp, end = 10.dp, top = 10.dp, bottom = 4.dp),
@@ -137,6 +143,10 @@ fun AppPageHeader(
         ) {
             HeaderBackPill(focused = backFocused, themeColor = themeColor, onClick = onBack)
             Spacer(Modifier.weight(1f))
+            if (onClear != null) {
+                HeaderTextButton(label = "✕", focused = clearFocused, themeColor = themeColor, onClick = onClear)
+                if (onPlus != null || onGear != null) Spacer(Modifier.width(8.dp))
+            }
             if (onPlus != null) {
                 HeaderTextButton(label = "+", focused = plusFocused, themeColor = themeColor, onClick = onPlus)
                 if (onGear != null) Spacer(Modifier.width(8.dp))
@@ -185,6 +195,8 @@ private fun HeaderRow(
     onPlus: (() -> Unit)?,
     gearFocused: Boolean,
     onGear: (() -> Unit)?,
+    clearFocused: Boolean = false,
+    onClear: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val type = LocalR1Type.current
@@ -210,6 +222,10 @@ private fun HeaderRow(
         }
         if (trailingContent != null) {
             trailingContent()
+        }
+        if (onClear != null) {
+            Spacer(Modifier.width(8.dp))
+            HeaderTextButton(label = "✕", focused = clearFocused, themeColor = themeColor, onClick = onClear)
         }
         if (onPlus != null) {
             Spacer(Modifier.width(8.dp))
@@ -328,7 +344,6 @@ object AppThemes {
     val Messages = Color(0xFFFF003C)   // bright red
     val OpenClaw = Color(0xFFFF2A9D)   // neon pink
     val Terminal = Color(0xFF00E5FF)   // cyan / light blue
-    val Claude = Color(0xFF9D4EDD)     // lavender / purple
     val Meetings = Color(0xFF00FF38)   // lime green
     val Settings = Color(0xFFFFD600)   // sunshine yellow
     val Hermes = Color(0xFFFFB300)     // warm amber

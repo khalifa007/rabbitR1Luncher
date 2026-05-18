@@ -50,12 +50,27 @@ class NtfyPrefs private constructor(ctx: Context) {
             if (!it) android.util.Log.w("NtfyPrefs", "lastMessageId commit failed")
         }
 
+    /** Wall-clock ms of the most recent user-initiated clear. Used by
+     *  [NtfySubscriber] as a time fence: any frame whose server `time`
+     *  predates this is dropped. Belt-and-suspenders against ntfy.sh
+     *  replaying cached messages despite our empty `?since=` cursor.
+     *  Persisted synchronously so a process death between clear and the
+     *  next reconnect can't lose the fence. */
+    var clearedAtMs: Long
+        get() = plain.getLong(KEY_CLEARED_AT_MS, 0L)
+        set(value) {
+            plain.edit().putLong(KEY_CLEARED_AT_MS, value).commit().also {
+                if (!it) android.util.Log.w("NtfyPrefs", "clearedAtMs commit failed")
+            }
+        }
+
     fun isConfigured(): Boolean = topic.isNotBlank()
 
     companion object {
         private const val KEY_TOPIC = "topic"
         private const val KEY_ENABLED = "enabled"
         private const val KEY_LAST_ID = "last.id"
+        private const val KEY_CLEARED_AT_MS = "cleared.at.ms"
 
         @Volatile private var instance: NtfyPrefs? = null
         fun get(ctx: Context): NtfyPrefs =

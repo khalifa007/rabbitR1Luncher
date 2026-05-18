@@ -89,16 +89,15 @@ interface LauncherHost {
     fun openSmsThread(address: String, displayName: String)
     fun toggleWebServer(enable: Boolean)
     fun setWebTerminalEnabled(enable: Boolean)
+    /** Persist a new 4-digit web-panel passcode. Mirrors into LauncherState
+     *  for the Settings UI and rotates [NotifPrefs.panelToken] so any already-
+     *  authenticated browsers get bounced — passcode change is a logout. */
+    fun panelPasscodeSave(passcode: String)
     fun terminalRun(cmd: String)
     fun terminalClear()
     fun terminalRecordStart()
     fun terminalRecordStop()
     fun terminalPasteFromClipboard()
-    fun claudeSend(text: String)
-    fun claudeClear()
-    fun claudeRecordStart()
-    fun claudeRecordStop()
-    fun claudePasteFromClipboard()
     // --- hermes agent ---
     fun hermesSendText(text: String)
     fun hermesRecordStart()
@@ -117,40 +116,6 @@ interface LauncherHost {
     /** Consume a raw QR scan: decode, save url/key to HermesPrefs, navigate back
      *  to HERMES_CONFIG, auto-probe /health. */
     fun hermesScanned(raw: String)
-    /** Kick off `claude auth login --claudeai`. Returns the OAuth URL the user
-     *  must open in a browser, plus a copy of the raw script log for
-     *  diagnostics. Throws if the chroot or the auth helper script is missing. */
-    fun claudeAuthStart(): com.r1.launcher.claude.ClaudeAuthStartResult
-    /** Feed the OAuth code back into the FIFO. Returns whether
-     *  `~/.claude/.credentials.json` got written. */
-    fun claudeAuthFinish(code: String): com.r1.launcher.claude.ClaudeAuthFinishResult
-    /** Persist a pasted Anthropic API key to /data/local/tmp/.anthropic_key
-     *  (read on every `claude --print` invocation by the r1-alpine wrapper).
-     *  Returns true on success. */
-    fun claudeSaveApiKey(key: String): Boolean
-    /** Wipe every credential surface so a fresh login attempt starts clean:
-     *  `/root/.claude/.credentials.json`, `/home/claude/.claude/.credentials.json`,
-     *  the auth FIFO + log under `/tmp/`, and `/data/local/tmp/.anthropic_key`.
-     *  The chroot itself is preserved. Returns true on success. */
-    fun claudeAuthReset(): Boolean
-    /** End-to-end auth probe — runs `claude --print 'pong'` as the
-     *  unprivileged claude user and reports whether the binary actually
-     *  accepts the saved credentials. Slower than [claudeAuthStatus] (issues
-     *  a real LLM round-trip), but the only reliable signal that login
-     *  actually worked vs. just wrote a malformed file. */
-    fun claudeAuthVerify(): com.r1.launcher.claude.ClaudeAuthVerifyResult
-    /** Whether ~/.claude/.credentials.json or .anthropic_key exists. Used by
-     *  the web companion to decide whether to show the login form. */
-    fun claudeAuthStatus(): com.r1.launcher.claude.ClaudeAuthStatus
-    /** Run the alpine + claude + user bootstrap chain as a single background
-     *  job. The web companion broadcasts every stdout line as a
-     *  `claude.setup.progress` WS event, then `claude.setup.done` when
-     *  finished. Returns true when the job kicks off (false if already
-     *  running). */
-    fun claudeSetupStart(): Boolean
-    /** Whether the bootstrap chain is currently running. Used by the web UI
-     *  to gate the start button + recover progress on reconnect. */
-    fun claudeSetupRunning(): Boolean
     fun copyToClipboard(text: String, label: String = "r1-launcher")
     fun setLanguage(code: String)
 
@@ -330,6 +295,7 @@ fun LauncherState.wheelUp(host: LauncherHost) {
             }
         }
         Panel.WIFI_SHARE_EDIT -> { /* keyboard handles input */ }
+        Panel.PANEL_PASSCODE -> { /* numeric keypad handles input */ }
         Panel.BRIGHTNESS -> {
             val prev = brightnessLevel
             brightnessLevel = (brightnessLevel - 16).coerceAtLeast(1)
@@ -387,7 +353,6 @@ fun LauncherState.wheelUp(host: LauncherHost) {
             }
         }
         Panel.TERMINAL -> { terminalScrollIndex++; host.navTone() }
-        Panel.CLAUDE -> { claudeScrollIndex++; host.navTone() }
         Panel.HERMES_CHAT -> { host.hermesScrollUp(); host.navTone() }
         Panel.HERMES_CONFIG -> {
             if (hermesConfigFocus <= 0) {
@@ -528,8 +493,8 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.NETWORK -> {
             val prev = networkFocus
-            // back, wifi, cellular, bluetooth, share, remote, terminal, ntfy, scan
-            networkFocus = (networkFocus + 1).coerceAtMost(8)
+            // back, wifi, cellular, bluetooth, share, remote, passcode, terminal, ntfy, scan
+            networkFocus = (networkFocus + 1).coerceAtMost(9)
             if (prev != networkFocus) host.navTone()
         }
         Panel.FACTORY_CONFIRM -> {
@@ -550,6 +515,7 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             if (prev != wifiShareFocus) host.navTone()
         }
         Panel.WIFI_SHARE_EDIT -> { /* keyboard handles input */ }
+        Panel.PANEL_PASSCODE -> { /* numeric keypad handles input */ }
         Panel.BRIGHTNESS -> {
             val prev = brightnessLevel
             brightnessLevel = (brightnessLevel + 16).coerceAtMost(255)
@@ -619,11 +585,6 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             terminalScrollIndex = (terminalScrollIndex - 1).coerceAtLeast(0)
             if (prev != terminalScrollIndex) host.navTone()
         }
-        Panel.CLAUDE -> {
-            val prev = claudeScrollIndex
-            claudeScrollIndex = (claudeScrollIndex - 1).coerceAtLeast(0)
-            if (prev != claudeScrollIndex) host.navTone()
-        }
         Panel.HERMES_CHAT -> { host.hermesScrollDown(); host.navTone() }
         Panel.HERMES_CONFIG -> {
             val prev = hermesConfigFocus
@@ -659,7 +620,8 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             if (prev != transcriberSettingsFocus) host.navTone()
         }
         Panel.NOTIFICATIONS -> {
-            // 0=back, 1..N=items, (N+1)=clear-all row (only when items exist).
+            // 0=back, 1=header-clear (only when items exist), 2..N+1=items.
+            // No bottom clear-all row — it lives in the header now.
             val itemsCount = notifications.size
             val maxRow = if (itemsCount == 0) 0 else itemsCount + 1
             val prev = notificationsFocus
@@ -771,9 +733,10 @@ fun LauncherState.activate(host: LauncherHost) {
             3 -> { host.toggleBluetooth(!btOn); host.popTone() }
             4 -> { openWifiShare(); host.selectTone() }
             5 -> { host.toggleWebServer(!webServerEnabled); host.popTone() }
-            6 -> { host.setWebTerminalEnabled(!webTerminalEnabled); host.popTone() }
-            7 -> { openNtfyConfig(); host.selectTone() }
-            8 -> { host.startWifiScan(); openWifiScan(); host.selectTone() }
+            6 -> { openPanelPasscodeEditor(); host.selectTone() }
+            7 -> { host.setWebTerminalEnabled(!webTerminalEnabled); host.popTone() }
+            8 -> { openNtfyConfig(); host.selectTone() }
+            9 -> { host.startWifiScan(); openWifiScan(); host.selectTone() }
         }
         Panel.WIFI_SHARE -> when (wifiShareFocus) {
             0 -> { back(); host.backTone() }
@@ -789,6 +752,7 @@ fun LauncherState.activate(host: LauncherHost) {
             5 -> { host.wifiShareCycleTimer(); host.popTone() }
         }
         Panel.WIFI_SHARE_EDIT -> { /* RetroKeyboard handles input */ }
+        Panel.PANEL_PASSCODE -> { /* numeric keypad handles input */ }
         Panel.FACTORY_CONFIRM -> when (factoryConfirmFocus) {
             0 -> { back(); host.backTone() }
             1 -> { host.factoryReset(); host.selectTone() }
@@ -845,23 +809,6 @@ fun LauncherState.activate(host: LauncherHost) {
             host.hermesConfigRowActivate(hermesConfigFocus)
             host.selectTone()
         }
-        Panel.CLAUDE -> {
-            // Redirect screen: wheel-press is the primary "open anyway"
-            // action so users can dismiss the hint without reaching the
-            // touch target on a 480x480 round screen. Mirror the visibility
-            // gate from ClaudePanel — only logged-out users see the hint,
-            // so only they need the dismiss shortcut.
-            if (!claudeAuthed && claudeShowWebHint) {
-                claudeShowWebHint = false
-                host.selectTone()
-            } else {
-                val text = claudeInput.trim()
-                if (text.isNotEmpty()) {
-                    host.claudeSend(text)
-                    host.popTone()
-                }
-            }
-        }
         // Wheel press on the clock screen jumps straight to the apps grid.
         Panel.HOME -> { openApps(); host.selectTone() }
         Panel.TRANSCRIBER_LIST -> when {
@@ -893,21 +840,21 @@ fun LauncherState.activate(host: LauncherHost) {
             host.selectTone()
         }
         Panel.NOTIFICATIONS -> {
-            // 0=back, 1..N=items (open deeplink + mark read), N+1=clear-all.
+            // 0=back, 1=header-clear (only when items exist), 2..N+1=items.
             // Match the panel + touch path: the list renders newest-first via
             // asReversed(), so wheel activation has to index the same view or
             // the focused (top) card opens the wrong (oldest) entry.
             val items = notifications.asReversed()
             when {
                 notificationsFocus == 0 -> { back(); host.backTone() }
-                notificationsFocus - 1 in items.indices -> {
-                    val n = items[notificationsFocus - 1]
-                    host.notificationActivate(n.id)
-                    host.selectTone()
-                }
-                items.isNotEmpty() && notificationsFocus == items.size + 1 -> {
+                items.isNotEmpty() && notificationsFocus == 1 -> {
                     host.notificationsClear()
                     host.popTone()
+                }
+                notificationsFocus - 2 in items.indices -> {
+                    val n = items[notificationsFocus - 2]
+                    host.notificationActivate(n.id)
+                    host.selectTone()
                 }
             }
         }

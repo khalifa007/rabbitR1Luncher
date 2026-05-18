@@ -77,7 +77,6 @@ fun SettingsCredentialsPanel(
         val type = LocalR1Type.current
         val items = listOf(
             CredentialsItem("__header__", "", false, ""),
-            CredentialsItem("anthropic", "claude --print", state.hasAnthropicKey, state.anthropicKeyTail),
             CredentialsItem("elevenlabs", "voice tts + stt", state.hasVoiceKey, state.voiceKeyTail),
             CredentialsItem("hermes", "hermes agent bearer", state.hasHermesKey, state.hermesKeyTail),
             CredentialsItem("ntfy.sh topic", "outbound notifications", state.ntfyTopic.isNotBlank(),

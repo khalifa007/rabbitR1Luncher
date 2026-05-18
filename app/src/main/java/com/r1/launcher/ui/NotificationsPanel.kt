@@ -76,12 +76,18 @@ fun NotificationsPanel(
         val type = LocalR1Type.current
         // NotificationStore is append-only oldest-first; reverse so newest is on top.
         val items = state.notifications.asReversed()
-        val rowCount = 1 + items.size.coerceAtLeast(1) + (if (items.isNotEmpty()) 1 else 0)
+        // Focus indices: 0=back, 1=header-clear (only when items.isNotEmpty()),
+        // 2..N+1=items. No bottom "clear all" row — clear lives in the header
+        // so it's always reachable without scrolling through a long list.
         val listState = rememberLazyListState()
         LaunchedEffect(state.notificationsFocus) {
-            listState.animateScrollToItem(
-                state.notificationsFocus.coerceIn(0, (rowCount - 1).coerceAtLeast(0))
-            )
+            // LazyColumn rows are [header(0), item(1)..item(N)]. Map header
+            // focus (back / clear) to row 0 and item focus (2..N+1) to its
+            // LazyColumn row (focus - 1). Clamp at N to avoid scrolling
+            // past the last item when items.isEmpty.
+            val maxLazyRow = items.size
+            val target = (state.notificationsFocus - 1).coerceIn(0, maxLazyRow)
+            listState.animateScrollToItem(target)
         }
 
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
@@ -99,6 +105,8 @@ fun NotificationsPanel(
                         title = "notifs",
                         backFocused = state.notificationsFocus == 0,
                         onBack = { onRowClick(0) },
+                        clearFocused = state.notificationsFocus == 1,
+                        onClear = if (items.isNotEmpty()) ({ onRowClick(1) }) else null,
                         themeColor = Color(0xFFFF6B00),
                     )
                 }
@@ -118,20 +126,13 @@ fun NotificationsPanel(
                         items = items,
                         key = { _, n -> n.id },
                     ) { idx, n ->
-                        val rowIdx = idx + 1
+                        val rowIdx = idx + 2
                         NotificationCard(
                             source = n.sourceEnum,
                             title = n.title,
                             body = n.body,
                             timestampMs = n.timestamp,
                             unread = !n.read,
-                            focused = rowIdx == state.notificationsFocus,
-                            onClick = { onRowClick(rowIdx) },
-                        )
-                    }
-                    item(key = "clear_all") {
-                        val rowIdx = items.size + 1
-                        ClearAllRow(
                             focused = rowIdx == state.notificationsFocus,
                             onClick = { onRowClick(rowIdx) },
                         )
@@ -223,33 +224,6 @@ private fun NotificationCard(
                 )
             }
         }
-    }
-}
-
-@Composable
-private fun ClearAllRow(focused: Boolean, onClick: () -> Unit) {
-    val type = LocalR1Type.current
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .focusAnim(focused)
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (focused) Color(0x33FF6A00) else Color.Transparent)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick,
-            )
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-    ) {
-        Text(
-            text = "clear all",
-            color = Color(0xFFFF6B00),
-            fontSize = 14.sp,
-            fontFamily = type.appCard.fontFamily,
-            fontWeight = FontWeight.Bold,
-        )
     }
 }
 

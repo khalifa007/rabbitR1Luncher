@@ -6,7 +6,6 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import com.r1.launcher.claude.ClaudeMessage
 import com.r1.launcher.hermes.HermesMessage
 import com.r1.launcher.messages.SmsConversation
 import com.r1.launcher.messages.SmsItem
@@ -16,7 +15,7 @@ import com.r1.launcher.openclaw.SessionEntry
 import com.r1.launcher.transcriber.MeetingIndexEntry
 import com.r1.launcher.transcriber.TranscriberDetailAction
 
-enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, SETTINGS_CREDENTIALS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, NTFY_CONFIG, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, CLAUDE, HERMES_CHAT, HERMES_CONFIG, HERMES_QR, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS, NOTIFICATIONS }
+enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, SETTINGS_CREDENTIALS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, PANEL_PASSCODE, NTFY_CONFIG, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, HERMES_CHAT, HERMES_CONFIG, HERMES_QR, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS, NOTIFICATIONS }
 
 enum class WifiShareEditTarget { SSID, PASSWORD }
 
@@ -206,10 +205,9 @@ class LauncherState {
     /** Focus index for the SETTINGS_VOICE_SUBSCRIPTION page rows. */
     var voiceSubFocus by mutableIntStateOf(0)
     // Live partial transcripts during STT recording. chatPartialText already
-    // existed (line 126) and is reused for OpenClaw chat. The two below are
-    // new for terminal/claude panels which gain dictation via ElevenLabs.
+    // existed (line 126) and is reused for OpenClaw chat. The terminal one
+    // below is for the terminal panel's ElevenLabs dictation.
     var terminalPartial by mutableStateOf("")
-    var claudePartial by mutableStateOf("")
     /** Available threads from sessions.list. Driven by GatewaySession.onSessions. */
     val chatSessions = mutableStateListOf<SessionEntry>()
     /** Currently active thread key. Persisted across launches via OpenClawPrefs. */
@@ -239,6 +237,20 @@ class LauncherState {
     var webServerPort by mutableIntStateOf(8080)
     /** Best-effort local IP of the interface the panel is reachable on. */
     var webServerIp by mutableStateOf("")
+    /** Per-device pre-shared token gating the WS handshake plus sensitive
+     *  HTTP endpoints (api/state, api/transcriber/...). The user opens the
+     *  panel at http://IP:PORT/?t=TOKEN; the SPA captures t from the URL and
+     *  includes it on every subsequent request. Populated from
+     *  NotifPrefs.panelToken when the server starts. Empty when off. */
+    var webServerToken by mutableStateOf("")
+    /** 4-digit passcode the user types into the SPA. Mirror of
+     *  NotifPrefs.panelPasscode for Compose-driven UI; the SPA exchanges
+     *  this via POST /api/auth for the long token above. Always 4 digits. */
+    var panelPasscode by mutableStateOf("0000")
+    /** Buffer used while editing the passcode in Panel.PANEL_PASSCODE.
+     *  Mutated by the on-screen numeric keypad; committed to
+     *  NotifPrefs.panelPasscode once exactly 4 digits long. */
+    var panelPasscodeDraft by mutableStateOf("")
     /** When false, web RPC `terminal.*` methods refuse with a "disabled" error.
      *  Off by default — the launcher's root shell over LAN is a real risk and
      *  the user must explicitly opt in via Settings → Network → "remote terminal". */
@@ -263,48 +275,6 @@ class LauncherState {
      *  fills the screen — useful for reading long `npm install` logs. Toggled
      *  by the "kbd" header pill or the keyboard's own "hide" key. */
     var terminalKbVisible by mutableStateOf(true)
-
-    // --- claude code app (Panel.CLAUDE) ---
-    /** Chat scrollback for the Claude Code app — alternating user/assistant
-     *  bubbles. Each turn is a single committed message (no streaming inside
-     *  a bubble; live streaming text lives in [claudeStreamingText]). */
-    val claudeMessages = mutableStateListOf<ClaudeMessage>()
-    /** Cap so very long chats don't degrade UI responsiveness. FIFO drop. */
-    val claudeMessagesMax = 200
-    /** Current input buffer; submitted on wheel-press / send pill. */
-    var claudeInput by mutableStateOf("")
-    /** True from "send" until the claude --print invocation returns. Blocks
-     *  concurrent submissions and drives the `...` status indicator. */
-    var claudeBusy by mutableStateOf(false)
-    /** Live partial assistant reply being streamed from claude --print's
-     *  stdout. Rendered as a "live" bubble at the bottom of the scrollback;
-     *  committed to [claudeMessages] when the invocation completes. */
-    var claudeStreamingText by mutableStateOf("")
-    /** Wheel-driven scroll offset (0 = bottom/latest). */
-    var claudeScrollIndex by mutableIntStateOf(0)
-    /** True between mic-press and transcript-back. */
-    var claudeRecording by mutableStateOf(false)
-    var claudeTranscribing by mutableStateOf(false)
-    /** False on the very first send of a session (no `-c` flag — start fresh).
-     *  Flips to true after first reply so subsequent sends use `--continue`
-     *  to maintain context. Reset on "clear chat" pill. */
-    var claudeFirstTurn by mutableStateOf(true)
-    /** True until the user dismisses the "use the web companion" hint screen
-     *  (the QR + IP redirect). Defaults true so first-time users land on the
-     *  hint; "open anyway" flips it false for the rest of the session. The
-     *  on-device chat is still functional — this just defers users to the
-     *  bigger-screen experience by default since the R1 keyboard is rough.
-     *  NOTE: this flag is only consulted when [claudeAuthed] is false — once
-     *  the user is logged in, the redirect is skipped entirely (the QR's
-     *  primary purpose is the OAuth flow, which is hard to do on-device). */
-    var claudeShowWebHint by mutableStateOf(true)
-    /** Set true once the launcher has confirmed Claude has working creds
-     *  (subscription OAuth via .credentials.json OR an Anthropic API key).
-     *  Updated from [claudeAuthStatus]'s background check on activity
-     *  startup, after bootstrap completion, and after each auth action.
-     *  When true, opening the Claude tile drops straight into chat — the
-     *  QR redirect was a setup affordance, not a recurring detour. */
-    var claudeAuthed by mutableStateOf(false)
 
     // --- hermes agent (Panel.HERMES_CHAT / HERMES_CONFIG) ---
     /** Hermes chat scrollback — orange-right user / gray-left assistant bubbles.
@@ -446,8 +416,6 @@ class LauncherState {
     /** Display mirrors for the credentials panel. Hydrated in onCreate +
      *  refreshed on every successful save. Keys themselves stay in their
      *  per-app *Prefs objects — these are read-only snapshots for UI. */
-    var hasAnthropicKey by mutableStateOf(false)
-    var anthropicKeyTail by mutableStateOf("")
     var hasHermesKey by mutableStateOf(false)
     var hermesKeyTail by mutableStateOf("")
     /** Webhook bearer token — read-only on this surface; regenerate button
@@ -478,8 +446,9 @@ class LauncherState {
     /** Cached unread count — kept in sync by NotificationCenter so the HOME
      *  badge doesn't have to recompute every recomposition. */
     var notificationsUnread by mutableIntStateOf(0)
-    /** Wheel focus inside the NOTIFICATIONS panel. 0 = back row, 1..N = items
-     *  in reverse-chronological order, last row = "clear all". */
+    /** Wheel focus inside the NOTIFICATIONS panel. 0 = back, 1 = header clear
+     *  (only present when [notifications] isn't empty), 2..N+1 = items in
+     *  reverse-chronological order. */
     var notificationsFocus by mutableIntStateOf(0)
     /** Transient banner shown on HOME for ~4s when a notification arrives
      *  while the clock screen is visible. Null = nothing being shown. */
@@ -584,6 +553,13 @@ class LauncherState {
         panel = Panel.WIFI_SHARE_EDIT
     }
 
+    fun openPanelPasscodeEditor() {
+        // Seed the draft with the current passcode so the user sees what
+        // they already have. Clearing it forces a from-scratch retype.
+        panelPasscodeDraft = panelPasscode
+        panel = Panel.PANEL_PASSCODE
+    }
+
     fun openBrightness() {
         panel = Panel.BRIGHTNESS
     }
@@ -661,22 +637,6 @@ class LauncherState {
         terminalRecording = false
         terminalTranscribing = false
         panel = Panel.TERMINAL
-    }
-
-    fun openClaude() {
-        // Preserve message history + first-turn flag so reopening continues
-        // the same conversation. Only the input buffer + ephemeral indicators
-        // get reset.
-        claudeInput = ""
-        claudeScrollIndex = 0
-        claudeRecording = false
-        claudeTranscribing = false
-        // Show the web-companion redirect on every fresh entry. Once they hit
-        // "open anyway" we don't keep nagging within the same session, but
-        // navigating away and back resets it because that's almost always
-        // someone showing the QR to a new collaborator.
-        claudeShowWebHint = true
-        panel = Panel.CLAUDE
     }
 
     fun openMessagesThread(address: String, displayName: String) {
@@ -760,6 +720,7 @@ class LauncherState {
             Panel.WIFI_PASSWORD -> Panel.WIFI_SCAN
             Panel.WIFI_SHARE -> Panel.NETWORK
             Panel.WIFI_SHARE_EDIT -> Panel.WIFI_SHARE
+            Panel.PANEL_PASSCODE -> Panel.NETWORK
             Panel.NTFY_CONFIG -> Panel.NETWORK
             Panel.ONBOARDING -> Panel.ONBOARDING
             Panel.SETTINGS -> Panel.APPS
@@ -771,7 +732,6 @@ class LauncherState {
             Panel.MESSAGES -> Panel.APPS
             Panel.MESSAGES_THREAD -> Panel.MESSAGES
             Panel.TERMINAL -> Panel.APPS
-            Panel.CLAUDE -> Panel.APPS
             Panel.HERMES_CHAT -> Panel.APPS
             Panel.HERMES_CONFIG -> if (hermesConfigCameFromChat) Panel.HERMES_CHAT else Panel.APPS
             Panel.HERMES_QR -> Panel.HERMES_CONFIG
