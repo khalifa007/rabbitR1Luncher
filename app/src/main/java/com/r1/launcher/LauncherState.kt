@@ -15,7 +15,7 @@ import com.r1.launcher.openclaw.SessionEntry
 import com.r1.launcher.transcriber.MeetingIndexEntry
 import com.r1.launcher.transcriber.TranscriberDetailAction
 
-enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, SETTINGS_CREDENTIALS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, PANEL_PASSCODE, NTFY_CONFIG, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, HERMES_CHAT, HERMES_CONFIG, HERMES_QR, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS, NOTIFICATIONS }
+enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, SETTINGS_CREDENTIALS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, PANEL_PASSCODE, NTFY_CONFIG, BT_SCAN, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, HERMES_CHAT, HERMES_CONFIG, HERMES_QR, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS, NOTIFICATIONS }
 
 enum class WifiShareEditTarget { SSID, PASSWORD }
 
@@ -84,6 +84,11 @@ class LauncherState {
     var wifiSelectedSsid by mutableStateOf("")
     var wifiPasswordInput by mutableStateOf("")
     val wifiScanResults = mutableStateListOf<String>()
+    // --- bluetooth scan ---
+    data class BtDevice(val name: String, val address: String, val bonded: Boolean, val connected: Boolean = false)
+    val btDevices = mutableStateListOf<BtDevice>()
+    var btScanning by mutableStateOf(false)
+    var btScanFocus by mutableIntStateOf(0)
     // --- wifi share (hotspot) ---
     var wifiShareFocus by mutableIntStateOf(0)
     var wifiShareEnabled by mutableStateOf(false)
@@ -532,6 +537,11 @@ class LauncherState {
         panel = Panel.WIFI_SCAN
     }
 
+    fun openBtScan() {
+        btScanFocus = 0
+        panel = Panel.BT_SCAN
+    }
+
     fun openWifiPassword(ssid: String) {
         wifiSelectedSsid = ssid
         wifiPasswordInput = ""
@@ -722,6 +732,7 @@ class LauncherState {
             Panel.WIFI_SHARE_EDIT -> Panel.WIFI_SHARE
             Panel.PANEL_PASSCODE -> Panel.NETWORK
             Panel.NTFY_CONFIG -> Panel.NETWORK
+            Panel.BT_SCAN -> Panel.NETWORK
             Panel.ONBOARDING -> Panel.ONBOARDING
             Panel.SETTINGS -> Panel.APPS
             Panel.APPS -> Panel.HOME

@@ -65,8 +65,11 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.runtime.mutableStateOf
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun OpenClawChatPanel(
     state: LauncherState,
@@ -79,6 +82,7 @@ fun OpenClawChatPanel(
     onCopyCode: (String) -> Unit = {},
     onCompactContext: () -> Unit = {},
     onClearContext: () -> Unit = {},
+    getClipboardText: () -> String = { "" },
 ) {
     AnimatedVisibility(
         visible = state.panel == Panel.OPENCLAW_CHAT,
@@ -90,6 +94,10 @@ fun OpenClawChatPanel(
         val colors = LocalR1Colors.current
         val type = LocalR1Type.current
         var menuOpen by remember { mutableStateOf(false) }
+        var inputText by remember { mutableStateOf("") }
+        var showKeyboard by remember { mutableStateOf(false) }
+        var showPaste by remember { mutableStateOf(false) }
+        var pasteText by remember { mutableStateOf("") }
 
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
             Column(modifier = Modifier.fillMaxSize()) {
@@ -195,9 +203,6 @@ fun OpenClawChatPanel(
                     }
                 }
 
-                var inputText by remember { mutableStateOf("") }
-                var showKeyboard by remember { mutableStateOf(false) }
-
                 if (!state.openClawHideChat) {
                     Row(
                         modifier = Modifier
@@ -206,7 +211,13 @@ fun OpenClawChatPanel(
                             .clip(RoundedCornerShape(12.dp))
                             .border(2.dp, Color(0xFFFF4500), RoundedCornerShape(12.dp))
                             .background(Color.Black)
-                            .clickable { showKeyboard = !showKeyboard }
+                            .combinedClickable(
+                                onClick = { showKeyboard = !showKeyboard },
+                                onLongClick = {
+                                    pasteText = getClipboardText()
+                                    showPaste = true
+                                },
+                            )
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -300,6 +311,18 @@ fun OpenClawChatPanel(
                 onSettings = { menuOpen = false; onOpenSettings() },
                 onCompactContext = { menuOpen = false; onCompactContext() },
                 onClearContext = { menuOpen = false; onClearContext() },
+            )
+
+            ClipboardPastePopup(
+                visible = showPaste,
+                themeColor = Color(0xFFFF4500),
+                clipboardText = pasteText,
+                onPaste = { text ->
+                    inputText = if (inputText.isBlank()) text
+                        else inputText.trimEnd() + " " + text
+                    showPaste = false
+                },
+                onDismiss = { showPaste = false },
             )
         }
     }

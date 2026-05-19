@@ -250,7 +250,7 @@ fun LauncherRoot(
                     0 -> { state.back(); host.backTone() }
                     1 -> { host.toggleWifi(!state.wifiEnabled); host.popTone() }
                     2 -> { host.toggleCellular(!state.cellularOn); host.popTone() }
-                    3 -> { host.toggleBluetooth(!state.btOn); host.popTone() }
+                    3 -> { state.openBtScan(); host.startBtScan(); host.selectTone() }
                     4 -> { state.openWifiShare(); host.selectTone() }
                     5 -> { host.toggleWebServer(!state.webServerEnabled); host.popTone() }
                     6 -> { state.openPanelPasscodeEditor(); host.selectTone() }
@@ -281,6 +281,20 @@ fun LauncherRoot(
                     if (ssid != null) {
                         state.openWifiPassword(ssid)
                         host.selectTone()
+                    }
+                }
+            },
+        )
+
+        BluetoothScanPanel(
+            state = state,
+            onRowClick = { idx ->
+                when (idx) {
+                    0 -> { host.stopBtScan(); state.back(); host.backTone() }
+                    1 -> { host.toggleBluetooth(!state.btOn); host.popTone() }
+                    else -> {
+                        val dev = state.btDevices.getOrNull(idx - 2)
+                        if (dev != null) { host.pairBtDevice(dev.address); host.selectTone() }
                     }
                 }
             },
@@ -367,6 +381,7 @@ fun LauncherRoot(
             onCopyCode = { code -> host.copyToClipboard(code, "openclaw-code"); host.popTone() },
             onCompactContext = { host.openClawCompactSession(); host.popTone() },
             onClearContext = { host.openClawClearContext(); host.popTone() },
+            getClipboardText = { host.getClipboardText() },
         )
 
         OpenClawCameraPanel(
@@ -431,6 +446,12 @@ fun LauncherRoot(
                 host.popTone()
             },
             onPaste = { host.terminalPasteFromClipboard(); host.popTone() },
+            onAppendInput = { text ->
+                state.terminalInput = if (state.terminalInput.isBlank()) text
+                    else state.terminalInput.trimEnd() + " " + text
+                host.popTone()
+            },
+            getClipboardText = { host.getClipboardText() },
         )
 
         HermesChatPanel(
@@ -439,6 +460,8 @@ fun LauncherRoot(
             onSend = { text -> host.hermesSendText(text); host.popTone() },
             onClear = { host.hermesClearHistory(); host.popTone() },
             onOpenConfig = { state.openHermesConfig(fromChat = true); host.selectTone() },
+            getClipboardText = { host.getClipboardText() },
+            onCopyMessage = { text -> host.copyToClipboard(text, "hermes-message"); host.popTone() },
         )
 
         HermesConfigPanel(

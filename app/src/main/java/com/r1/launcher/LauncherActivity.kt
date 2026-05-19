@@ -81,6 +81,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         private const val REQ_SMS_PERM = 4804
         private const val REQ_NOTIF_PERM = 4805
         private const val REQ_AUDIO_PERM_TRANSCRIBER = 4806
+        private const val REQ_BT_SCAN_PERM = 4807
     }
 
     override fun attachBaseContext(newBase: Context) {
@@ -356,6 +357,132 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
     }
 
+    // Profile proxies to detect which bonded devices are currently connected
+    // (A2DP for audio sink, HEADSET for hands-free / mic). Bound in onCreate
+    // once and reused across BT panel openings.
+    private var btA2dpProxy: android.bluetooth.BluetoothA2dp? = null
+    private var btHeadsetProxy: android.bluetooth.BluetoothHeadset? = null
+
+    @Suppress("DEPRECATION")
+    private val btProfileListener = object : android.bluetooth.BluetoothProfile.ServiceListener {
+        override fun onServiceConnected(profile: Int, proxy: android.bluetooth.BluetoothProfile) {
+            android.util.Log.i("R1Bt", "onServiceConnected profile=$profile (A2DP=2 HEADSET=1)")
+            when (profile) {
+                android.bluetooth.BluetoothProfile.A2DP -> btA2dpProxy = proxy as android.bluetooth.BluetoothA2dp
+                android.bluetooth.BluetoothProfile.HEADSET -> btHeadsetProxy = proxy as android.bluetooth.BluetoothHeadset
+            }
+            if (state.panel == Panel.BT_SCAN) ui.post { refreshBtDevices() }
+        }
+        override fun onServiceDisconnected(profile: Int) {
+            android.util.Log.i("R1Bt", "onServiceDisconnected profile=$profile")
+            when (profile) {
+                android.bluetooth.BluetoothProfile.A2DP -> btA2dpProxy = null
+                android.bluetooth.BluetoothProfile.HEADSET -> btHeadsetProxy = null
+            }
+        }
+    }
+
+    /** Try to bind A2DP + HEADSET proxies. Returns true if both already bound. */
+    @Suppress("DEPRECATION")
+    private fun ensureBtProxiesBound(): Boolean {
+        val adp = BluetoothAdapter.getDefaultAdapter() ?: return false
+        if (!adp.isEnabled) return false
+        var fired = false
+        if (btA2dpProxy == null) {
+            val ok = runCatching { adp.getProfileProxy(this, btProfileListener, android.bluetooth.BluetoothProfile.A2DP) }.getOrDefault(false)
+            android.util.Log.i("R1Bt", "ensureBtProxiesBound A2DP getProfileProxy=$ok")
+            fired = true
+        }
+        if (btHeadsetProxy == null) {
+            val ok = runCatching { adp.getProfileProxy(this, btProfileListener, android.bluetooth.BluetoothProfile.HEADSET) }.getOrDefault(false)
+            android.util.Log.i("R1Bt", "ensureBtProxiesBound HEADSET getProfileProxy=$ok")
+            fired = true
+        }
+        return !fired && btA2dpProxy != null && btHeadsetProxy != null
+    }
+
+    @Suppress("DEPRECATION")
+    private fun isBtDeviceConnected(dev: android.bluetooth.BluetoothDevice): Boolean {
+        val a2dp = runCatching { btA2dpProxy?.connectedDevices?.any { it.address == dev.address } == true }.getOrDefault(false)
+        val hs = runCatching { btHeadsetProxy?.connectedDevices?.any { it.address == dev.address } == true }.getOrDefault(false)
+        return a2dp || hs
+    }
+
+    /** Rebuild btDevices from current bonded set + connection state, preserving
+     *  any non-bonded entries already discovered in this scan session. */
+    @Suppress("DEPRECATION")
+    private fun refreshBtDevices() {
+        val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
+        val bondedSet = runCatching { adapter.bondedDevices }.getOrNull() ?: emptySet()
+        val nonBonded = state.btDevices.filter { !it.bonded }
+        val bondedEntries = bondedSet.map { dev ->
+            val name = runCatching { dev.name }.getOrNull()?.takeIf { it.isNotBlank() } ?: dev.address
+            LauncherState.BtDevice(name, dev.address, bonded = true, connected = isBtDeviceConnected(dev))
+        }.sortedByDescending { it.connected }
+        state.btDevices.clear()
+        state.btDevices.addAll(bondedEntries)
+        state.btDevices.addAll(nonBonded)
+    }
+
+    @Suppress("DEPRECATION")
+    private val btScanRx = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            when (intent.action) {
+                android.bluetooth.BluetoothDevice.ACTION_FOUND,
+                android.bluetooth.BluetoothDevice.ACTION_NAME_CHANGED -> {
+                    val dev = if (android.os.Build.VERSION.SDK_INT >= 33) {
+                        intent.getParcelableExtra(android.bluetooth.BluetoothDevice.EXTRA_DEVICE, android.bluetooth.BluetoothDevice::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(android.bluetooth.BluetoothDevice.EXTRA_DEVICE)
+                    } ?: return
+                    // The broadcast carries the freshest name in EXTRA_NAME during
+                    // discovery — `dev.name` is often null on first sighting and
+                    // only resolves later (or never, for anonymous peripherals).
+                    val name = intent.getStringExtra(android.bluetooth.BluetoothDevice.EXTRA_NAME)?.takeIf { it.isNotBlank() }
+                        ?: runCatching { dev.name }.getOrNull()?.takeIf { it.isNotBlank() }
+                        ?: dev.address
+                    val bonded = dev.bondState == android.bluetooth.BluetoothDevice.BOND_BONDED
+                    val entry = LauncherState.BtDevice(name, dev.address, bonded, connected = isBtDeviceConnected(dev))
+                    ui.post {
+                        val existingIdx = state.btDevices.indexOfFirst { it.address == dev.address }
+                        if (existingIdx < 0) {
+                            state.btDevices.add(entry)
+                        } else if (state.btDevices[existingIdx].name != name && name != dev.address) {
+                            // Upgrade entry: a real name has arrived; previously we only had MAC.
+                            state.btDevices[existingIdx] = state.btDevices[existingIdx].copy(name = name)
+                        }
+                    }
+                }
+                BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> ui.post { state.btScanning = false }
+                // Pairing just completed → kick off A2DP/HSP connect so the user
+                // doesn't have to tap a second time. Android sometimes does this
+                // automatically but on custom ROMs it's unreliable.
+                android.bluetooth.BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
+                    val dev = if (android.os.Build.VERSION.SDK_INT >= 33) {
+                        intent.getParcelableExtra(android.bluetooth.BluetoothDevice.EXTRA_DEVICE, android.bluetooth.BluetoothDevice::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(android.bluetooth.BluetoothDevice.EXTRA_DEVICE)
+                    }
+                    val newState = intent.getIntExtra(android.bluetooth.BluetoothDevice.EXTRA_BOND_STATE, -1)
+                    if (dev != null && newState == android.bluetooth.BluetoothDevice.BOND_BONDED) {
+                        btProfileAction(dev, connect = true)
+                    }
+                    ui.post { if (state.panel == Panel.BT_SCAN) refreshBtDevices() }
+                }
+                // Profile or ACL state changed → rebuild the bonded portion so the
+                // "● connected" badge updates live.
+                android.bluetooth.BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED,
+                android.bluetooth.BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED,
+                android.bluetooth.BluetoothDevice.ACTION_ACL_CONNECTED,
+                android.bluetooth.BluetoothDevice.ACTION_ACL_DISCONNECTED -> ui.post {
+                    if (state.panel == Panel.BT_SCAN) refreshBtDevices()
+                }
+            }
+        }
+    }
+
     private val tick: Runnable = object : Runnable {
         override fun run() {
             val now = Date()
@@ -492,6 +619,10 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         refreshCredentialsDisplay()
         // ntfy.sh subscriber: hydrate display state + auto-start if the
         // user previously enabled it (matches webserver auto-on pattern).
+        // ensureTopic() seeds a random per-device topic on first cold boot
+        // after a fresh flash so the user has a usable URL out of the box;
+        // the subscriber stays off until they flip the enable toggle.
+        ntfyPrefs.ensureTopic()
         state.ntfyTopic = ntfyPrefs.topic
         state.ntfySubscriberEnabled = ntfyPrefs.enabled
         state.ntfyStatus = if (ntfyPrefs.enabled && ntfyPrefs.isConfigured()) "connecting" else "disabled"
@@ -560,6 +691,25 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
         registerReceiver(netRx, netFilter)
         registerReceiver(batteryRx, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val btScanFilter = IntentFilter().apply {
+            addAction(android.bluetooth.BluetoothDevice.ACTION_FOUND)
+            addAction(android.bluetooth.BluetoothDevice.ACTION_NAME_CHANGED)
+            addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
+            addAction(android.bluetooth.BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+            addAction(android.bluetooth.BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED)
+            addAction(android.bluetooth.BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED)
+            addAction(android.bluetooth.BluetoothDevice.ACTION_ACL_CONNECTED)
+            addAction(android.bluetooth.BluetoothDevice.ACTION_ACL_DISCONNECTED)
+        }
+        registerReceiver(btScanRx, btScanFilter)
+        // Bind A2DP and HEADSET profile proxies so we can query which paired
+        // devices are currently connected (the only authoritative source).
+        runCatching {
+            BluetoothAdapter.getDefaultAdapter()?.let { adp ->
+                adp.getProfileProxy(this, btProfileListener, android.bluetooth.BluetoothProfile.A2DP)
+                adp.getProfileProxy(this, btProfileListener, android.bluetooth.BluetoothProfile.HEADSET)
+            }
+        }
 
         val pkgFilter = IntentFilter().apply {
             addAction(Intent.ACTION_PACKAGE_ADDED)
@@ -620,6 +770,13 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         ui.removeCallbacks(tick)
         runCatching { unregisterReceiver(netRx) }
         runCatching { unregisterReceiver(batteryRx) }
+        runCatching { unregisterReceiver(btScanRx) }
+        @Suppress("DEPRECATION")
+        runCatching {
+            val adapter = BluetoothAdapter.getDefaultAdapter()
+            btA2dpProxy?.let { adapter?.closeProfileProxy(android.bluetooth.BluetoothProfile.A2DP, it) }
+            btHeadsetProxy?.let { adapter?.closeProfileProxy(android.bluetooth.BluetoothProfile.HEADSET, it) }
+        }
         runCatching { unregisterReceiver(packageRx) }
         runCatching { unregisterReceiver(voiceKeyRx) }
         runCatching { unregisterReceiver(hermesConfigRx) }
@@ -706,10 +863,22 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
     }
 
+    @Suppress("DEPRECATION")
     private fun refreshBluetooth() {
-        state.btOn = runCatching {
+        val now = runCatching {
             BluetoothAdapter.getDefaultAdapter()?.isEnabled == true
         }.getOrDefault(false)
+        val was = state.btOn
+        state.btOn = now
+        // When BT comes on, (re-)bind the profile proxies if we don't have them
+        // yet. getProfileProxy returns false silently while the adapter is off,
+        // so binds attempted at cold-start never reach onServiceConnected.
+        if (now) ensureBtProxiesBound()
+        // If we're on the BT panel and BT just came on, kick off a fresh scan.
+        // If it just went off, clear the list so the toggle row stands alone.
+        if (state.panel == Panel.BT_SCAN && now != was) {
+            if (now) startBtScan() else state.btDevices.clear()
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -1930,6 +2099,22 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     override fun toggleBluetooth(enable: Boolean) {
         state.btOn = enable
         Thread {
+            if (enable) {
+                // CarrotOS ships without audio profile services enabled — the
+                // build.prop flags for them are unset, so com.android.bluetooth
+                // starts without A2dpService / HeadsetService, leaving the
+                // headset paired but audio routing broken. Check the prop via
+                // `getprop` (carroot), and only restart the BT process when
+                // we actually need to flip a profile from off to on.
+                val propsOut = "/data/local/tmp/bt_profile.txt"
+                sendToCarroot("getprop bluetooth.profile.a2dp.source.enabled > $propsOut; chmod 666 $propsOut")
+                Thread.sleep(100)
+                val currentVal = runCatching { java.io.File(propsOut).readText().trim() }.getOrDefault("")
+                if (currentVal != "true") {
+                    sendToCarroot("setprop bluetooth.profile.a2dp.source.enabled true; setprop bluetooth.profile.hfp.ag.enabled true; setprop bluetooth.profile.avrcp.target.enabled true; am force-stop com.android.bluetooth")
+                    Thread.sleep(800)
+                }
+            }
             // Try framework API first. BluetoothAdapter.enable()/disable() are deprecated since
             // API 33 but still work for system-signed apps; otherwise they silently no-op.
             val adapter = runCatching { BluetoothAdapter.getDefaultAdapter() }.getOrNull()
@@ -1951,6 +2136,140 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             Thread.sleep(2500)
             ui.post { refreshBluetooth() }
         }.start()
+    }
+
+    @Suppress("DEPRECATION")
+    override fun startBtScan() {
+        if (!ensureBtScanPerm()) return
+        val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
+        state.btDevices.clear()
+        if (!adapter.isEnabled) {
+            // BT is off — list stays empty; user toggles on from the page itself.
+            state.btScanning = false
+            return
+        }
+        refreshBtDevices()
+        // If a discovery is already running (re-entering panel), don't double-start.
+        if (runCatching { adapter.isDiscovering }.getOrDefault(false)) {
+            state.btScanning = true
+            return
+        }
+        val started = runCatching { adapter.startDiscovery() }.getOrDefault(false)
+        state.btScanning = started
+    }
+
+    @Suppress("DEPRECATION")
+    override fun stopBtScan() {
+        runCatching { BluetoothAdapter.getDefaultAdapter()?.cancelDiscovery() }
+        state.btScanning = false
+    }
+
+    @Suppress("DEPRECATION")
+    override fun pairBtDevice(address: String) {
+        val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
+        val dev = runCatching { adapter.getRemoteDevice(address) }.getOrNull() ?: return
+        val bonded = dev.bondState == android.bluetooth.BluetoothDevice.BOND_BONDED
+        val connected = isBtDeviceConnected(dev)
+        when {
+            !bonded -> {
+                runCatching { dev.createBond() }
+                toast("Pairing…")
+            }
+            connected -> {
+                toast("Disconnecting…")
+                tryBtProfileActionWithRetry(dev, connect = false)
+            }
+            else -> {
+                toast("Connecting…")
+                tryBtProfileActionWithRetry(dev, connect = true)
+            }
+        }
+    }
+
+    /** Drive A2DP/HSP transition. The proper sequence on Android 14:
+     *   1. setConnectionPolicy(ALLOWED) on each profile so the stack accepts.
+     *   2. profile.connect(device) on A2DP and HEADSET to establish the link.
+     *   3. adapter.setActiveDevice(device, ALL) to route audio + call audio.
+     *  All three are hidden APIs; require BLUETOOTH_PRIVILEGED (platform sig). */
+    @Suppress("DEPRECATION")
+    private fun tryBtProfileActionWithRetry(dev: android.bluetooth.BluetoothDevice, connect: Boolean) {
+        val runIt = {
+            // 1+2: profile-proxy reflection (sets policy then calls connect/disconnect).
+            btProfileAction(dev, connect)
+            // 3: route audio.
+            val adapter = BluetoothAdapter.getDefaultAdapter()
+            val setActiveRes = runCatching {
+                adapter?.javaClass?.getMethod(
+                    "setActiveDevice",
+                    android.bluetooth.BluetoothDevice::class.java,
+                    Int::class.javaPrimitiveType,
+                )?.invoke(adapter, if (connect) dev else null, 2)
+            }
+            android.util.Log.i("R1Bt", "setActiveDevice(${if (connect) "dev" else "null"}, ALL)=${setActiveRes.getOrNull()} err=${setActiveRes.exceptionOrNull()?.cause?.message}")
+        }
+        if (btA2dpProxy != null || btHeadsetProxy != null) {
+            runIt()
+            return
+        }
+        ensureBtProxiesBound()
+        ui.postDelayed({
+            if (btA2dpProxy != null || btHeadsetProxy != null) {
+                runIt()
+            } else {
+                toast("BT bind failed — toggle BT off then on")
+            }
+        }, 1200L)
+    }
+
+    /** Trigger audio-profile connection / disconnection on both A2DP and HEADSET
+     *  proxies the same way Android Settings does: set ConnectionPolicy to
+     *  ALLOWED (otherwise the stack rejects the connect request) and then call
+     *  the hidden `connect()` / `disconnect()` methods. Both are `@SystemApi`,
+     *  available to platform-signed apps with `BLUETOOTH_PRIVILEGED`.
+     *  Per-profile failure is non-fatal — a device may only support one
+     *  profile (e.g. headphones without a mic). */
+    @Suppress("DEPRECATION")
+    private fun btProfileAction(dev: android.bluetooth.BluetoothDevice, connect: Boolean) {
+        val devClass = android.bluetooth.BluetoothDevice::class.java
+        val proxies = listOfNotNull(btA2dpProxy, btHeadsetProxy)
+        android.util.Log.i("R1Bt", "btProfileAction connect=$connect proxies=${proxies.size} a2dp=${btA2dpProxy != null} hs=${btHeadsetProxy != null}")
+        if (proxies.isEmpty()) {
+            toast("BT profile not ready, try again in 2s")
+            return
+        }
+        var anySuccess = false
+        var lastError: String? = null
+        var sawPolicyFailure = false
+        proxies.forEach { proxy ->
+            val proxyName = proxy.javaClass.simpleName
+            // Try setConnectionPolicy first (Android 12+), fall back to setPriority (older).
+            val policyRes = runCatching {
+                proxy.javaClass.getMethod("setConnectionPolicy", devClass, Int::class.javaPrimitiveType)
+                    .invoke(proxy, dev, if (connect) 100 else 0)
+            }.recoverCatching {
+                proxy.javaClass.getMethod("setPriority", devClass, Int::class.javaPrimitiveType)
+                    .invoke(proxy, dev, if (connect) 100 else 0)
+            }
+            if (policyRes.isFailure) {
+                sawPolicyFailure = true
+                android.util.Log.w("R1Bt", "$proxyName setConnectionPolicy failed: ${policyRes.exceptionOrNull()?.cause?.message ?: policyRes.exceptionOrNull()?.message}")
+            }
+            val res = runCatching {
+                proxy.javaClass.getMethod(if (connect) "connect" else "disconnect", devClass)
+                    .invoke(proxy, dev) as? Boolean
+            }
+            res.onSuccess { ok ->
+                android.util.Log.i("R1Bt", "$proxyName ${if (connect) "connect" else "disconnect"} returned $ok")
+                if (ok == true) anySuccess = true
+            }.onFailure { t ->
+                lastError = "$proxyName: ${t.cause?.message ?: t.message}"
+                android.util.Log.w("R1Bt", "$proxyName ${if (connect) "connect" else "disconnect"} threw: $lastError")
+            }
+        }
+        if (!anySuccess) {
+            val why = lastError ?: if (sawPolicyFailure) "policy reject" else "no-op (already in state?)"
+            toast("BT ${if (connect) "connect" else "disconnect"}: $why")
+        }
     }
 
     override fun factoryReset() {
@@ -2192,6 +2511,9 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             }
         }
         playRecordStartTone()
+        // SCO is a no-op when no BT headset is connected; when one is paired
+        // the 200ms delay below gives SCO time to establish before AudioRecord opens.
+        audioManager?.startBluetoothSco()
 
         val session = com.r1.launcher.voice.ElevenLabsRealtimeClient.open(
             apiKey = key,
@@ -2248,6 +2570,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
      *  finalize through handleCommittedTranscript. */
     private fun stopVoiceCapture() {
         voiceCapture?.close()
+        audioManager?.stopBluetoothSco()
         voiceCapture = null
         voiceSession?.finish()
         // voiceSession nulled inside handleCommittedTranscript or onError.
@@ -2269,6 +2592,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     /** Hard-cancel: drop session, no transcript expected. */
     private fun cancelVoiceCapture() {
         voiceCapture?.close()
+        audioManager?.stopBluetoothSco()
         voiceCapture = null
         voiceSession?.cancel()
         voiceSession = null
@@ -2329,6 +2653,11 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         // typing isn't clobbered. User can wheel-press to run.
         state.terminalInput = if (state.terminalInput.isBlank()) raw
             else state.terminalInput.trimEnd() + " " + raw
+    }
+
+    override fun getClipboardText(): String {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        return cm?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
     }
 
     override fun copyToClipboard(text: String, label: String) {
@@ -3477,6 +3806,22 @@ override fun hermesPasteServerUrlFromClipboard() {
         return granted
     }
 
+    private fun ensureBtScanPerm(): Boolean {
+        if (android.os.Build.VERSION.SDK_INT < 31) return true
+        val scan = ContextCompat.checkSelfPermission(this, "android.permission.BLUETOOTH_SCAN") ==
+            PackageManager.PERMISSION_GRANTED
+        val connect = ContextCompat.checkSelfPermission(this, "android.permission.BLUETOOTH_CONNECT") ==
+            PackageManager.PERMISSION_GRANTED
+        if (!scan || !connect) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf("android.permission.BLUETOOTH_SCAN", "android.permission.BLUETOOTH_CONNECT"),
+                REQ_BT_SCAN_PERM,
+            )
+        }
+        return scan && connect
+    }
+
     private fun ensureAudioPerm(): Boolean {
         val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
@@ -3527,6 +3872,11 @@ override fun hermesPasteServerUrlFromClipboard() {
                 state.smsError = null
                 loadSmsConversations()
             }
+        }
+        if (requestCode == REQ_BT_SCAN_PERM &&
+            grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+            // Permissions just granted — start the scan the user originally requested.
+            if (state.panel == Panel.BT_SCAN) startBtScan()
         }
     }
 

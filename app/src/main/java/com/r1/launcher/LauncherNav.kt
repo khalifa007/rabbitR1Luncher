@@ -117,6 +117,10 @@ interface LauncherHost {
      *  to HERMES_CONFIG, auto-probe /health. */
     fun hermesScanned(raw: String)
     fun copyToClipboard(text: String, label: String = "r1-launcher")
+    /** Read the current Android system clipboard as a plain string (or empty
+     *  if nothing is available). Used by the long-press paste popup in chat
+     *  panels — pure read, no insertion. */
+    fun getClipboardText(): String
     fun setLanguage(code: String)
 
     // --- meetings (transcriber) ---
@@ -183,6 +187,11 @@ interface LauncherHost {
     fun toggleNtfySubscriber(enabled: Boolean)
     fun ntfySetTopic(topic: String)
     fun ntfyConfigRowActivate(idx: Int)
+
+    // --- bluetooth scan ---
+    fun startBtScan()
+    fun stopBtScan()
+    fun pairBtDevice(address: String)
 }
 
 fun LauncherState.wheelUp(host: LauncherHost) {
@@ -284,6 +293,13 @@ fun LauncherState.wheelUp(host: LauncherHost) {
                 back(); host.backTone()
             } else {
                 wifiScanFocus--; host.navTone()
+            }
+        }
+        Panel.BT_SCAN -> {
+            if (btScanFocus <= 0) {
+                host.stopBtScan(); back(); host.backTone()
+            } else {
+                btScanFocus--; host.navTone()
             }
         }
         Panel.WIFI_PASSWORD -> { /* camera/keyboard handles input */ }
@@ -493,7 +509,7 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.NETWORK -> {
             val prev = networkFocus
-            // back, wifi, cellular, bluetooth, share, remote, passcode, terminal, ntfy, scan
+            // back, wifi, cellular, bluetooth (opens panel), share, remote, passcode, terminal, ntfy, wifi-scan
             networkFocus = (networkFocus + 1).coerceAtMost(9)
             if (prev != networkFocus) host.navTone()
         }
@@ -507,6 +523,13 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             val prev = wifiScanFocus
             wifiScanFocus = (wifiScanFocus + 1).coerceAtMost(max)
             if (prev != wifiScanFocus) host.navTone()
+        }
+        Panel.BT_SCAN -> {
+            // 0=back, 1=toggle, 2..N+1=device rows
+            val max = (1 + btDevices.size).coerceAtLeast(1)
+            val prev = btScanFocus
+            btScanFocus = (btScanFocus + 1).coerceAtMost(max)
+            if (prev != btScanFocus) host.navTone()
         }
         Panel.WIFI_PASSWORD -> { /* camera/keyboard handles input */ }
         Panel.WIFI_SHARE -> {
@@ -730,7 +753,7 @@ fun LauncherState.activate(host: LauncherHost) {
             0 -> { back(); host.backTone() }
             1 -> { host.toggleWifi(!wifiEnabled); host.popTone() }
             2 -> { host.toggleCellular(!cellularOn); host.popTone() }
-            3 -> { host.toggleBluetooth(!btOn); host.popTone() }
+            3 -> { openBtScan(); host.startBtScan(); host.selectTone() }
             4 -> { openWifiShare(); host.selectTone() }
             5 -> { host.toggleWebServer(!webServerEnabled); host.popTone() }
             6 -> { openPanelPasscodeEditor(); host.selectTone() }
@@ -766,6 +789,14 @@ fun LauncherState.activate(host: LauncherHost) {
                     openWifiPassword(ssid)
                     host.selectTone()
                 }
+            }
+        }
+        Panel.BT_SCAN -> when {
+            btScanFocus == 0 -> { host.stopBtScan(); back(); host.backTone() }
+            btScanFocus == 1 -> { host.toggleBluetooth(!btOn); host.popTone() }
+            else -> {
+                val dev = btDevices.getOrNull(btScanFocus - 2)
+                if (dev != null) { host.pairBtDevice(dev.address); host.selectTone() }
             }
         }
         Panel.WIFI_PASSWORD -> { /* RetroKeyboard handles input */ }
@@ -867,6 +898,10 @@ fun LauncherState.activate(host: LauncherHost) {
 }
 
 fun LauncherState.backPressed(host: LauncherHost) {
+    if (panel == Panel.BT_SCAN) {
+        host.stopBtScan(); back(); host.backTone()
+        return
+    }
     if (panel == Panel.OPENCLAW_CHAT || panel == Panel.OPENCLAW_QR) {
         host.openClawCloseSession()
         back(); host.backTone()

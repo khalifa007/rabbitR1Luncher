@@ -23,12 +23,14 @@ import java.util.concurrent.atomic.AtomicBoolean
  * ntfy.sh's `/json` endpoint streams newline-delimited JSON: one object per
  * line, indefinitely, with `{"event":"keepalive"}` frames every ~30s. We
  * hold the connection open with `readTimeout=0`, parse line-by-line, and
- * fire [onMessage] for each `event=="message"` frame. Keepalives advance
- * `?since=` cursor implicitly because they share the same monotonic id space.
+ * fire [onMessage] for each `event=="message"` frame.
  *
  * Reconnect: exponential backoff 2s → 16s on any non-user-initiated close.
  * Resume: `?since=<lastId>` on reconnect replays anything we missed during
- * the drop window (ntfy retains 12h by default).
+ * the drop window (ntfy retains 12h by default). The cursor is advanced
+ * only on message frames — keepalive/open ids are connection-level and
+ * aren't recognized by the server as resume cursors; using one would make
+ * the next reconnect dump the entire retention window (see handleFrameLocked).
  *
  * Power: no WifiLock. The launcher's package is whitelisted from Doze via
  * /system/etc/sysconfig/r1-launcher.xml (allow-in-power-save), which lets the
@@ -278,10 +280,17 @@ class NtfySubscriber(
         val event = obj["event"]?.jsonPrimitive?.contentOrNull
         val frameId = obj["id"]?.jsonPrimitive?.contentOrNull
         val frameTimeSec = obj["time"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L
-        // Advance the resume cursor for *every* frame with an id, not just
-        // messages — so an idle stream of keepalives still moves forward
-        // and we don't replay them on reconnect. Gen-check + write happens
-        // under cursorLock so it interlocks with resetCursorAndResync's
+        // Only `event == "message"` frames are persisted to ntfy.sh's message
+        // log; `open` / `keepalive` / `poll_request` ids are connection-level
+        // and aren't recognized as `?since=` cursors. If we advance lastMessageId
+        // to a keepalive id, the next reconnect's `?since=<keepalive_id>` is
+        // treated as "unknown cursor" and ntfy.sh dumps the full 12h retention
+        // window, duplicating every still-cached message.
+        if (event != "message") return
+        // Advance the resume cursor *before* any further client-side filtering
+        // (clear-fence, blank-body drop) so even messages we choose to suppress
+        // still count as "seen" — otherwise reconnects would re-deliver them.
+        // Gen-check + write under cursorLock interlocks with resetCursorAndResync's
         // bump+clear; without the lock a frame whose loop-level gen check
         // already passed could still write a stale id over the user clear.
         if (frameId != null && frameId.isNotBlank()) {
@@ -289,7 +298,6 @@ class NtfySubscriber(
                 if (myGen == generation) prefs.lastMessageId = frameId
             }
         }
-        if (event != "message") return
         val body = obj["message"]?.jsonPrimitive?.contentOrNull.orEmpty()
         val title = obj["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
         if (body.isBlank() && title.isBlank()) return

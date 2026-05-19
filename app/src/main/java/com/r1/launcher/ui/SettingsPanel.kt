@@ -59,7 +59,7 @@ private val HIGHLIGHT_BG = Color(0xFFFF4500) // Orange pill background
 private val TRACK_OFF = Color(0xFF333333)
 
 internal sealed class SettingsItem(val label: String) {
-    class Standard(label: String) : SettingsItem(label)
+    class Standard(label: String, val subtitle: String = "") : SettingsItem(label)
     class Toggle(label: String, val checked: Boolean, val subtitle: String = "") : SettingsItem(label)
     class Info(label: String, val value: String) : SettingsItem(label)
 }

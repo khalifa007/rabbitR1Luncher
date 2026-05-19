@@ -66,11 +66,36 @@ class NtfyPrefs private constructor(ctx: Context) {
 
     fun isConfigured(): Boolean = topic.isNotBlank()
 
+    /** One-shot seed of a random per-device topic on first launch. The topic
+     *  name is the only auth on public ntfy.sh, so this needs real entropy —
+     *  16 hex chars = 64 bits, comfortable against brute-force probing of
+     *  /json endpoints. Idempotent across reboots via [KEY_TOPIC_SEEDED] so
+     *  a user who later clears the topic in Settings doesn't get a surprise
+     *  regenerated one on the next boot. Existing installs upgrading into
+     *  this code path keep their topic and just get the seeded flag set. */
+    fun ensureTopic(): String {
+        if (plain.getBoolean(KEY_TOPIC_SEEDED, false)) return topic
+        val existing = topic
+        if (existing.isNotBlank()) {
+            plain.edit(commit = true) { putBoolean(KEY_TOPIC_SEEDED, true) }
+            return existing
+        }
+        val bytes = ByteArray(8).also { java.security.SecureRandom().nextBytes(it) }
+        val generated = "r1-" + bytes.joinToString("") { "%02x".format(it) }
+        plain.edit(commit = true) {
+            putString(KEY_TOPIC, generated)
+            putBoolean(KEY_TOPIC_SEEDED, true)
+        }
+        android.util.Log.i("NtfyPrefs", "seeded random topic on first launch")
+        return generated
+    }
+
     companion object {
         private const val KEY_TOPIC = "topic"
         private const val KEY_ENABLED = "enabled"
         private const val KEY_LAST_ID = "last.id"
         private const val KEY_CLEARED_AT_MS = "cleared.at.ms"
+        private const val KEY_TOPIC_SEEDED = "topic.seeded"
 
         @Volatile private var instance: NtfyPrefs? = null
         fun get(ctx: Context): NtfyPrefs =

@@ -37,6 +37,16 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" tools:targetApi="s"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" tools:targetApi="s"/>
+    <!-- Signature-level: needed to call hidden BluetoothA2dp.connect / setActiveDevice
+         on platform-signed apps. Lets us trigger audio-profile connection on a
+         paired device, the same way Android's Settings does. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_PRIVILEGED"
+        tools:ignore="ProtectedPermissions"/>
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <queries>

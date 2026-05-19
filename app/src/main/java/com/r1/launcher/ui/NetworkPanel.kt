@@ -43,7 +43,11 @@ fun NetworkPanel(
             SettingsItem.Standard("__header__"),
             SettingsItem.Toggle(stringResource(R.string.network_row_wifi), state.wifiEnabled, subtitle = if (state.wifiEnabled) state.wifiConnectedSsid else ""),
             SettingsItem.Toggle(stringResource(R.string.network_row_cellular), state.cellularOn),
-            SettingsItem.Toggle(stringResource(R.string.network_row_bluetooth), state.btOn),
+            SettingsItem.Toggle(
+                stringResource(R.string.network_row_bluetooth),
+                state.btOn,
+                subtitle = if (state.btOn) "tap to manage devices" else "",
+            ),
             SettingsItem.Toggle(
                 stringResource(R.string.network_row_share),
                 state.wifiShareEnabled,
@@ -119,7 +123,9 @@ fun NetworkPanel(
                             label = item.label,
                             focused = idx == state.networkFocus,
                             toggleChecked = (item as? SettingsItem.Toggle)?.checked,
-                            subtitle = (item as? SettingsItem.Toggle)?.subtitle ?: "",
+                            subtitle = (item as? SettingsItem.Toggle)?.subtitle
+                                ?: (item as? SettingsItem.Standard)?.subtitle
+                                ?: "",
                             onClick = { onRowClick(idx) },
                         )
                     }

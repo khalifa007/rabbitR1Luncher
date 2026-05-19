@@ -6,9 +6,11 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,6 +28,10 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,6 +44,7 @@ import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
 import com.r1.launcher.R
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TerminalPanel(
     state: LauncherState,
@@ -48,6 +55,8 @@ fun TerminalPanel(
     onClear: () -> Unit,
     onToggleKb: () -> Unit,
     onPaste: () -> Unit,
+    onAppendInput: (String) -> Unit = {},
+    getClipboardText: () -> String = { "" },
 ) {
     AnimatedVisibility(
         visible = state.panel == Panel.TERMINAL,
@@ -74,10 +83,12 @@ fun TerminalPanel(
             listState.scrollToItem(target)
         }
 
+        var showPaste by remember { mutableStateOf(false) }
+        var pasteText by remember { mutableStateOf("") }
+
+        Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black),
+            modifier = Modifier.fillMaxSize(),
         ) {
             AppPageHeader(
                 backFocused = false,
@@ -144,6 +155,13 @@ fun TerminalPanel(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(Color(0xFF0A0A0A))
+                    .combinedClickable(
+                        onClick = { /* keyboard toggles via 'kbd' pill in the header */ },
+                        onLongClick = {
+                            pasteText = getClipboardText()
+                            showPaste = true
+                        },
+                    )
                     .padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -214,6 +232,18 @@ fun TerminalPanel(
                     )
                 }
             }
+        }
+
+        ClipboardPastePopup(
+            visible = showPaste,
+            themeColor = AppThemes.Terminal,
+            clipboardText = pasteText,
+            onPaste = { text ->
+                onAppendInput(text)
+                showPaste = false
+            },
+            onDismiss = { showPaste = false },
+        )
         }
     }
 }
