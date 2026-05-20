@@ -4,8 +4,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateList
+import com.r1.launcher.hermes.HermesConnection
 import com.r1.launcher.hermes.HermesMessage
 import com.r1.launcher.messages.SmsConversation
 import com.r1.launcher.messages.SmsItem
@@ -15,7 +18,7 @@ import com.r1.launcher.openclaw.SessionEntry
 import com.r1.launcher.transcriber.MeetingIndexEntry
 import com.r1.launcher.transcriber.TranscriberDetailAction
 
-enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, SETTINGS_CREDENTIALS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, PANEL_PASSCODE, NTFY_CONFIG, BT_SCAN, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, HERMES_CHAT, HERMES_CONFIG, HERMES_QR, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS, NOTIFICATIONS }
+enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, SETTINGS_CREDENTIALS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, PANEL_PASSCODE, NTFY_CONFIG, BT_SCAN, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, HERMES_CHAT, HERMES_CONFIG, HERMES_QR, HERMES_CONNECTION_EDIT, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS, NOTIFICATIONS }
 
 enum class WifiShareEditTarget { SSID, PASSWORD }
 
@@ -282,11 +285,25 @@ class LauncherState {
     var terminalKbVisible by mutableStateOf(true)
 
     // --- hermes agent (Panel.HERMES_CHAT / HERMES_CONFIG) ---
-    /** Hermes chat scrollback — orange-right user / gray-left assistant bubbles.
-     *  Stateless on the Hermes server; this client owns the full history and
-     *  POSTs it every turn to /v1/chat/completions. */
-    val hermesMessages = mutableStateListOf<HermesMessage>()
+    /** Per-connection chat scrollback. Compose-observable; switching active
+     *  connection swaps which list the chat panel renders via
+     *  [hermesActiveHistory]. */
+    val hermesHistories = mutableStateMapOf<String, SnapshotStateList<HermesMessage>>()
     val hermesMessagesMax = 500
+
+    /** Observable mirror of HermesPrefs.connections. */
+    val hermesConnections = mutableStateListOf<HermesConnection>()
+
+    /** Observable mirror of HermesPrefs.activeId (null when no connections). */
+    var hermesActiveId by mutableStateOf<String?>(null)
+
+    /** Returns the message list for the currently-active connection, or null
+     *  when there is none. Lazily creates an empty observable list on first
+     *  access for an active connection — call from the UI thread. */
+    fun hermesActiveHistory(): SnapshotStateList<HermesMessage>? {
+        val id = hermesActiveId ?: return null
+        return hermesHistories.getOrPut(id) { mutableStateListOf() }
+    }
     /** Live assistant streaming preview — populated per SSE delta. Cleared and
      *  replaced by a committed [HermesMessage] when the stream ends. */
     var hermesStreamingText by mutableStateOf("")
@@ -318,6 +335,17 @@ class LauncherState {
     var hermesQrError by mutableStateOf<String?>(null)
     /** True when entering HERMES_CONFIG from HERMES_CHAT; controls back routing. */
     var hermesConfigCameFromChat by mutableStateOf(false)
+
+    /** Connection-edit sub-panel state: id being edited (null = new-mode). */
+    var hermesConnectionEditId by mutableStateOf<String?>(null)
+    var hermesConnectionEditFocus by mutableIntStateOf(0)
+    /** Buffer for the edit panel's URL row. */
+    var hermesConnectionEditUrlInput by mutableStateOf("")
+    /** Buffer for the edit panel's API key row. */
+    var hermesConnectionEditKeyInput by mutableStateOf("")
+    /** Timestamp (SystemClock.uptimeMillis) when the "delete connection" row
+     *  was first armed. Second activate within 3000 ms confirms. */
+    var hermesConnectionEditDeleteArmedAt by mutableStateOf(0L)
 
     // --- meetings (transcriber) ---
     /** Index of saved meetings, newest first. Hydrated from MeetingStore on
@@ -679,6 +707,16 @@ class LauncherState {
         panel = Panel.HERMES_QR
     }
 
+    fun openHermesConnectionEdit(id: String?) {
+        hermesConnectionEditId = id
+        hermesConnectionEditFocus = 0
+        hermesConnectionEditDeleteArmedAt = 0L
+        val existing = id?.let { editId -> hermesConnections.firstOrNull { it.id == editId } }
+        hermesConnectionEditUrlInput = existing?.url.orEmpty()
+        hermesConnectionEditKeyInput = ""
+        panel = Panel.HERMES_CONNECTION_EDIT
+    }
+
     fun openTranscriberList() {
         transcriberListFocus = 0
         detailStatus = ""
@@ -746,6 +784,7 @@ class LauncherState {
             Panel.HERMES_CHAT -> Panel.APPS
             Panel.HERMES_CONFIG -> if (hermesConfigCameFromChat) Panel.HERMES_CHAT else Panel.APPS
             Panel.HERMES_QR -> Panel.HERMES_CONFIG
+            Panel.HERMES_CONNECTION_EDIT -> Panel.HERMES_CONFIG
             Panel.TRANSCRIBER_LIST -> Panel.APPS
             // Recording-stop side-effect is fired by LauncherActivity's
             // backPressed handling; here we just unwind the panel.

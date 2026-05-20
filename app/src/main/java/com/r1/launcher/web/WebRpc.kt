@@ -97,7 +97,7 @@ object WebRpc {
         }
 
         "hermes.send" -> {
-            if (state.hermesServerUrl.isBlank()) {
+            if (state.hermesActiveId == null) {
                 throw RpcException("hermes_unconfigured", "hermes server url not set")
             }
             host.hermesSendText(params.requireString("text")); JsonNull
@@ -110,7 +110,7 @@ object WebRpc {
             put("status", state.hermesStatus)
             put("streaming", state.hermesStreamingText)
             put("messages", buildJsonArray {
-                state.hermesMessages.toList().forEach { m ->
+                (state.hermesActiveHistory()?.toList().orEmpty()).forEach { m ->
                     add(buildJsonObject {
                         put("role", m.role)
                         put("text", m.text)
@@ -260,9 +260,9 @@ object WebRpc {
         })
         put("hermes", buildJsonObject {
             put("status", state.hermesStatus)
-            put("hasConfig", state.hermesServerUrl.isNotBlank())
+            put("hasConfig", state.hermesActiveId != null)
             put("model", state.hermesModel)
-            put("messageCount", state.hermesMessages.size)
+            put("messageCount", state.hermesActiveHistory()?.size ?: 0)
             put("busy", state.hermesBusy)
         })
         put("notifications", buildJsonObject {
@@ -338,7 +338,7 @@ object WebRpc {
                 JsonNull
             }
             "hermes_chat" -> {
-                if (state.hermesServerUrl.isBlank()) {
+                if (state.hermesActiveId == null) {
                     throw RpcException("hermes_unconfigured", "hermes server url not set")
                 }
                 host.hermesSendText(text)

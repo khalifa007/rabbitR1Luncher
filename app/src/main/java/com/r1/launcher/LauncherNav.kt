@@ -338,6 +338,10 @@ fun LauncherState.wheelUp(host: LauncherHost) {
         }
         Panel.OPENCLAW_QR -> { /* camera handles input */ }
         Panel.HERMES_QR -> { /* camera handles input */ }
+        Panel.HERMES_CONNECTION_EDIT -> {
+            if (hermesConnectionEditFocus <= 0) { back(); host.backTone() }
+            else { hermesConnectionEditFocus--; host.navTone() }
+        }
         Panel.OPENCLAW_CHAT -> { host.openClawScrollUp(); host.navTone() }
         Panel.OPENCLAW_CAMERA -> { host.openClawCameraMotorNudge(-15) }
         Panel.OPENCLAW_SETTINGS -> {
@@ -565,6 +569,11 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.OPENCLAW_QR -> { /* camera handles input */ }
         Panel.HERMES_QR -> { /* camera handles input */ }
+        Panel.HERMES_CONNECTION_EDIT -> {
+            val prev = hermesConnectionEditFocus
+            hermesConnectionEditFocus = (hermesConnectionEditFocus + 1).coerceAtMost(3)
+            if (prev != hermesConnectionEditFocus) host.navTone()
+        }
         Panel.OPENCLAW_CHAT -> { host.openClawScrollDown(); host.navTone() }
         Panel.OPENCLAW_CAMERA -> { host.openClawCameraMotorNudge(+15) }
         Panel.OPENCLAW_SETTINGS -> {
@@ -803,6 +812,7 @@ fun LauncherState.activate(host: LauncherHost) {
         Panel.BRIGHTNESS, Panel.VOLUME, Panel.UI_VOLUME -> { back(); host.selectTone() }
         Panel.OPENCLAW_QR -> { /* camera scan auto-completes; activate is no-op */ }
         Panel.HERMES_QR -> { /* camera scan auto-completes; activate is no-op */ }
+        Panel.HERMES_CONNECTION_EDIT -> { if (hermesConnectionEditFocus == 0) { back(); host.backTone() } }
         Panel.OPENCLAW_CHAT -> { host.openClawToggleRecord(); host.popTone() }
         Panel.OPENCLAW_CAMERA -> { /* touch-first capture/ask surface */ }
         Panel.OPENCLAW_SETTINGS -> {

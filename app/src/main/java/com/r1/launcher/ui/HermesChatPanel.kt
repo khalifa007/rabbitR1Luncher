@@ -59,7 +59,7 @@ import com.r1.launcher.hermes.HermesMessage
 
 /**
  * Chat surface for the Hermes Agent app. Stateless server-side — this panel just
- * renders [LauncherState.hermesMessages] / [LauncherState.hermesStreamingText] /
+ * renders [LauncherState.hermesActiveHistory] / [LauncherState.hermesStreamingText] /
  * [LauncherState.hermesPartialText] and routes input through the host callbacks.
  *
  * Visual idiom is a deliberate near-clone of OpenClawChatPanel so users moving
@@ -97,11 +97,12 @@ fun HermesChatPanel(
             Column(modifier = Modifier.fillMaxSize()) {
 
                 val listState = rememberLazyListState()
+                val messages: List<HermesMessage> = state.hermesActiveHistory() ?: emptyList()
                 var lastTick by remember { mutableStateOf(state.hermesScrollIndex) }
-                var lastSize by remember { mutableStateOf(state.hermesMessages.size) }
-                LaunchedEffect(state.hermesScrollIndex, state.hermesMessages.size) {
-                    val sizeGrew = state.hermesMessages.size > lastSize
-                    lastSize = state.hermesMessages.size
+                var lastSize by remember { mutableStateOf(messages.size) }
+                LaunchedEffect(state.hermesScrollIndex, messages.size) {
+                    val sizeGrew = messages.size > lastSize
+                    lastSize = messages.size
                     if (state.hermesScrollIndex == 0 && (lastTick != 0 || sizeGrew)) {
                         runCatching { listState.animateScrollToItem(0) }
                         lastTick = 0
@@ -150,12 +151,12 @@ fun HermesChatPanel(
                             )
                         }
                     }
-                    if (state.hermesMessages.isEmpty() && state.hermesStreamingText.isBlank()) {
+                    if (messages.isEmpty() && state.hermesStreamingText.isBlank()) {
                         item {
                             HermesEmptyHint(state.hermesStatus)
                         }
                     } else {
-                        val reversed = state.hermesMessages.asReversed()
+                        val reversed = messages.asReversed()
                         itemsIndexed(items = reversed, key = { _, m -> m.id }) { _, msg ->
                             HermesBubble(
                                 msg = msg,

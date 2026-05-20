@@ -43,6 +43,7 @@ import com.r1.launcher.transcriber.SmtpSender
 import com.r1.launcher.transcriber.TranscriberPrefs
 import com.r1.launcher.transcriber.TranscriberRecordingService
 import com.r1.launcher.transcriber.TranscriptFormatter
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import kotlinx.serialization.json.put
 import com.r1.launcher.ui.LauncherRoot
 import com.r1.launcher.ui.MOTOR_BACK
@@ -1004,18 +1005,23 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.hermesHideChat = hermesPrefs.hideChat
         state.hermesServerUrlInput = hermesPrefs.serverUrl
         state.hermesApiKeyInput = ""
-        val activeId = hermesPrefs.active?.id
-        if (activeId != null && state.hermesMessages.isEmpty()) {
-            val persisted = com.r1.launcher.hermes.HermesHistoryStore.load(this, activeId)
-            if (persisted.isNotEmpty()) {
-                state.hermesMessages.addAll(persisted)
+        state.hermesConnections.clear()
+        state.hermesConnections.addAll(hermesPrefs.connections)
+        state.hermesActiveId = hermesPrefs.active?.id
+        val activeId = state.hermesActiveId
+        if (activeId != null) {
+            val list = state.hermesActiveHistory() ?: return
+            if (list.isEmpty()) {
+                val persisted = com.r1.launcher.hermes.HermesHistoryStore.load(this, activeId)
+                if (persisted.isNotEmpty()) list.addAll(persisted)
             }
         }
     }
 
     private fun persistHermesHistory() {
-        val activeId = hermesPrefs.active?.id ?: return
-        com.r1.launcher.hermes.HermesHistoryStore.save(this, activeId, state.hermesMessages.toList())
+        val activeId = state.hermesActiveId ?: return
+        val list = state.hermesActiveHistory() ?: return
+        com.r1.launcher.hermes.HermesHistoryStore.save(this, activeId, list.toList())
     }
 
     private fun openClawStartSession() {
@@ -2798,9 +2804,18 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             toastFail("hermes: configure server url first")
             return
         }
+        val active = hermesPrefs.active ?: run {
+            toastFail("hermes: no connection")
+            return
+        }
+        val capturedId = active.id
+        val history = state.hermesActiveHistory() ?: run {
+            toastFail("hermes: no connection")
+            return
+        }
         val userMsg = com.r1.launcher.hermes.HermesMessage(role = "user", text = trimmed)
-        state.hermesMessages.add(userMsg)
-        trimHermesMessages()
+        history.add(userMsg)
+        trimHermesMessages(history)
         persistHermesHistory()
         state.hermesScrollIndex = 0
         state.hermesStreamingText = ""
@@ -2815,15 +2830,9 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             hermesSpeakNextAssistant = true
         }
 
-        val active = hermesPrefs.active ?: run {
-            state.hermesBusy = false
-            state.hermesStatus = "error: no connection"
-            return
-        }
-        val history = state.hermesMessages.toList()
         hermesClient.streamChat(
             connection = active,
-            history = history,
+            history = history.toList(),
             onDelta = { delta ->
                 ui.post {
                     state.hermesStreamingText = state.hermesStreamingText + delta
@@ -2840,11 +2849,11 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     state.hermesStreamingText = ""
                     state.hermesBusy = false
                     if (full.isNotBlank()) {
-                        state.hermesMessages.add(
+                        history.add(
                             com.r1.launcher.hermes.HermesMessage(role = "assistant", text = full)
                         )
-                        trimHermesMessages()
-                        persistHermesHistory()
+                        trimHermesMessages(history)
+                        com.r1.launcher.hermes.HermesHistoryStore.save(this, capturedId, history.toList())
                         state.hermesScrollIndex = 0
                         state.hermesStatus = "live"
                         // Only fall back to the one-shot read-back if the
@@ -2875,20 +2884,20 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     state.hermesStreamingText = ""
                     state.hermesBusy = false
                     state.hermesStatus = "error: $msg"
-                    state.hermesMessages.add(
+                    history.add(
                         com.r1.launcher.hermes.HermesMessage(role = "error", text = msg)
                     )
-                    trimHermesMessages()
-                    persistHermesHistory()
+                    trimHermesMessages(history)
+                    com.r1.launcher.hermes.HermesHistoryStore.save(this, capturedId, history.toList())
                     state.hermesScrollIndex = 0
                 }
             },
         )
     }
 
-    private fun trimHermesMessages() {
-        val over = state.hermesMessages.size - state.hermesMessagesMax
-        if (over > 0) repeat(over) { state.hermesMessages.removeAt(0) }
+    private fun trimHermesMessages(target: SnapshotStateList<com.r1.launcher.hermes.HermesMessage>) {
+        val over = target.size - state.hermesMessagesMax
+        if (over > 0) repeat(over) { target.removeAt(0) }
     }
 
     override fun hermesRecordStart() {
@@ -2911,13 +2920,14 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
     override fun hermesClearHistory() {
         cancelHermesSpeech()
-        hermesClient.cancel(hermesPrefs.active?.id)
-        state.hermesMessages.clear()
-        hermesPrefs.active?.id?.let { com.r1.launcher.hermes.HermesHistoryStore.clear(this, it) }
+        val activeId = hermesPrefs.active?.id
+        hermesClient.cancel(activeId)
+        state.hermesActiveHistory()?.clear()
+        if (activeId != null) com.r1.launcher.hermes.HermesHistoryStore.clear(this, activeId)
         state.hermesStreamingText = ""
         state.hermesBusy = false
         state.hermesStatus = "idle"
-        hermesPrefs.rotateSessionId()
+        activeId?.let { hermesPrefs.rotateSessionId(it) }
     }
 
     override fun hermesTestConnection() {
@@ -3033,7 +3043,7 @@ override fun hermesPasteServerUrlFromClipboard() {
 
     private fun speakLatestHermesAssistantIfNeeded() {
         if (!state.voiceEnabled || state.panel != Panel.HERMES_CHAT || !hermesSpeakNextAssistant) return
-        val msg = state.hermesMessages.lastOrNull { it.role == "assistant" && it.text.isNotBlank() } ?: return
+        val msg = state.hermesActiveHistory()?.lastOrNull { it.role == "assistant" && it.text.isNotBlank() } ?: return
         val key = "${msg.timestamp}:${msg.text.hashCode()}"
         if (key == hermesLastSpokenKey) return
         val apiKey = voicePrefs.elevenlabsKey
