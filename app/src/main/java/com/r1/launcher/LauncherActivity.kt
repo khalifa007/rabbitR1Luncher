@@ -3029,6 +3029,78 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
     }
 
+    override fun hermesConnectionEditRowActivate(idx: Int) {
+        val editId = state.hermesConnectionEditId
+        val isNew = editId == null
+        when (idx) {
+            0 -> {
+                state.hermesConnectionEditDeleteArmedAt = 0L
+                state.back()
+                backTone()
+            }
+            1, 2 -> popTone()  // row 1/2 open the inline keyboard in the panel itself
+            3 -> if (!isNew && editId != null) {
+                hermesRotateSession(editId)
+                toast("hermes: session rotated")
+                popTone()
+            }
+            4 -> if (!isNew && editId != null) {
+                val now = android.os.SystemClock.uptimeMillis()
+                val armed = state.hermesConnectionEditDeleteArmedAt
+                if (armed > 0L && now - armed < com.r1.launcher.ui.DELETE_ARM_MS) {
+                    hermesDeleteConnection(editId)
+                    state.hermesConnectionEditDeleteArmedAt = 0L
+                    state.back()
+                    toast("hermes: connection deleted")
+                } else {
+                    state.hermesConnectionEditDeleteArmedAt = now
+                }
+                popTone()
+            }
+        }
+    }
+
+    override fun hermesConnectionEditSaveUrl(value: String) {
+        val editId = state.hermesConnectionEditId
+        if (editId == null) {
+            val added = hermesAddConnection(value, state.hermesConnectionEditKeyInput)
+            if (added != null) {
+                state.hermesConnectionEditDeleteArmedAt = 0L
+                state.back()
+                hermesTestConnection()
+            }
+        } else {
+            hermesUpdateConnection(editId, url = value)
+            toast("hermes: url saved")
+        }
+    }
+
+    override fun hermesConnectionEditSaveKey(value: String) {
+        val editId = state.hermesConnectionEditId
+        if (editId == null) {
+            // Buffer-only — wait for URL save to commit the new connection.
+            state.hermesConnectionEditKeyInput = value
+            toast("hermes: key buffered (save url to create)")
+        } else {
+            hermesUpdateConnection(editId, key = value)
+            toast(if (value.isBlank()) "hermes: key cleared" else "hermes: key saved")
+        }
+    }
+
+    override fun hermesConnectionEditPasteUrl() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val raw = cm?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()?.trim().orEmpty()
+        if (raw.isBlank()) { toastFail("clipboard empty"); return }
+        state.hermesConnectionEditUrlInput = raw
+    }
+
+    override fun hermesConnectionEditPasteKey() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val raw = cm?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()?.trim().orEmpty()
+        if (raw.isBlank()) { toastFail("clipboard empty"); return }
+        state.hermesConnectionEditKeyInput = raw
+    }
+
     override fun openHermesQr() {
         ensureCameraPerm()
         state.openHermesQr()

@@ -314,10 +314,11 @@ internal fun SettingsRow(
     subtitle: String = "",
     subtitleColor: Color = Color(0xFFFF4500),
     leadingIcon: Int? = null,
+    labelColor: Color = Color.White,
     onClick: () -> Unit,
 ) {
     val bgColor = if (focused) HIGHLIGHT_BG else Color.Transparent
-    val textColor = if (focused) Color.Black else Color.White
+    val textColor = if (focused) Color.Black else labelColor
     val iconTint = if (focused) Color.Black else Color(0xFFFF6B00)
     val type = LocalR1Type.current
 

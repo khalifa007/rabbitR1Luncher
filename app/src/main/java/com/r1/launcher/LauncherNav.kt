@@ -121,6 +121,11 @@ interface LauncherHost {
     fun hermesUpdateConnection(id: String, url: String? = null, key: String? = null)
     fun hermesDeleteConnection(id: String)
     fun hermesRotateSession(id: String)
+    fun hermesConnectionEditRowActivate(idx: Int)
+    fun hermesConnectionEditSaveUrl(value: String)
+    fun hermesConnectionEditSaveKey(value: String)
+    fun hermesConnectionEditPasteUrl()
+    fun hermesConnectionEditPasteKey()
     fun copyToClipboard(text: String, label: String = "r1-launcher")
     /** Read the current Android system clipboard as a plain string (or empty
      *  if nothing is available). Used by the long-press paste popup in chat
@@ -344,6 +349,8 @@ fun LauncherState.wheelUp(host: LauncherHost) {
         Panel.OPENCLAW_QR -> { /* camera handles input */ }
         Panel.HERMES_QR -> { /* camera handles input */ }
         Panel.HERMES_CONNECTION_EDIT -> {
+            val isNew = hermesConnectionEditId == null
+            val maxIdx = if (isNew) 2 else 4
             if (hermesConnectionEditFocus <= 0) { back(); host.backTone() }
             else { hermesConnectionEditFocus--; host.navTone() }
         }
@@ -578,8 +585,10 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         Panel.OPENCLAW_QR -> { /* camera handles input */ }
         Panel.HERMES_QR -> { /* camera handles input */ }
         Panel.HERMES_CONNECTION_EDIT -> {
+            val isNew = hermesConnectionEditId == null
+            val maxIdx = if (isNew) 2 else 4
             val prev = hermesConnectionEditFocus
-            hermesConnectionEditFocus = (hermesConnectionEditFocus + 1).coerceAtMost(3)
+            hermesConnectionEditFocus = (hermesConnectionEditFocus + 1).coerceAtMost(maxIdx)
             if (prev != hermesConnectionEditFocus) host.navTone()
         }
         Panel.OPENCLAW_CHAT -> { host.openClawScrollDown(); host.navTone() }
@@ -822,7 +831,7 @@ fun LauncherState.activate(host: LauncherHost) {
         Panel.BRIGHTNESS, Panel.VOLUME, Panel.UI_VOLUME -> { back(); host.selectTone() }
         Panel.OPENCLAW_QR -> { /* camera scan auto-completes; activate is no-op */ }
         Panel.HERMES_QR -> { /* camera scan auto-completes; activate is no-op */ }
-        Panel.HERMES_CONNECTION_EDIT -> { if (hermesConnectionEditFocus == 0) { back(); host.backTone() } }
+        Panel.HERMES_CONNECTION_EDIT -> host.hermesConnectionEditRowActivate(hermesConnectionEditFocus)
         Panel.OPENCLAW_CHAT -> { host.openClawToggleRecord(); host.popTone() }
         Panel.OPENCLAW_CAMERA -> { /* touch-first capture/ask surface */ }
         Panel.OPENCLAW_SETTINGS -> {

@@ -475,6 +475,15 @@ fun LauncherRoot(
             onBack = { state.back(); host.backTone() },
         )
 
+        HermesConnectionEditPanel(
+            state = state,
+            onRowClick = { idx -> host.hermesConnectionEditRowActivate(idx) },
+            onSaveUrl = { value -> host.hermesConnectionEditSaveUrl(value) },
+            onSaveKey = { value -> host.hermesConnectionEditSaveKey(value) },
+            onPasteUrl = { host.hermesConnectionEditPasteUrl() },
+            onPasteKey = { host.hermesConnectionEditPasteKey() },
+        )
+
         TranscriberListPanel(
             state = state,
             onRowClick = { idx ->
