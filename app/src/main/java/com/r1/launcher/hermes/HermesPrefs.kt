@@ -187,7 +187,7 @@ class HermesPrefs private constructor(ctx: Context) {
             updateConnection(a.id, key = value)
         }
 
-    /** Active session id (shim). Generates a fresh one if no active connection. */
+    /** Active session id (shim). Returns "" when no active connection. */
     @Deprecated("Use active?.sessionId", ReplaceWith("active?.sessionId.orEmpty()"))
     val sessionId: String
         get() = active?.sessionId.orEmpty()
@@ -243,9 +243,15 @@ class HermesPrefs private constructor(ctx: Context) {
         runCatching {
             synchronized(mutex) {
                 val existing = readConnectionsLocked()
-                if (existing.isEmpty()) writeConnectionsLocked(listOf(migrated))
+                if (existing.isEmpty()) {
+                    writeConnectionsLocked(listOf(migrated))
+                    activeId = migrated.id
+                } else {
+                    // Retry after a partial-write crash: blob already has the entry.
+                    // Use its id so we don't strand `activeId` on a phantom UUID.
+                    activeId = existing.first().id
+                }
             }
-            activeId = migrated.id
             plain.edit { putBoolean(KEY_MIGRATED, true) }
             secure.edit {
                 remove(LEGACY_KEY_URL)
