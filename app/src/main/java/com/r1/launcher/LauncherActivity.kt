@@ -2949,6 +2949,53 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
     }
 
+    override fun hermesSetActiveConnection(id: String) {
+        val current = hermesPrefs.active?.id
+        if (current == id) return
+        hermesClient.cancel(current)
+        cancelHermesSpeech()
+        state.hermesStreamingText = ""
+        state.hermesPartialText = ""
+        state.hermesBusy = false
+        state.hermesStatus = "idle"
+        hermesPrefs.setActive(id)
+        hydrateHermesStateFromPrefs()
+    }
+
+    override fun hermesAddConnection(url: String, key: String): com.r1.launcher.hermes.HermesConnection? {
+        val added = hermesPrefs.addConnection(url, key)
+        if (added == null) {
+            toastFail("hermes: max ${com.r1.launcher.hermes.HermesPrefs.MAX_CONNECTIONS} connections")
+            return null
+        }
+        hermesPrefs.setActive(added.id)
+        hydrateHermesStateFromPrefs()
+        return added
+    }
+
+    override fun hermesUpdateConnection(id: String, url: String?, key: String?) {
+        val credsChanged = url != null || key != null
+        if (credsChanged) hermesClient.cancel(id)
+        hermesPrefs.updateConnection(id, url = url, key = key)
+        hydrateHermesStateFromPrefs()
+    }
+
+    override fun hermesDeleteConnection(id: String) {
+        hermesClient.cancel(id)
+        com.r1.launcher.hermes.HermesHistoryStore.deleteAll(this, id)
+        state.hermesHistories.remove(id)
+        hermesPrefs.deleteConnection(id)
+        hydrateHermesStateFromPrefs()
+    }
+
+    override fun hermesRotateSession(id: String) {
+        hermesClient.cancel(id)
+        hermesPrefs.rotateSessionId(id)
+        state.hermesHistories[id]?.clear()
+        com.r1.launcher.hermes.HermesHistoryStore.clear(this, id)
+        hydrateHermesStateFromPrefs()
+    }
+
     override fun hermesConfigRowActivate(idx: Int) {
         // 0=back, 1=url, 2=key, 3=scan QR, 4=speak replies, 5=hide text input, 6=test
         when (idx) {
@@ -2999,23 +3046,29 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             state.hermesQrError = "QR not recognised"
             return
         }
-        hermesPrefs.serverUrl = code.url
-        code.key?.let { hermesPrefs.apiKey = it }
-        hydrateHermesStateFromPrefs()
-        state.back()                  // HERMES_QR → HERMES_CONFIG
-        hermesTestConnection()         // green dot updates without an extra tap
+        val added = hermesAddConnection(code.url, code.key.orEmpty())
+        if (added == null) {
+            state.hermesQrError = "max ${com.r1.launcher.hermes.HermesPrefs.MAX_CONNECTIONS} connections — delete one first"
+            return
+        }
+        state.back()
+        hermesTestConnection()
         toastSuccess("hermes paired")
     }
 
     override fun hermesSetServerUrl(value: String) {
-        hermesPrefs.serverUrl = value
-        hydrateHermesStateFromPrefs()
+        val active = hermesPrefs.active
+        if (active == null) {
+            hermesAddConnection(value, "")
+        } else {
+            hermesUpdateConnection(active.id, url = value)
+        }
         toast("hermes: url saved")
     }
 
     override fun hermesSetApiKey(value: String) {
-        hermesPrefs.apiKey = value
-        hydrateHermesStateFromPrefs()
+        val active = hermesPrefs.active ?: return
+        hermesUpdateConnection(active.id, key = value)
         toast(if (value.isBlank()) "hermes: key cleared" else "hermes: key saved")
     }
 

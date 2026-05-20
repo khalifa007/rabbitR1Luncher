@@ -116,6 +116,11 @@ interface LauncherHost {
     /** Consume a raw QR scan: decode, save url/key to HermesPrefs, navigate back
      *  to HERMES_CONFIG, auto-probe /health. */
     fun hermesScanned(raw: String)
+    fun hermesSetActiveConnection(id: String)
+    fun hermesAddConnection(url: String, key: String): com.r1.launcher.hermes.HermesConnection?
+    fun hermesUpdateConnection(id: String, url: String? = null, key: String? = null)
+    fun hermesDeleteConnection(id: String)
+    fun hermesRotateSession(id: String)
     fun copyToClipboard(text: String, label: String = "r1-launcher")
     /** Read the current Android system clipboard as a plain string (or empty
      *  if nothing is available). Used by the long-press paste popup in chat
