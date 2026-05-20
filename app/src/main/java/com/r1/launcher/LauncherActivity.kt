@@ -1004,8 +1004,9 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.hermesHideChat = hermesPrefs.hideChat
         state.hermesServerUrlInput = hermesPrefs.serverUrl
         state.hermesApiKeyInput = ""
-        if (state.hermesMessages.isEmpty()) {
-            val persisted = com.r1.launcher.hermes.HermesHistoryStore.load(this)
+        val activeId = hermesPrefs.active?.id
+        if (activeId != null && state.hermesMessages.isEmpty()) {
+            val persisted = com.r1.launcher.hermes.HermesHistoryStore.load(this, activeId)
             if (persisted.isNotEmpty()) {
                 state.hermesMessages.addAll(persisted)
             }
@@ -1013,7 +1014,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     private fun persistHermesHistory() {
-        com.r1.launcher.hermes.HermesHistoryStore.save(this, state.hermesMessages.toList())
+        val activeId = hermesPrefs.active?.id ?: return
+        com.r1.launcher.hermes.HermesHistoryStore.save(this, activeId, state.hermesMessages.toList())
     }
 
     private fun openClawStartSession() {
@@ -2905,7 +2907,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         cancelHermesSpeech()
         hermesClient.cancel()
         state.hermesMessages.clear()
-        com.r1.launcher.hermes.HermesHistoryStore.clear(this)
+        hermesPrefs.active?.id?.let { com.r1.launcher.hermes.HermesHistoryStore.clear(this, it) }
         state.hermesStreamingText = ""
         state.hermesBusy = false
         state.hermesStatus = "idle"
