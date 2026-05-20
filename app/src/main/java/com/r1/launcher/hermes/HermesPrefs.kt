@@ -163,50 +163,6 @@ class HermesPrefs private constructor(ctx: Context) {
         get() = plain.getString(KEY_MODEL, DEFAULT_MODEL).orEmpty().ifBlank { DEFAULT_MODEL }
         set(value) = plain.edit { putString(KEY_MODEL, value.trim().ifBlank { DEFAULT_MODEL }) }
 
-    // ---- Backward-compat shims — DEPRECATED, removed in Task 9 ----
-
-    /** Active connection URL (shim). */
-    @Deprecated("Use active?.url", ReplaceWith("active?.url.orEmpty()"))
-    var serverUrl: String
-        get() = active?.url.orEmpty()
-        set(value) {
-            val a = active
-            if (a == null) {
-                addConnection(value, "")?.also { setActive(it.id) }
-            } else {
-                updateConnection(a.id, url = value)
-            }
-        }
-
-    /** Active connection API key (shim). */
-    @Deprecated("Use active?.apiKey", ReplaceWith("active?.apiKey.orEmpty()"))
-    var apiKey: String
-        get() = active?.apiKey.orEmpty()
-        set(value) {
-            val a = active ?: return
-            updateConnection(a.id, key = value)
-        }
-
-    /** Active session id (shim). Returns "" when no active connection. */
-    @Deprecated("Use active?.sessionId", ReplaceWith("active?.sessionId.orEmpty()"))
-    val sessionId: String
-        get() = active?.sessionId.orEmpty()
-
-    /** Rotate the active connection's session id (shim). */
-    @Deprecated("Use rotateSessionId(id)", ReplaceWith("active?.id?.let { rotateSessionId(it) }"))
-    fun rotateSessionId() {
-        active?.id?.let { rotateSessionId(it) }
-    }
-
-    @Deprecated("Use active?.baseRoot()", ReplaceWith("active?.baseRoot().orEmpty()"))
-    fun baseRoot(): String = active?.baseRoot().orEmpty()
-
-    @Deprecated("Use active?.chatCompletionsUrl()", ReplaceWith("active?.chatCompletionsUrl().orEmpty()"))
-    fun chatCompletionsUrl(): String = active?.chatCompletionsUrl().orEmpty()
-
-    @Deprecated("Use active?.healthUrl()", ReplaceWith("active?.healthUrl().orEmpty()"))
-    fun healthUrl(): String = active?.healthUrl().orEmpty()
-
     // ---- internals ----
 
     private fun readConnectionsLocked(): List<HermesConnection> {
