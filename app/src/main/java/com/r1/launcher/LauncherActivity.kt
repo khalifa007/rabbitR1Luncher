@@ -325,8 +325,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 toastFail("hermes: pass --es url and/or --es key")
                 return
             }
-            if (url.isNotEmpty()) hermesPrefs.serverUrl = url
-            if (key.isNotEmpty()) hermesPrefs.apiKey = key
+            if (url.isNotEmpty()) hermesSetServerUrl(url)
+            if (key.isNotEmpty()) hermesSetApiKey(key)
             hydrateHermesStateFromPrefs()
             val parts = buildList {
                 if (url.isNotEmpty()) add("url")
@@ -997,13 +997,13 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     private fun hydrateHermesStateFromPrefs() {
-        state.hermesServerUrl = hermesPrefs.serverUrl
-        val key = hermesPrefs.apiKey
+        state.hermesServerUrl = hermesPrefs.active?.url.orEmpty()
+        val key = hermesPrefs.active?.apiKey.orEmpty()
         state.hermesApiKeyTail = if (key.length > 6) "…" + key.takeLast(4) else if (key.isNotEmpty()) "set" else ""
         state.hermesModel = hermesPrefs.model
         state.hermesFontSize = hermesPrefs.fontSize
         state.hermesHideChat = hermesPrefs.hideChat
-        state.hermesServerUrlInput = hermesPrefs.serverUrl
+        state.hermesServerUrlInput = hermesPrefs.active?.url.orEmpty()
         state.hermesApiKeyInput = ""
         state.hermesConnections.clear()
         state.hermesConnections.addAll(hermesPrefs.connections)
@@ -4914,7 +4914,7 @@ override fun hermesPasteServerUrlFromClipboard() {
         // ElevenLabs key — reuse existing hasVoiceKey/voiceKeyTail since
         // refreshVoiceKeyState() already maintains them.
         // Hermes key
-        val hk = hermesPrefs.apiKey
+        val hk = hermesPrefs.active?.apiKey.orEmpty()
         state.hasHermesKey = hk.isNotBlank()
         state.hermesKeyTail = if (hk.isNotBlank()) hk.takeLast(4) else ""
         // Webhook token — always visible (gen-on-read), no "set" gate.
@@ -4963,7 +4963,7 @@ override fun hermesPasteServerUrlFromClipboard() {
                 refreshCredentialsDisplay()
             }
             "hermes" -> {
-                hermesPrefs.apiKey = v
+                hermesSetApiKey(v)
                 refreshCredentialsDisplay()
                 if (v.isNotBlank()) toast("hermes key saved")
             }
@@ -4992,7 +4992,7 @@ override fun hermesPasteServerUrlFromClipboard() {
                 refreshCredentialsDisplay()
             }
             "hermes" -> {
-                hermesPrefs.apiKey = ""
+                hermesSetApiKey("")
                 refreshCredentialsDisplay()
                 toast("hermes key cleared")
             }
