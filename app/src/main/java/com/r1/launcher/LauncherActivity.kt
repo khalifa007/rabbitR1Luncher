@@ -113,7 +113,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
     private val openClawPrefs by lazy { OpenClawPrefs.get(this) }
     private val hermesPrefs by lazy { com.r1.launcher.hermes.HermesPrefs.get(this) }
-    private val hermesClient by lazy { com.r1.launcher.hermes.HermesClient(hermesPrefs) }
+    private val hermesClient by lazy { com.r1.launcher.hermes.HermesClient() }
     /** In-flight Hermes TTS download/playback — separate slot from the OpenClaw
      *  TTS pipeline so the two apps don't fight over playback state. */
     private var hermesTtsCall: okhttp3.Call? = null
@@ -807,7 +807,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         runCatching { openClawSpeechPlayer?.release() }
         openClawSpeechPlayer = null
         runCatching { cancelHermesSpeech() }
-        runCatching { hermesClient.cancel() }
+        runCatching { hermesClient.cancelAll() }
         // Stop transcriber playback but DO NOT stop the FGS — if a meeting is
         // recording when the user kills the launcher, we want it to keep going
         // until they explicitly stop it. Just unbind from our side.
@@ -2815,8 +2815,14 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             hermesSpeakNextAssistant = true
         }
 
+        val active = hermesPrefs.active ?: run {
+            state.hermesBusy = false
+            state.hermesStatus = "error: no connection"
+            return
+        }
         val history = state.hermesMessages.toList()
         hermesClient.streamChat(
+            connection = active,
             history = history,
             onDelta = { delta ->
                 ui.post {
@@ -2905,7 +2911,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
     override fun hermesClearHistory() {
         cancelHermesSpeech()
-        hermesClient.cancel()
+        hermesClient.cancel(hermesPrefs.active?.id)
         state.hermesMessages.clear()
         hermesPrefs.active?.id?.let { com.r1.launcher.hermes.HermesHistoryStore.clear(this, it) }
         state.hermesStreamingText = ""
@@ -2920,8 +2926,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             toastFail("hermes: configure server url first")
             return
         }
+        val active = hermesPrefs.active ?: run {
+            state.hermesStatus = "error: no connection"
+            return
+        }
         state.hermesStatus = "connecting"
-        hermesClient.testConnection { ok, msg ->
+        hermesClient.testConnection(active) { ok, msg ->
             ui.post {
                 state.hermesStatus = if (ok) "live" else "error: $msg"
                 if (!ok) toastFail("hermes: $msg")

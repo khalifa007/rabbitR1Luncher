@@ -17,48 +17,37 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
- * Thin client for the Hermes Agent OpenAI-compatible gateway
- * (`gateway/platforms/api_server.py` in NousResearch/hermes-agent).
+ * Stateless-per-connection client for the Hermes OpenAI-compatible gateway.
  *
- * Two endpoints used:
- *   - `GET  ${baseRoot}/health`            — connection probe ("test connection" row)
- *   - `POST ${baseRoot}/v1/chat/completions` (stream=true) — main chat turn
- *
- * The chat call reads SSE manually rather than pulling in an EventSource library
- * — the format is simple enough (one `data: <json>` line per chunk, blank
- * separator, terminator `data: [DONE]`) and avoiding the extra dep keeps
- * mainDexList small.
+ * Each call takes a [HermesConnection] snapshot so an in-flight stream remains
+ * bound to its originating connection even if the user switches active mid-stream.
+ * Inflight calls are tracked per connection id so [cancel] / [cancelAll] can
+ * tear down exactly the right ones.
  */
-class HermesClient(private val prefs: HermesPrefs) {
+class HermesClient {
 
     private val http: OkHttpClient = OkHttpClient.Builder()
-        // No call timeout — streamed completions can legitimately run for minutes
-        // on a slow LLM. Set generous read timeout for the *first* byte; once
-        // the SSE stream is flowing we hold the connection until the server closes.
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(180, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
-    /** Tracks the in-flight streaming call so [cancel] can abort it. */
-    @Volatile private var inflight: Call? = null
+    private val inflight = ConcurrentHashMap<String, Call>()
 
-    /** GET ${baseRoot}/health. Fires `onResult(ok, msg)` on the caller's thread
-     *  via OkHttp's async callback machinery — caller is responsible for
-     *  marshalling back to the main thread if it needs to touch Compose state. */
-    fun testConnection(onResult: (ok: Boolean, msg: String) -> Unit) {
-        val url = runCatching { prefs.healthUrl() }.getOrNull()
-        if (url.isNullOrBlank()) {
+    fun testConnection(connection: HermesConnection, onResult: (ok: Boolean, msg: String) -> Unit) {
+        val url = connection.healthUrl()
+        if (url.isBlank()) {
             onResult(false, "no server url"); return
         }
         val req = Request.Builder()
             .url(url)
             .get()
-            .apply { if (prefs.apiKey.isNotBlank()) header("Authorization", "Bearer ${prefs.apiKey}") }
+            .apply { if (connection.apiKey.isNotBlank()) header("Authorization", "Bearer ${connection.apiKey}") }
             .build()
         http.newCall(req).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
@@ -73,37 +62,20 @@ class HermesClient(private val prefs: HermesPrefs) {
         })
     }
 
-    /**
-     * POST /v1/chat/completions with stream=true.
-     *
-     * Per-chunk SSE format from Hermes (OpenAI-compatible):
-     *   data: {"id":"...", "choices":[{"delta":{"content":"hello"}}], ...}\n
-     *   data: {"id":"...", "choices":[{"delta":{"content":" world"}}], ...}\n
-     *   data: [DONE]\n
-     *
-     * @param history     Full conversation so far. Hermes is stateless on this
-     *                    endpoint; the client owns the message list.
-     * @param onDelta     Fired per content chunk (background thread).
-     * @param onDone      Fired exactly once at stream-end with the full assistant text.
-     * @param onError     Fired exactly once on transport/HTTP/protocol error.
-     */
     fun streamChat(
+        connection: HermesConnection,
         history: List<HermesMessage>,
         onDelta: (String) -> Unit,
         onDone: (String) -> Unit,
         onError: (String) -> Unit,
     ): Call {
-        val url = runCatching { prefs.chatCompletionsUrl() }.getOrNull()
-        if (url.isNullOrBlank()) {
+        val url = connection.chatCompletionsUrl()
+        if (url.isBlank()) {
             onError("no server url")
             return failedCall()
         }
 
         val body = buildJsonObject {
-            // Always send "hermes-agent" — the actual upstream model is decided
-            // server-side by /root/.hermes/config.yaml > model.provider + api_mode.
-            // Letting the client pick a model id only causes mystery
-            // model_not_supported errors when it disagrees with server config.
             put("model", JsonPrimitive("hermes-agent"))
             put("stream", JsonPrimitive(true))
             put("messages", buildJsonArray {
@@ -121,15 +93,15 @@ class HermesClient(private val prefs: HermesPrefs) {
             .url(url)
             .post(body)
             .header("Accept", "text/event-stream")
-            .header("X-Hermes-Session-Id", prefs.sessionId)
-            .apply { if (prefs.apiKey.isNotBlank()) header("Authorization", "Bearer ${prefs.apiKey}") }
+            .header("X-Hermes-Session-Id", connection.sessionId)
+            .apply { if (connection.apiKey.isNotBlank()) header("Authorization", "Bearer ${connection.apiKey}") }
             .build()
 
         val call = http.newCall(req)
-        inflight = call
+        inflight[connection.id] = call
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                inflight = null
+                inflight.remove(connection.id, call)
                 if (call.isCanceled()) return
                 onError(e.message ?: "stream failed")
             }
@@ -149,7 +121,7 @@ class HermesClient(private val prefs: HermesPrefs) {
                     while (!source.exhausted()) {
                         val line = runCatching { source.readUtf8Line() }.getOrNull() ?: break
                         if (line.isEmpty()) continue
-                        if (line.startsWith(":")) continue              // SSE comment / keepalive
+                        if (line.startsWith(":")) continue
                         if (!line.startsWith("data:")) continue
                         val payload = line.substring(5).trim()
                         if (payload == "[DONE]") break
@@ -165,17 +137,26 @@ class HermesClient(private val prefs: HermesPrefs) {
                     if (!call.isCanceled()) onError(e.message ?: "stream parse failed")
                 } finally {
                     runCatching { response.close() }
-                    inflight = null
+                    inflight.remove(connection.id, call)
                 }
             }
         })
         return call
     }
 
-    /** Abort any in-flight streaming call. Safe to call when nothing is running. */
-    fun cancel() {
-        runCatching { inflight?.cancel() }
-        inflight = null
+    /** Cancel any in-flight call bound to [connectionId]. Null cancels all. */
+    fun cancel(connectionId: String?) {
+        if (connectionId == null) {
+            cancelAll()
+            return
+        }
+        runCatching { inflight.remove(connectionId)?.cancel() }
+    }
+
+    fun cancelAll() {
+        val snap = inflight.values.toList()
+        inflight.clear()
+        snap.forEach { runCatching { it.cancel() } }
     }
 
     private fun parseDeltaContent(payload: String): String {
@@ -187,9 +168,6 @@ class HermesClient(private val prefs: HermesPrefs) {
         return delta["content"]?.jsonPrimitive?.contentOrNull.orEmpty()
     }
 
-    /** Hermes (and the OpenAI shape it copies) returns errors as
-     *  `{"error":{"message":"...","type":"...","code":"..."}}`. Surface the
-     *  `message` if present, otherwise fall back to the HTTP status. */
     private fun parseErrorMessage(body: String, code: Int): String {
         val el = runCatching { JSON.parseToJsonElement(body) }.getOrNull()
         val errObj = (el as? JsonObject)?.get("error") as? JsonObject
@@ -197,8 +175,6 @@ class HermesClient(private val prefs: HermesPrefs) {
         return if (!msg.isNullOrBlank()) "$code $msg" else "http $code"
     }
 
-    /** Returns a pre-canceled Call so callers always get a non-null handle even
-     *  when we bail out before [http.newCall]. */
     private fun failedCall(): Call {
         val dummy = http.newCall(Request.Builder().url("http://127.0.0.1/").build())
         dummy.cancel()

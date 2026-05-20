@@ -45,10 +45,10 @@ object HermesImageLoader {
     suspend fun load(ctx: Context, url: String): ImageBitmap? = withContext(Dispatchers.IO) {
         cache.get(url)?.let { return@withContext it }
         runCatching {
-            val prefs = HermesPrefs.get(ctx)
+            val active = HermesPrefs.get(ctx).active ?: return@runCatching null
             val req = Request.Builder().url(url).apply {
-                if (shouldAttachToken(url, prefs.baseRoot(), prefs.apiKey)) {
-                    header("Authorization", "Bearer ${prefs.apiKey}")
+                if (shouldAttachToken(url, active.baseRoot(), active.apiKey)) {
+                    header("Authorization", "Bearer ${active.apiKey}")
                 }
             }.build()
             http.newCall(req).execute().use { resp ->
