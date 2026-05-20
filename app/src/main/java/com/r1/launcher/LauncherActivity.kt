@@ -2997,42 +2997,35 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     override fun hermesConfigRowActivate(idx: Int) {
-        // 0=back, 1=url, 2=key, 3=scan QR, 4=speak replies, 5=hide text input, 6=test
-        when (idx) {
-            0 -> {
-                state.back()
-                backTone()
-            }
-            1 -> {
-                state.hermesServerUrlInput = hermesPrefs.serverUrl
-                // RetroKeyboard is rendered inline in HermesConfigPanel; tapping
-                // the row toggles the keyboard. This is just feedback.
+        val conns = hermesPrefs.connections
+        val canAdd = conns.size < com.r1.launcher.hermes.HermesPrefs.MAX_CONNECTIONS
+        val addRowIdx = if (canAdd) conns.size + 1 else -1
+        val scanRowIdx = if (canAdd) conns.size + 2 else conns.size + 1
+        val speakRowIdx = scanRowIdx + 1
+        val hideRowIdx = scanRowIdx + 2
+        val testRowIdx = scanRowIdx + 3
+        when {
+            idx == 0 -> { state.back(); backTone() }
+            idx in 1..conns.size -> {
+                val conn = conns[idx - 1]
+                val active = hermesPrefs.active
+                if (active?.id == conn.id) {
+                    state.openHermesConnectionEdit(conn.id)
+                } else {
+                    hermesSetActiveConnection(conn.id)
+                }
                 popTone()
             }
-            2 -> {
-                state.hermesApiKeyInput = ""
-                popTone()
-            }
-            3 -> {
-                openHermesQr()
-                popTone()
-            }
-            4 -> {
-                // Shared with the global "speak replies" flag in Settings → Voice
-                // and the OpenClaw inline toggle; same VoicePrefs.enabled.
-                voiceToggleEnabled()
-                popTone()
-            }
-            5 -> {
+            idx == addRowIdx -> { state.openHermesConnectionEdit(null); popTone() }
+            idx == scanRowIdx -> { openHermesQr(); popTone() }
+            idx == speakRowIdx -> { voiceToggleEnabled(); popTone() }
+            idx == hideRowIdx -> {
                 val newHide = !state.hermesHideChat
                 state.hermesHideChat = newHide
                 hermesPrefs.hideChat = newHide
                 popTone()
             }
-            6 -> {
-                hermesTestConnection()
-                popTone()
-            }
+            idx == testRowIdx -> { hermesTestConnection(); popTone() }
         }
     }
 

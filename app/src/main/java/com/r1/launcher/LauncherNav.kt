@@ -380,10 +380,13 @@ fun LauncherState.wheelUp(host: LauncherHost) {
         Panel.TERMINAL -> { terminalScrollIndex++; host.navTone() }
         Panel.HERMES_CHAT -> { host.hermesScrollUp(); host.navTone() }
         Panel.HERMES_CONFIG -> {
+            val c = hermesConnections.size
+            val canAdd = c < com.r1.launcher.hermes.HermesPrefs.MAX_CONNECTIONS
+            val totalRows = (if (canAdd) c + 2 else c + 1) + 4
             if (hermesConfigFocus <= 0) {
                 back(); host.backTone()
             } else {
-                hermesConfigFocus--; host.navTone()
+                hermesConfigFocus = (hermesConfigFocus - 1).coerceAtLeast(0); host.navTone()
             }
         }
         Panel.TRANSCRIBER_LIST -> {
@@ -624,9 +627,11 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.HERMES_CHAT -> { host.hermesScrollDown(); host.navTone() }
         Panel.HERMES_CONFIG -> {
+            val c = hermesConnections.size
+            val canAdd = c < com.r1.launcher.hermes.HermesPrefs.MAX_CONNECTIONS
+            val totalRows = (if (canAdd) c + 2 else c + 1) + 4
             val prev = hermesConfigFocus
-            // back, url, key, scan, speak, hide input, test
-            hermesConfigFocus = (hermesConfigFocus + 1).coerceAtMost(6)
+            hermesConfigFocus = (hermesConfigFocus + 1).coerceAtMost(totalRows - 1)
             if (prev != hermesConfigFocus) host.navTone()
         }
         Panel.TRANSCRIBER_LIST -> {

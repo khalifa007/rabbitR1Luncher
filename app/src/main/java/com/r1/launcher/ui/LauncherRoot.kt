@@ -467,10 +467,6 @@ fun LauncherRoot(
         HermesConfigPanel(
             state = state,
             onRowClick = { idx -> host.hermesConfigRowActivate(idx) },
-            onSaveServerUrl = { url -> host.hermesSetServerUrl(url) },
-            onPasteServerUrl = { host.hermesPasteServerUrlFromClipboard() },
-            onSaveApiKey = { key -> host.hermesSetApiKey(key) },
-            onPasteApiKey = { host.hermesPasteApiKeyFromClipboard() },
         )
 
         HermesQrPanel(
