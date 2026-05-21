@@ -10,6 +10,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import com.r1.launcher.hermes.HermesConnection
 import com.r1.launcher.hermes.HermesMessage
+import com.r1.launcher.hermes.HermesToolEvent
 import com.r1.launcher.messages.SmsConversation
 import com.r1.launcher.messages.SmsItem
 import com.r1.launcher.notifications.Notification
@@ -120,6 +121,10 @@ class LauncherState {
     /** Master on/off for UI-feedback sounds. When false, every click/tick/beep
      *  is suppressed regardless of uiVolumeLevel. Persisted via SoundPrefs. */
     var uiSoundEnabled by mutableStateOf(true)
+
+    /** Master on/off for haptic feedback (PTT down, long-press, double-press
+     *  home). Persisted via HapticPrefs. */
+    var hapticsEnabled by mutableStateOf(true)
 
     // --- clock / date ---
     var clockText by mutableStateOf("00:00")
@@ -314,6 +319,17 @@ class LauncherState {
     var hermesRecording by mutableStateOf(false)
     var hermesBusy by mutableStateOf(false)
     var hermesTranscribing by mutableStateOf(false)
+    /** Mirrors TTS playback (one-shot + streaming chunk pipeline). Drives the
+     *  speaker icon in the chat panel header. */
+    var hermesSpeaking by mutableStateOf(false)
+    /** Streaming reasoning buffer for the in-flight turn. Cleared on each
+     *  new send / completion. Snapshotted onto the assistant message at
+     *  onDone so it persists per-message. */
+    var hermesReasoningText by mutableStateOf("")
+    /** Tool-progress events for the in-flight turn — one entry per tool call,
+     *  upserted by toolCallId so the running→completed transition mutates in
+     *  place rather than appending. Cleared on completion. */
+    val hermesToolEvents = mutableStateListOf<HermesToolEvent>()
     var hermesScrollIndex by mutableIntStateOf(0)
     var hermesInputLevel by mutableIntStateOf(0)
     /** HERMES_CONFIG row focus: 0=back, 1=url, 2=key, 3=scan QR, 4=speak, 5=hide input, 6=test. */

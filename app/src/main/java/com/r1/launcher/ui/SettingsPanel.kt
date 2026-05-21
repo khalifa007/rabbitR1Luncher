@@ -51,9 +51,13 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
 import com.r1.launcher.R
+import java.security.MessageDigest
 
 private val HIGHLIGHT_BG = Color(0xFFFF4500) // Orange pill background
 private val TRACK_OFF = Color(0xFF333333)
@@ -203,22 +207,86 @@ fun SettingsDevicePanel(state: LauncherState, onRowClick: (Int) -> Unit) {
         enter = fadeIn(tween(ANIM_OPEN_MS)) + slideInVertically(tween(ANIM_OPEN_MS)) { it },
         exit = fadeOut(tween(ANIM_CLOSE_MS)) + slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
     ) {
-        SettingsCategoryBody(
-            iconRes = R.drawable.ic_device,
-            title = stringResource(R.string.settings_device_title),
-            backFocused = state.settingsDeviceFocus == 0,
-            onBackClick = { onRowClick(0) },
-            rows = listOf(
-                stringResource(R.string.settings_device_row_check_updates) to R.drawable.ic_update,
-                stringResource(R.string.settings_device_row_language) to R.drawable.ic_language,
-                stringResource(R.string.settings_device_row_reboot) to R.drawable.ic_reboot,
-                stringResource(R.string.settings_device_row_power_off) to R.drawable.ic_power,
-                stringResource(R.string.settings_device_row_reset_camera) to R.drawable.ic_device,
-                stringResource(R.string.settings_device_row_factory_reset) to R.drawable.ic_factory_reset,
-            ),
-            focus = state.settingsDeviceFocus,
-            onRowClick = onRowClick,
-        )
+        val listState = rememberLazyListState()
+        val rows = 7 // haptics toggle + 6 tap rows
+        LaunchedEffect(state.settingsDeviceFocus) {
+            listState.animateScrollToItem(state.settingsDeviceFocus.coerceIn(0, rows))
+        }
+        Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+            LazyColumn(
+                state = listState,
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 32.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                item(key = "header") {
+                    AppPageHeader(
+                        titleIconRes = R.drawable.ic_device,
+                        title = stringResource(R.string.settings_device_title),
+                        backFocused = state.settingsDeviceFocus == 0,
+                        onBack = { onRowClick(0) },
+                        themeColor = AppThemes.Settings,
+                    )
+                }
+                item(key = "haptics") {
+                    SettingsRow(
+                        label = stringResource(R.string.settings_device_row_haptics),
+                        focused = state.settingsDeviceFocus == 1,
+                        toggleChecked = state.hapticsEnabled,
+                        leadingIcon = R.drawable.ic_device,
+                        onClick = { onRowClick(1) },
+                    )
+                }
+                item(key = "check_updates") {
+                    SettingsRow(
+                        label = stringResource(R.string.settings_device_row_check_updates),
+                        focused = state.settingsDeviceFocus == 2,
+                        leadingIcon = R.drawable.ic_update,
+                        onClick = { onRowClick(2) },
+                    )
+                }
+                item(key = "language") {
+                    SettingsRow(
+                        label = stringResource(R.string.settings_device_row_language),
+                        focused = state.settingsDeviceFocus == 3,
+                        leadingIcon = R.drawable.ic_language,
+                        onClick = { onRowClick(3) },
+                    )
+                }
+                item(key = "reboot") {
+                    SettingsRow(
+                        label = stringResource(R.string.settings_device_row_reboot),
+                        focused = state.settingsDeviceFocus == 4,
+                        leadingIcon = R.drawable.ic_reboot,
+                        onClick = { onRowClick(4) },
+                    )
+                }
+                item(key = "power_off") {
+                    SettingsRow(
+                        label = stringResource(R.string.settings_device_row_power_off),
+                        focused = state.settingsDeviceFocus == 5,
+                        leadingIcon = R.drawable.ic_power,
+                        onClick = { onRowClick(5) },
+                    )
+                }
+                item(key = "reset_camera") {
+                    SettingsRow(
+                        label = stringResource(R.string.settings_device_row_reset_camera),
+                        focused = state.settingsDeviceFocus == 6,
+                        leadingIcon = R.drawable.ic_device,
+                        onClick = { onRowClick(6) },
+                    )
+                }
+                item(key = "factory_reset") {
+                    SettingsRow(
+                        label = stringResource(R.string.settings_device_row_factory_reset),
+                        focused = state.settingsDeviceFocus == 7,
+                        leadingIcon = R.drawable.ic_factory_reset,
+                        onClick = { onRowClick(7) },
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -230,10 +298,46 @@ fun SettingsAboutPanel(state: LauncherState, onRowClick: (Int) -> Unit) {
         exit = fadeOut(tween(ANIM_CLOSE_MS)) + slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
     ) {
         val context = LocalContext.current
-        val versionName = remember {
-            runCatching {
-                context.packageManager.getPackageInfo(context.packageName, 0).versionName
-            }.getOrDefault("?")
+        val appLabel = stringResource(R.string.settings_about_app)
+        val versionFmt = stringResource(R.string.settings_about_version, "%s")
+        val entries = remember {
+            val pm = context.packageManager
+            val pkg = runCatching { pm.getPackageInfo(context.packageName, 0) }.getOrNull()
+            val versionName = pkg?.versionName ?: "?"
+            val versionCode = when {
+                pkg == null -> "?"
+                Build.VERSION.SDK_INT >= 28 -> pkg.longVersionCode.toString()
+                else -> @Suppress("DEPRECATION") pkg.versionCode.toString()
+            }
+            val osLabel = readSystemProperty("ro.lineage.version")
+                .ifBlank { readSystemProperty("ro.build.display.id") }
+                .ifBlank { "android ${Build.VERSION.RELEASE}" }
+            listOf(
+                AboutEntry.Header("launcher"),
+                AboutEntry.Row("app", "$appLabel " + versionFmt.format(versionName)),
+                AboutEntry.Row("build code", versionCode),
+                AboutEntry.Row("signing", readSigningFingerprint(context).ifBlank { "unknown" }),
+                AboutEntry.Row("package", context.packageName),
+                AboutEntry.Header("os"),
+                AboutEntry.Row("os", osLabel),
+                AboutEntry.Row("android", Build.VERSION.RELEASE),
+                AboutEntry.Row("sdk level", Build.VERSION.SDK_INT.toString()),
+                AboutEntry.Row("security patch", Build.VERSION.SECURITY_PATCH.ifBlank { "?" }),
+                AboutEntry.Row("build id", Build.DISPLAY.ifBlank { Build.ID }),
+                AboutEntry.Row("kernel", readKernelVersion().ifBlank { "?" }),
+                AboutEntry.Header("device"),
+                AboutEntry.Row("model", Build.MODEL.ifBlank { "?" }),
+                AboutEntry.Row("manufacturer", Build.MANUFACTURER.ifBlank { "?" }),
+                AboutEntry.Row("hardware", Build.HARDWARE.ifBlank { "?" }),
+                AboutEntry.Row("bootloader", Build.BOOTLOADER.ifBlank { "?" }),
+                AboutEntry.Row("radio", (Build.getRadioVersion() ?: "").ifBlank { "?" }),
+            )
+        }
+        val listState = rememberLazyListState()
+        LaunchedEffect(state.settingsAboutFocus) {
+            // focus 0 = back pill highlighted; focus N>0 scrolls list to item N-1.
+            val target = (state.settingsAboutFocus - 1).coerceIn(0, entries.size - 1)
+            listState.animateScrollToItem(target)
         }
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
             Column(modifier = Modifier.fillMaxSize()) {
@@ -244,17 +348,76 @@ fun SettingsAboutPanel(state: LauncherState, onRowClick: (Int) -> Unit) {
                     onBack = { onRowClick(0) },
                     themeColor = AppThemes.Settings,
                 )
-                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    AboutRow(
-                        label = stringResource(R.string.settings_about_app),
-                        value = stringResource(R.string.settings_about_version, versionName ?: "?"),
-                        focused = false,
-                    )
+                LazyColumn(
+                    state = listState,
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 32.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    itemsIndexed(entries, key = { i, _ -> "ab$i" }) { _, e ->
+                        when (e) {
+                            is AboutEntry.Header -> AboutSectionHeader(e.label)
+                            is AboutEntry.Row -> AboutRow(e.label, e.value, focused = false)
+                        }
+                    }
                 }
             }
         }
     }
 }
+
+private sealed class AboutEntry {
+    data class Header(val label: String) : AboutEntry()
+    data class Row(val label: String, val value: String) : AboutEntry()
+}
+
+@Composable
+private fun AboutSectionHeader(label: String) {
+    val type = LocalR1Type.current
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 14.dp, bottom = 2.dp, start = 12.dp, end = 12.dp),
+    ) {
+        Text(
+            text = label.uppercase(),
+            color = AppThemes.Settings,
+            fontSize = 12.sp,
+            fontFamily = type.appCard.fontFamily,
+            fontWeight = FontWeight.Bold,
+        )
+    }
+}
+
+/** Hidden `android.os.SystemProperties.get(String)` via reflection. Platform-signed
+ *  apps could call it directly via @SystemApi, but reflection keeps the build
+ *  free of `compileOnly` SDK stubs. */
+private fun readSystemProperty(key: String): String = runCatching {
+    val cls = Class.forName("android.os.SystemProperties")
+    val m = cls.getMethod("get", String::class.java)
+    (m.invoke(null, key) as? String).orEmpty()
+}.getOrDefault("")
+
+private fun readKernelVersion(): String = runCatching {
+    val raw = java.io.File("/proc/version").readText()
+    Regex("""Linux version (\S+)""").find(raw)?.groupValues?.get(1) ?: raw.trim().take(40)
+}.getOrDefault("")
+
+/** First 16 hex chars of the APK's SHA-256 signature digest. Matches the
+ *  platform-key fingerprint documented in CLAUDE.md when system-signed. */
+@Suppress("DEPRECATION")
+private fun readSigningFingerprint(ctx: Context): String = runCatching {
+    val pm = ctx.packageManager
+    val sigs = if (Build.VERSION.SDK_INT >= 28) {
+        pm.getPackageInfo(ctx.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+            .signingInfo?.apkContentsSigners
+    } else {
+        pm.getPackageInfo(ctx.packageName, PackageManager.GET_SIGNATURES).signatures
+    } ?: return@runCatching ""
+    if (sigs.isEmpty()) return@runCatching ""
+    val digest = MessageDigest.getInstance("SHA-256").digest(sigs[0].toByteArray())
+    digest.joinToString("") { "%02x".format(it) }.take(16) + "…"
+}.getOrDefault("")
 
 @Composable
 private fun SettingsCategoryBody(

@@ -41,6 +41,7 @@
     <string name="settings_sound_row_ui">system volume</string>
     <string name="settings_sound_row_speaker">sound</string>
     <string name="settings_device_title">device</string>
+    <string name="settings_device_row_haptics">haptics</string>
     <string name="settings_device_row_check_updates">check for updates</string>
     <string name="settings_device_row_language">language</string>
     <string name="settings_device_row_reboot">restart</string>

@@ -40,6 +40,7 @@
     <string name="settings_sound_row_ui">مستوى صوت النظام</string>
     <string name="settings_sound_row_speaker">الصوت</string>
     <string name="settings_device_title">الجهاز</string>
+    <string name="settings_device_row_haptics">الاهتزاز</string>
     <string name="settings_device_row_check_updates">البحث عن تحديثات</string>
     <string name="settings_device_row_language">اللغة</string>
     <string name="settings_device_row_reboot">إعادة التشغيل</string>

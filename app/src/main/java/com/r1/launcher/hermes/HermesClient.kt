@@ -68,6 +68,8 @@ class HermesClient {
         onDelta: (String) -> Unit,
         onDone: (String) -> Unit,
         onError: (String) -> Unit,
+        onReasoning: (String) -> Unit = {},
+        onToolProgress: (HermesToolEvent) -> Unit = {},
     ): Call {
         val url = connection.chatCompletionsUrl()
         if (url.isBlank()) {
@@ -118,20 +120,51 @@ class HermesClient {
                         return
                     }
                     val full = StringBuilder()
+                    val splitter = ThinkSplitter()
+                    var currentEvent: String? = null
                     while (!source.exhausted()) {
                         val line = runCatching { source.readUtf8Line() }.getOrNull() ?: break
-                        if (line.isEmpty()) continue
+                        if (line.isEmpty()) {
+                            currentEvent = null
+                            continue
+                        }
                         if (line.startsWith(":")) continue
+                        if (line.startsWith("event:")) {
+                            currentEvent = line.substring(6).trim()
+                            continue
+                        }
                         if (!line.startsWith("data:")) continue
                         val payload = line.substring(5).trim()
                         if (payload == "[DONE]") break
                         if (payload.isEmpty()) continue
-                        val delta = parseDeltaContent(payload)
-                        if (delta.isNotEmpty()) {
-                            full.append(delta)
-                            onDelta(delta)
+
+                        when (currentEvent) {
+                            "hermes.tool.progress" -> {
+                                parseToolProgress(payload)?.let(onToolProgress)
+                            }
+                            else -> {
+                                val (content, reasoning) = parseDelta(payload)
+                                if (reasoning.isNotEmpty()) onReasoning(reasoning)
+                                if (content.isNotEmpty()) {
+                                    splitter.feed(
+                                        content,
+                                        onAnswer = { a ->
+                                            full.append(a)
+                                            onDelta(a)
+                                        },
+                                        onReasoning = onReasoning,
+                                    )
+                                }
+                            }
                         }
                     }
+                    splitter.flush(
+                        onAnswer = { a ->
+                            full.append(a)
+                            onDelta(a)
+                        },
+                        onReasoning = onReasoning,
+                    )
                     onDone(full.toString())
                 } catch (e: Exception) {
                     if (!call.isCanceled()) onError(e.message ?: "stream parse failed")
@@ -159,13 +192,34 @@ class HermesClient {
         snap.forEach { runCatching { it.cancel() } }
     }
 
-    private fun parseDeltaContent(payload: String): String {
-        val el: JsonElement = runCatching { JSON.parseToJsonElement(payload) }.getOrNull() ?: return ""
-        val obj = (el as? JsonObject) ?: return ""
-        val choices = (obj["choices"] as? JsonArray) ?: return ""
-        val first = (choices.firstOrNull() as? JsonObject) ?: return ""
-        val delta = (first["delta"] as? JsonObject) ?: return ""
-        return delta["content"]?.jsonPrimitive?.contentOrNull.orEmpty()
+    /** Returns (content, reasoning_content) — either may be empty. */
+    private fun parseDelta(payload: String): Pair<String, String> {
+        val el: JsonElement = runCatching { JSON.parseToJsonElement(payload) }.getOrNull() ?: return "" to ""
+        val obj = (el as? JsonObject) ?: return "" to ""
+        val choices = (obj["choices"] as? JsonArray) ?: return "" to ""
+        val first = (choices.firstOrNull() as? JsonObject) ?: return "" to ""
+        val delta = (first["delta"] as? JsonObject) ?: return "" to ""
+        val content = delta["content"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val reasoning = delta["reasoning_content"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        return content to reasoning
+    }
+
+    /** Decode a `hermes.tool.progress` payload. Returns null on malformed input. */
+    private fun parseToolProgress(payload: String): HermesToolEvent? {
+        val el = runCatching { JSON.parseToJsonElement(payload) }.getOrNull() ?: return null
+        val obj = (el as? JsonObject) ?: return null
+        val tool = obj["tool"]?.jsonPrimitive?.contentOrNull ?: return null
+        val emoji = obj["emoji"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val label = obj["label"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val callId = obj["toolCallId"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val status = obj["status"]?.jsonPrimitive?.contentOrNull ?: "running"
+        return HermesToolEvent(
+            tool = tool,
+            emoji = emoji,
+            label = label,
+            toolCallId = callId,
+            status = status,
+        )
     }
 
     private fun parseErrorMessage(body: String, code: Int): String {
@@ -184,5 +238,78 @@ class HermesClient {
     companion object {
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
         private val JSON = Json { ignoreUnknownKeys = true; isLenient = true }
+    }
+}
+
+/**
+ * Splits incoming SSE content into answer-text and `<think>`-block reasoning,
+ * with a small tail buffer so a tag arriving across chunk boundaries
+ * (`...<thi` then `nk>...`) resolves on the next feed instead of leaking
+ * a literal angle bracket into the answer.
+ *
+ * Not thread-safe — one instance per in-flight stream.
+ */
+private class ThinkSplitter {
+    private enum class Mode { OUTSIDE, INSIDE }
+    private var mode = Mode.OUTSIDE
+    private var pending = StringBuilder()
+
+    private val openTag = "<think>"
+    private val closeTag = "</think>"
+
+    fun feed(chunk: String, onAnswer: (String) -> Unit, onReasoning: (String) -> Unit) {
+        pending.append(chunk)
+        drain(flushAll = false, onAnswer = onAnswer, onReasoning = onReasoning)
+    }
+
+    fun flush(onAnswer: (String) -> Unit, onReasoning: (String) -> Unit) {
+        drain(flushAll = true, onAnswer = onAnswer, onReasoning = onReasoning)
+        // Anything left after a final drain is residual content that couldn't
+        // possibly start a tag — emit per current mode.
+        if (pending.isNotEmpty()) {
+            val tail = pending.toString()
+            pending.setLength(0)
+            if (mode == Mode.INSIDE) onReasoning(tail) else onAnswer(tail)
+        }
+    }
+
+    private fun drain(flushAll: Boolean, onAnswer: (String) -> Unit, onReasoning: (String) -> Unit) {
+        while (true) {
+            val target = if (mode == Mode.OUTSIDE) openTag else closeTag
+            val idx = pending.indexOf(target)
+            if (idx >= 0) {
+                val before = pending.substring(0, idx)
+                if (before.isNotEmpty()) {
+                    if (mode == Mode.OUTSIDE) onAnswer(before) else onReasoning(before)
+                }
+                pending.delete(0, idx + target.length)
+                mode = if (mode == Mode.OUTSIDE) Mode.INSIDE else Mode.OUTSIDE
+                continue
+            }
+            // No full tag in the buffer. Emit everything except the longest
+            // possible tag-prefix suffix so a cross-chunk tag still resolves.
+            val keep = if (flushAll) 0 else maxIncompleteTagPrefix(pending, target)
+            val emittable = pending.length - keep
+            if (emittable > 0) {
+                val out = pending.substring(0, emittable)
+                pending.delete(0, emittable)
+                if (mode == Mode.OUTSIDE) onAnswer(out) else onReasoning(out)
+            }
+            return
+        }
+    }
+
+    /** Longest k such that the last k chars of [buf] equal the first k chars
+     *  of [tag]. Used to hold back a possible partial tag at the tail. */
+    private fun maxIncompleteTagPrefix(buf: CharSequence, tag: String): Int {
+        val max = minOf(buf.length, tag.length - 1)
+        for (k in max downTo 1) {
+            var match = true
+            for (i in 0 until k) {
+                if (buf[buf.length - k + i] != tag[i]) { match = false; break }
+            }
+            if (match) return k
+        }
+        return 0
     }
 }

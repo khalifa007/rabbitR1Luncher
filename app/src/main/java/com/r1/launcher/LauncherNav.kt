@@ -16,6 +16,7 @@ interface LauncherHost {
     fun setVolume(level: Int)
     fun setUiVolume(level: Int)
     fun toggleUiSoundEnabled(enabled: Boolean)
+    fun toggleHaptics(enabled: Boolean)
     fun toggleWifi(enable: Boolean)
     fun toggleCellular(enable: Boolean)
     fun toggleBluetooth(enable: Boolean)
@@ -254,7 +255,11 @@ fun LauncherState.wheelUp(host: LauncherHost) {
             }
         }
         Panel.SETTINGS_ABOUT -> {
-            back(); host.backTone()
+            if (settingsAboutFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                settingsAboutFocus--; host.navTone()
+            }
         }
         Panel.SETTINGS_VOICE -> {
             if (voiceFocus <= 0) {
@@ -494,11 +499,15 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         Panel.SETTINGS_DEVICE -> {
             val prev = settingsDeviceFocus
             // back, updates, language, reboot, power off, reset camera, factory reset
-            settingsDeviceFocus = (settingsDeviceFocus + 1).coerceAtMost(6)
+            settingsDeviceFocus = (settingsDeviceFocus + 1).coerceAtMost(7)
             if (prev != settingsDeviceFocus) host.navTone()
         }
         Panel.SETTINGS_ABOUT -> {
-            // Single info row, no scroll needed
+            // 18 LazyColumn items (3 section headers + 15 info rows); focus 0
+            // keeps the back pill highlighted, focus 1..18 scrolls the list.
+            val prev = settingsAboutFocus
+            settingsAboutFocus = (settingsAboutFocus + 1).coerceAtMost(18)
+            if (prev != settingsAboutFocus) host.navTone()
         }
         Panel.SETTINGS_VOICE -> {
             val prev = voiceFocus
@@ -769,12 +778,13 @@ fun LauncherState.activate(host: LauncherHost) {
         }
         Panel.SETTINGS_DEVICE -> when (settingsDeviceFocus) {
             0 -> { back(); host.backTone() }
-            1 -> { host.checkForUpdate(); host.selectTone() }
-            2 -> { openSettingsLanguage(); host.selectTone() }
-            3 -> { host.rebootDevice(); host.selectTone() }
-            4 -> { host.powerOffDevice(); host.selectTone() }
-            5 -> { host.resetCameraMotor(); host.popTone() }
-            6 -> { openFactoryConfirm(); host.selectTone() }
+            1 -> { host.toggleHaptics(!hapticsEnabled); host.popTone() }
+            2 -> { host.checkForUpdate(); host.selectTone() }
+            3 -> { openSettingsLanguage(); host.selectTone() }
+            4 -> { host.rebootDevice(); host.selectTone() }
+            5 -> { host.powerOffDevice(); host.selectTone() }
+            6 -> { host.resetCameraMotor(); host.popTone() }
+            7 -> { openFactoryConfirm(); host.selectTone() }
         }
         Panel.SETTINGS_ABOUT -> { back(); host.backTone() }
         Panel.NETWORK -> when (networkFocus) {

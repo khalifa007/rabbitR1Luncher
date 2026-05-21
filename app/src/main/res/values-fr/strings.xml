@@ -40,6 +40,7 @@
     <string name="settings_sound_row_ui">volume système</string>
     <string name="settings_sound_row_speaker">son</string>
     <string name="settings_device_title">appareil</string>
+    <string name="settings_device_row_haptics">vibrations</string>
     <string name="settings_device_row_check_updates">rechercher des mises à jour</string>
     <string name="settings_device_row_language">langue</string>
     <string name="settings_device_row_reboot">redémarrer</string>

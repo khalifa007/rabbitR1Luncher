@@ -1,6 +1,7 @@
 package com.r1.launcher.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -32,6 +33,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -48,14 +50,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.r1.launcher.LauncherState
+import com.r1.launcher.R
 import com.r1.launcher.Panel
 import com.r1.launcher.hermes.HermesImageLoader
 import com.r1.launcher.hermes.HermesMessage
+import com.r1.launcher.hermes.HermesToolEvent
+import androidx.compose.ui.text.font.FontStyle
 
 /**
  * Chat surface for the Hermes Agent app. Stateless server-side — this panel just
@@ -124,10 +130,18 @@ fun HermesChatPanel(
                 ) {
                     if (state.hermesBusy && state.hermesStreamingText.isBlank()) {
                         item("typing") {
-                            HermesBubble(
-                                HermesMessage(role = "assistant", text = "thinking…", streaming = true),
-                                fontSize = state.hermesFontSize,
-                            )
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                HermesReasoningCard(
+                                    messageId = "streaming",
+                                    reasoning = state.hermesReasoningText,
+                                    tools = state.hermesToolEvents.toList(),
+                                    isStreaming = true,
+                                )
+                                HermesBubble(
+                                    HermesMessage(role = "assistant", text = "thinking…", streaming = true),
+                                    fontSize = state.hermesFontSize,
+                                )
+                            }
                         }
                     }
                     if (state.hermesPartialText.isNotBlank()) {
@@ -141,14 +155,22 @@ fun HermesChatPanel(
                     }
                     if (state.hermesStreamingText.isNotBlank()) {
                         item("streaming") {
-                            HermesBubble(
-                                HermesMessage(
-                                    role = "assistant",
-                                    text = state.hermesStreamingText,
-                                    streaming = true,
-                                ),
-                                fontSize = state.hermesFontSize,
-                            )
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                HermesReasoningCard(
+                                    messageId = "streaming",
+                                    reasoning = state.hermesReasoningText,
+                                    tools = state.hermesToolEvents.toList(),
+                                    isStreaming = true,
+                                )
+                                HermesBubble(
+                                    HermesMessage(
+                                        role = "assistant",
+                                        text = state.hermesStreamingText,
+                                        streaming = true,
+                                    ),
+                                    fontSize = state.hermesFontSize,
+                                )
+                            }
                         }
                     }
                     if (messages.isEmpty() && state.hermesStreamingText.isBlank()) {
@@ -158,12 +180,39 @@ fun HermesChatPanel(
                     } else {
                         val reversed = messages.asReversed()
                         itemsIndexed(items = reversed, key = { _, m -> m.id }) { _, msg ->
-                            HermesBubble(
-                                msg = msg,
-                                fontSize = state.hermesFontSize,
-                                onLongPress = { copyMenuFor = msg },
-                                selecting = msg.id == selectingMessageId,
-                            )
+                            if (msg.role == "assistant") {
+                                // Reasoning is derived once per message id: if the
+                                // persisted message already carries `reasoning`,
+                                // use it directly. Otherwise extract any inline
+                                // <think> blocks from older `text` and use the
+                                // stripped residue as the bubble text — old
+                                // history instantly matches the new layout.
+                                val (bubbleText, reasoning) = remember(msg.id, msg.text, msg.reasoning) {
+                                    if (msg.reasoning != null) msg.text to msg.reasoning
+                                    else extractInlineReasoning(msg.text)
+                                }
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    HermesReasoningCard(
+                                        messageId = msg.id,
+                                        reasoning = reasoning,
+                                        tools = msg.toolEvents,
+                                        isStreaming = false,
+                                    )
+                                    HermesBubble(
+                                        msg = if (bubbleText === msg.text) msg else msg.copy(text = bubbleText),
+                                        fontSize = state.hermesFontSize,
+                                        onLongPress = { copyMenuFor = msg },
+                                        selecting = msg.id == selectingMessageId,
+                                    )
+                                }
+                            } else {
+                                HermesBubble(
+                                    msg = msg,
+                                    fontSize = state.hermesFontSize,
+                                    onLongPress = { copyMenuFor = msg },
+                                    selecting = msg.id == selectingMessageId,
+                                )
+                            }
                         }
                     }
                 }
@@ -231,24 +280,12 @@ fun HermesChatPanel(
                 modifier = Modifier.align(Alignment.TopCenter),
                 trailingContent = {
                     HermesStatusDot(state.hermesStatus)
-                    when {
-                        state.hermesRecording -> {
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                text = "rec",
-                                style = type.appCard.copy(fontSize = 13.sp),
-                                color = AppThemes.Hermes,
-                            )
-                        }
-                        state.hermesBusy -> {
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                text = "…",
-                                style = type.appCard.copy(fontSize = 13.sp),
-                                color = Color.White,
-                            )
-                        }
-                    }
+                    HermesActivityIcon(
+                        recording = state.hermesRecording,
+                        transcribing = state.hermesTranscribing,
+                        thinking = state.hermesBusy,
+                        speaking = state.hermesSpeaking,
+                    )
                     Spacer(Modifier.width(10.dp))
                     MenuDot(
                         themeColor = AppThemes.Hermes,
@@ -357,6 +394,124 @@ private fun HermesMenuItem(
     }
 }
 
+/**
+ * Gray "what the agent is doing" block rendered above each assistant bubble.
+ * Header `▸ thinking` / `▾ thinking · N tools` is tappable. Body shows the
+ * model's reasoning (italic gray) + a timeline of `hermes.tool.progress`
+ * events. Hidden entirely if both reasoning and tools are empty.
+ *
+ * Expansion default tracks [isStreaming] so an in-flight turn auto-opens
+ * the card; after streaming ends the user's last toggle sticks per-message
+ * via [remember]([messageId]).
+ */
+@Composable
+private fun HermesReasoningCard(
+    messageId: String,
+    reasoning: String?,
+    tools: List<HermesToolEvent>,
+    isStreaming: Boolean,
+) {
+    if (reasoning.isNullOrBlank() && tools.isEmpty()) return
+    val type = LocalR1Type.current
+    val gray = Color(0xFF888888)
+    var expanded by remember(messageId) { mutableStateOf(isStreaming) }
+    val header = buildString {
+        append(if (expanded) "▾ thinking" else "▸ thinking")
+        if (tools.isNotEmpty()) append(" · ${tools.size} tool${if (tools.size == 1) "" else "s"}")
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 4.dp, end = 32.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(
+            text = header,
+            style = type.appCard.copy(fontSize = 12.sp),
+            color = gray,
+            modifier = Modifier
+                .clickable { expanded = !expanded }
+                .padding(vertical = 2.dp),
+        )
+        AnimatedVisibility(
+            visible = expanded,
+            enter = fadeIn(tween(120)) + slideInVertically(tween(140)) { -it / 4 },
+            exit = fadeOut(tween(100)) + slideOutVertically(tween(100)) { -it / 4 },
+        ) {
+            Column(
+                modifier = Modifier.padding(start = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                if (!reasoning.isNullOrBlank()) {
+                    Text(
+                        text = reasoning.trim(),
+                        style = type.appCard.copy(fontSize = 12.sp, fontStyle = FontStyle.Italic),
+                        color = gray,
+                    )
+                }
+                tools.forEach { ev ->
+                    val prefix = if (ev.emoji.isNotEmpty()) "${ev.emoji} " else ""
+                    val suffix = if (ev.status == "completed") " ✓" else "…"
+                    Text(
+                        text = "$prefix${ev.tool}$suffix",
+                        style = type.appCard.copy(fontSize = 12.sp),
+                        color = gray,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private val INLINE_THINK_RE = Regex("(?s)<think>(.*?)</think>")
+
+/**
+ * One-pass `<think>` extractor for legacy/persisted message text. Returns
+ * (textWithoutThink, joinedReasoning|null). Memoized at the call site via
+ * `remember(messageId)`.
+ */
+private fun extractInlineReasoning(text: String): Pair<String, String?> {
+    val matches = INLINE_THINK_RE.findAll(text).toList()
+    if (matches.isEmpty()) return text to null
+    val reasoning = matches.joinToString("\n\n") { it.groupValues[1].trim() }
+        .ifBlank { null }
+    val stripped = INLINE_THINK_RE.replace(text, "").trim()
+    return stripped to reasoning
+}
+
+@Composable
+private fun HermesActivityIcon(
+    recording: Boolean,
+    transcribing: Boolean,
+    thinking: Boolean,
+    speaking: Boolean,
+) {
+    val (resId, tint) = when {
+        recording -> R.drawable.ic_voice to Color(0xFFE53935)
+        transcribing -> R.drawable.ic_voice to Color(0xFFAAAAAA)
+        thinking -> R.drawable.ic_thinking to AppThemes.Hermes
+        speaking -> R.drawable.ic_sound to AppThemes.Hermes
+        else -> return
+    }
+    val infinite = androidx.compose.animation.core.rememberInfiniteTransition(label = "hermesActivity")
+    val alpha by infinite.animateFloat(
+        initialValue = 0.55f,
+        targetValue = 1f,
+        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+            animation = tween(durationMillis = 700),
+            repeatMode = androidx.compose.animation.core.RepeatMode.Reverse,
+        ),
+        label = "hermesActivityAlpha",
+    )
+    Spacer(Modifier.width(6.dp))
+    Icon(
+        painter = painterResource(resId),
+        contentDescription = null,
+        tint = tint.copy(alpha = alpha),
+        modifier = Modifier.size(14.dp),
+    )
+}
+
 @Composable
 private fun HermesStatusDot(status: String) {
     val color = when {
@@ -438,7 +593,11 @@ private fun HermesBubble(
                 )
             }
             .padding(horizontal = 10.dp, vertical = 7.dp)
-        val displayText = msg.text.ifEmpty { if (msg.streaming) "…" else "" }
+        // Trim leading whitespace: when the SSE splitter strips a leading
+        // <think>…</think> block, the stream often leaves a `\n\n` where the
+        // tags were. Persisted messages may also carry that residue. Strip
+        // at render time only so the underlying text stays unmodified.
+        val displayText = msg.text.trimStart().ifEmpty { if (msg.streaming) "…" else "" }
         val segments = remember(displayText) { splitMarkdownSegments(displayText) }
         Box(modifier = boxMod) {
             if (segments.size == 1 && segments[0] is HermesSegment.Text) {

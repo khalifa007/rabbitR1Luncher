@@ -112,6 +112,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private var recordStopSoundId: Int = 0
     private var audioManager: AudioManager? = null
 
+
     private val openClawPrefs by lazy { OpenClawPrefs.get(this) }
     private val hermesPrefs by lazy { com.r1.launcher.hermes.HermesPrefs.get(this) }
     private val hermesClient by lazy { com.r1.launcher.hermes.HermesClient() }
@@ -135,6 +136,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private val hermesTtsChunkCalls: MutableList<okhttp3.Call> = mutableListOf()
     private val soundPrefs by lazy { com.r1.launcher.sound.SoundPrefs.get(this) }
     private val notifPrefs by lazy { com.r1.launcher.notifications.NotifPrefs.get(this) }
+    private val hapticPrefs by lazy { com.r1.launcher.haptic.HapticPrefs.get(this) }
+    private val haptics by lazy { com.r1.launcher.haptic.Haptics.get(this) }
     private val ntfyPrefs by lazy { com.r1.launcher.notifications.NtfyPrefs.get(this) }
     /** Single ntfy.sh subscriber instance — null when stopped. Created lazily
      *  on first enable to avoid holding a Wi-Fi lock when the feature is
@@ -525,6 +528,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.uiVolumeMax = com.r1.launcher.sound.SoundPrefs.MAX_UI_LEVEL
         state.uiVolumeLevel = soundPrefs.uiVolumeLevel
         state.uiSoundEnabled = soundPrefs.uiSoundEnabled
+        state.hapticsEnabled = hapticPrefs.enabled
+        applySystemHaptics(hapticPrefs.enabled)
         rebuildTone()
 
         val attrs = AudioAttributes.Builder()
@@ -1275,6 +1280,11 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
      *  formatting glyphs. Order matters: more specific patterns first. */
     private fun stripMarkdownForTts(input: String): String {
         var s = input
+        // <think>…</think> blocks — reasoning is meta, never speak it. Cheap
+        // belt-and-suspenders alongside the Hermes streaming splitter; needed
+        // for the one-shot path and for any other source that hands raw text
+        // to TTS (e.g. OpenClaw assistant replies with rare embedded tags).
+        s = s.replace(Regex("(?s)<think>.*?</think>"), "")
         // Code fences ```lang ... ``` — keep contents, drop fences.
         s = s.replace(Regex("```[a-zA-Z0-9_+-]*\\n?"), "")
         s = s.replace("```", "")
@@ -1652,6 +1662,31 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.uiSoundEnabled = enabled
         soundPrefs.uiSoundEnabled = enabled
         rebuildTone()
+    }
+
+    override fun toggleHaptics(enabled: Boolean) {
+        state.hapticsEnabled = enabled
+        hapticPrefs.enabled = enabled
+        applySystemHaptics(enabled)
+        if (enabled) haptics.click()
+    }
+
+    /** Mirror our toggle into the framework's system-wide haptic settings.
+     *  Without this, Android's PhoneWindowManager fires a vibrator tick on
+     *  every KEYCODE_VOLUME_UP/DOWN — which is the wheel-scroll buzz the user
+     *  sees in the apps list even though the launcher itself emits nothing. */
+    private fun applySystemHaptics(enabled: Boolean) {
+        val v = if (enabled) 1 else 0
+        runCatching {
+            Settings.System.putInt(contentResolver, Settings.System.HAPTIC_FEEDBACK_ENABLED, v)
+        }
+        runCatching {
+            // KEYBOARD_VIBRATION_ENABLED — added in API 35 as a per-channel
+            // toggle for the on-screen keyboard, but the framework also honors
+            // it as a master gate for keyboard-class haptics. Constant isn't
+            // exposed in our compile SDK, so reference the key by string.
+            Settings.System.putInt(contentResolver, "keyboard_vibration_enabled", v)
+        }
     }
 
     override fun lockScreen() {
@@ -2819,6 +2854,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         persistHermesHistory()
         state.hermesScrollIndex = 0
         state.hermesStreamingText = ""
+        state.hermesReasoningText = ""
+        state.hermesToolEvents.clear()
         state.hermesBusy = true
         state.hermesStatus = "streaming"
 
@@ -2839,6 +2876,21 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     maybeEmitHermesStreamingTtsChunk()
                 }
             },
+            onReasoning = { delta ->
+                ui.post { state.hermesReasoningText = state.hermesReasoningText + delta }
+            },
+            onToolProgress = { ev ->
+                ui.post {
+                    // Upsert by toolCallId: a `completed` event mutates the
+                    // existing `running` entry in place so the timeline shows
+                    // one row per tool call. Events without an id fall back
+                    // to append-only (rare; only seen on malformed payloads).
+                    val list = state.hermesToolEvents
+                    val idx = if (ev.toolCallId.isNotEmpty())
+                        list.indexOfFirst { it.toolCallId == ev.toolCallId } else -1
+                    if (idx >= 0) list[idx] = ev else list.add(ev)
+                }
+            },
             onDone = { full ->
                 ui.post {
                     // Flush any residue BEFORE clearing the streaming buffer.
@@ -2846,11 +2898,20 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     // source the splitter was reading from.
                     flushHermesStreamingTtsTail(full)
                     val streamingHandledTts = hermesStreamingTtsActive
+                    val turnReasoning = state.hermesReasoningText.takeIf { it.isNotBlank() }
+                    val turnTools = state.hermesToolEvents.toList()
                     state.hermesStreamingText = ""
+                    state.hermesReasoningText = ""
+                    state.hermesToolEvents.clear()
                     state.hermesBusy = false
                     if (full.isNotBlank()) {
                         history.add(
-                            com.r1.launcher.hermes.HermesMessage(role = "assistant", text = full)
+                            com.r1.launcher.hermes.HermesMessage(
+                                role = "assistant",
+                                text = full,
+                                reasoning = turnReasoning,
+                                toolEvents = turnTools,
+                            )
                         )
                         trimHermesMessages(history)
                         com.r1.launcher.hermes.HermesHistoryStore.save(this, capturedId, history.toList())
@@ -2882,6 +2943,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     // next turn starts with a clean offset.
                     if (hermesStreamingTtsActive) cancelHermesSpeech()
                     state.hermesStreamingText = ""
+                    state.hermesReasoningText = ""
+                    state.hermesToolEvents.clear()
                     state.hermesBusy = false
                     state.hermesStatus = "error: $msg"
                     history.add(
@@ -2925,6 +2988,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.hermesActiveHistory()?.clear()
         if (activeId != null) com.r1.launcher.hermes.HermesHistoryStore.clear(this, activeId)
         state.hermesStreamingText = ""
+        state.hermesReasoningText = ""
+        state.hermesToolEvents.clear()
         state.hermesBusy = false
         state.hermesStatus = "idle"
         activeId?.let { hermesPrefs.rotateSessionId(it) }
@@ -3309,10 +3374,14 @@ override fun hermesPasteServerUrlFromClipboard() {
                     if (hermesSpeechCurrentFile === file) hermesSpeechCurrentFile = null
                     if (turnId != hermesStreamingTtsTurnId) {
                         hermesSpeechPlaying = false
+                        state.hermesSpeaking = false
                         return@setOnCompletionListener
                     }
                     hermesSpeechPlaying = false
                     drainHermesStreamingSpeechQueue()
+                    if (!hermesSpeechPlaying && hermesSpeechSlots.isEmpty()) {
+                        state.hermesSpeaking = false
+                    }
                 }
                 setOnErrorListener { mp, _, _ ->
                     runCatching { mp.release() }
@@ -3321,16 +3390,23 @@ override fun hermesPasteServerUrlFromClipboard() {
                     if (hermesSpeechCurrentFile === file) hermesSpeechCurrentFile = null
                     hermesSpeechPlaying = false
                     if (turnId == hermesStreamingTtsTurnId) drainHermesStreamingSpeechQueue()
+                    if (!hermesSpeechPlaying && hermesSpeechSlots.isEmpty()) {
+                        state.hermesSpeaking = false
+                    }
                     true
                 }
                 prepare()
                 start()
             }
             hermesSpeechPlaying = true
+            state.hermesSpeaking = true
         }.onFailure {
             hermesSpeechPlaying = false
             runCatching { file.delete() }
             if (hermesSpeechCurrentFile === file) hermesSpeechCurrentFile = null
+            if (!hermesSpeechPlaying && hermesSpeechSlots.isEmpty()) {
+                state.hermesSpeaking = false
+            }
         }
     }
 
@@ -3352,20 +3428,24 @@ override fun hermesPasteServerUrlFromClipboard() {
                     runCatching { file.delete() }
                     hermesSpeechCurrentFile = null
                 }
+                state.hermesSpeaking = false
             }
             mp.setOnErrorListener { player, _, _ ->
                 runCatching { player.release() }
                 if (hermesSpeechPlayer === player) hermesSpeechPlayer = null
+                state.hermesSpeaking = false
                 true
             }
             mp.prepare()
             hermesSpeechPlayer = mp
             hermesSpeechCurrentFile = file
             mp.start()
+            state.hermesSpeaking = true
         }.onFailure {
             runCatching { mp.release() }
             hermesSpeechPlayer = null
             hermesSpeechCurrentFile = null
+            state.hermesSpeaking = false
         }
     }
 
@@ -3396,6 +3476,7 @@ override fun hermesPasteServerUrlFromClipboard() {
         hermesSpeechPlaying = false
         hermesStreamingSpokenOffset = 0
         hermesStreamingTtsActive = false
+        state.hermesSpeaking = false
     }
 
     override fun openClawCloseSession() {
@@ -4029,16 +4110,20 @@ override fun hermesPasteServerUrlFromClipboard() {
             else                -> playTone(ToneGenerator.TONE_PROP_BEEP, 18)
         }
     }
-    
+
     override fun selectTone() {
+        haptics.click()
         when {
             selectSoundId != 0  -> playSelectSound()
             movingSoundId != 0  -> playMovingSound()
             else                -> playTone(ToneGenerator.TONE_PROP_BEEP, 30)
         }
     }
-    
-    override fun popTone() = playMovingSound()
+
+    override fun popTone() {
+        haptics.click()
+        playMovingSound()
+    }
 
     /** Recording-start cue — record.mp3 at full volume, plus a ToneGenerator
      *  beep as a guaranteed-audible fallback. SoundPool on MTK silently drops
@@ -4084,7 +4169,7 @@ override fun hermesPasteServerUrlFromClipboard() {
             else               -> playTone(ToneGenerator.TONE_PROP_PROMPT, 35)
         }
     }
-    
+
     private fun launchTone() {
         // Same fix as backTone: prefer a real mp3 over the DTMF "system" beep
         // that fires on every wheel-press app launch.
@@ -4171,10 +4256,12 @@ override fun hermesPasteServerUrlFromClipboard() {
                     if (event.repeatCount == 0) {
                         sideDownAtMs = event.eventTime
                         sideLongFired = false
+                        haptics.click()
                     } else if (!sideLongFired && event.eventTime - sideDownAtMs >= SIDE_LONG_PRESS_MS) {
                         // Long press: fires on the first key-repeat past the threshold,
                         // so the user gets feedback before they release.
                         sideLongFired = true
+                        haptics.heavyClick()
                         pendingSideSingle?.let { ui.removeCallbacks(it) }
                         pendingSideSingle = null
                         sideLastShortUpMs = 0L
@@ -4203,7 +4290,10 @@ override fun hermesPasteServerUrlFromClipboard() {
                         ui.removeCallbacks(pendingSideSingle!!)
                         pendingSideSingle = null
                         sideLastShortUpMs = 0L
-                        if (state.panel != Panel.HOME) state.goHome()
+                        if (state.panel != Panel.HOME) {
+                            haptics.doubleClick()
+                            state.goHome()
+                        }
                     } else {
                         // Defer single-tap so a follow-up press can convert it to a double.
                         sideLastShortUpMs = now
