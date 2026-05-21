@@ -290,6 +290,9 @@ object WebRpc {
             put("total", state.notifications.size)
             put("soundEnabled", state.notificationSoundEnabled)
         })
+        ctx?.let {
+            put("credentials", buildCredentialsBlock(it))
+        }
     }
 
     private fun buildSmsList(ctx: Context): JsonArray {
