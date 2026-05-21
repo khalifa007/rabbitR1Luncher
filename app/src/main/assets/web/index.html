@@ -83,22 +83,17 @@
                 <span class="tile-label" data-i18n="tile.terminal.label">terminal</span>
                 <span class="tile-sub" data-i18n="tile.terminal.sub">root shell</span>
             </button>
-            <button class="app-tile" data-app="sms" style="--i:2">
-                <span class="tile-glyph">✉</span>
-                <span class="tile-label" data-i18n="tile.sms.label">messages</span>
-                <span class="tile-sub" data-i18n="tile.sms.sub">sms threads</span>
+            <button class="app-tile" data-app="credentials" style="--i:2">
+                <span class="tile-glyph">⚿</span>
+                <span class="tile-label" data-i18n="tile.credentials.label">credentials</span>
+                <span class="tile-sub" data-i18n="tile.credentials.sub">api keys + topics</span>
             </button>
-            <button class="app-tile" data-app="send" style="--i:3">
-                <span class="tile-glyph">↗</span>
-                <span class="tile-label" data-i18n="tile.send.label">send text</span>
-                <span class="tile-sub" data-i18n="tile.send.sub">paste into r1</span>
-            </button>
-            <button class="app-tile" data-app="system" style="--i:4">
+            <button class="app-tile" data-app="system" style="--i:3">
                 <span class="tile-glyph">◉</span>
                 <span class="tile-label" data-i18n="tile.system.label">system</span>
                 <span class="tile-sub" data-i18n="tile.system.sub">toggles + sliders</span>
             </button>
-            <button class="app-tile" data-app="meetings" style="--i:5">
+            <button class="app-tile" data-app="meetings" style="--i:4">
                 <span class="tile-glyph">◎</span>
                 <span class="tile-label">meetings</span>
                 <span class="tile-sub">recordings + transcripts</span>
@@ -140,41 +135,71 @@
         </div>
     </section>
 
-    <!-- SMS -->
-    <section id="view-sms" class="view view-app" data-title-key="view.sms" data-title="messages">
+    <!-- CREDENTIALS -->
+    <section id="view-credentials" class="view view-app"
+             data-title-key="view.credentials" data-title="credentials">
         <div class="app-mount"></div>
-        <div class="app-body sms-body">
-            <aside id="sms-list" class="sms-list">
-                <button id="sms-refresh" class="ghost-btn" data-i18n="sms.refresh">refresh</button>
-                <ul id="sms-threads" class="sms-threads"></ul>
-            </aside>
-            <article id="sms-thread" class="sms-thread">
-                <header id="sms-thread-header" class="sms-thread-header" data-i18n="sms.threadHeader">select a conversation</header>
-                <div id="sms-thread-body" class="sms-thread-body"></div>
-            </article>
-        </div>
-    </section>
+        <div class="app-body credentials-body">
+            <!-- ElevenLabs -->
+            <fieldset class="cred-block">
+                <legend data-i18n="cred.eleven.title">elevenlabs</legend>
+                <label class="field">
+                    <span class="field-label" data-i18n="cred.eleven.key">api key</span>
+                    <input id="cred-eleven-key" type="text" autocomplete="off" spellcheck="false"
+                           data-i18n-placeholder="cred.eleven.keyPh"
+                           placeholder="sk_... or 32-char hex">
+                    <span id="cred-eleven-key-tail" class="cred-tail"></span>
+                </label>
+                <label class="field">
+                    <span class="field-label" data-i18n="cred.eleven.voice">catalog voice</span>
+                    <select id="cred-eleven-voice">
+                        <option value="21m00Tcm4TlvDq8ikWAM">rachel</option>
+                        <option value="pNInz6obpgDQGcFmaJgB">adam</option>
+                        <option value="9BWtsMINqrJLrRacOk9x">aria</option>
+                        <option value="EXAVITQu4vr4xnSDxMaL">sarah</option>
+                    </select>
+                </label>
+                <label class="field">
+                    <span class="field-label" data-i18n="cred.eleven.custom">custom voice id (optional)</span>
+                    <input id="cred-eleven-custom" type="text" autocomplete="off" spellcheck="false"
+                           data-i18n-placeholder="cred.eleven.customPh"
+                           placeholder="overrides catalog when set">
+                </label>
+                <button id="cred-eleven-save" class="primary-btn" data-i18n="cred.save">save</button>
+                <div id="cred-eleven-status" class="hint"></div>
+            </fieldset>
 
-    <!-- SEND TEXT -->
-    <section id="view-send" class="view view-app" data-title-key="view.send" data-title="send text">
-        <div class="app-mount"></div>
-        <div class="app-body send-body">
-            <label class="field">
-                <span class="field-label" data-i18n="send.target">target</span>
-                <select id="send-target">
-                    <option value="voice_key" data-i18n="send.targetVoice">elevenlabs voice key</option>
-                    <option value="voice_custom_id" data-i18n="send.targetVoiceCustomId">custom voice id (clone / pro)</option>
-                    <option value="openclaw_chat" data-i18n="send.targetChat">openclaw chat (live session)</option>
-                </select>
-            </label>
-            <label class="field">
-                <span class="field-label" data-i18n="send.payload">payload</span>
-                <textarea id="send-text" rows="6"
-                          data-i18n-placeholder="send.placeholder"
-                          placeholder="paste or type text…"></textarea>
-            </label>
-            <div id="send-hint" class="hint"></div>
-            <button id="send-button" class="primary-btn primary-btn-block" data-i18n="send.button">send to r1</button>
+            <!-- Hermes -->
+            <fieldset class="cred-block">
+                <legend data-i18n="cred.hermes.title">hermes</legend>
+                <ul id="cred-hermes-list" class="cred-hermes-list"></ul>
+                <div id="cred-hermes-add-wrap">
+                    <label class="field">
+                        <span class="field-label" data-i18n="cred.hermes.url">server url</span>
+                        <input id="cred-hermes-url" type="text" autocomplete="off" spellcheck="false"
+                               placeholder="https://hermes.example/v1">
+                    </label>
+                    <label class="field">
+                        <span class="field-label" data-i18n="cred.hermes.bearer">bearer token</span>
+                        <input id="cred-hermes-bearer" type="text" autocomplete="off" spellcheck="false"
+                               placeholder="eyJ...">
+                    </label>
+                    <button id="cred-hermes-add" class="primary-btn" data-i18n="cred.hermes.add">add connection</button>
+                    <div id="cred-hermes-status" class="hint"></div>
+                </div>
+            </fieldset>
+
+            <!-- Ntfy -->
+            <fieldset class="cred-block">
+                <legend data-i18n="cred.ntfy.title">ntfy.sh</legend>
+                <label class="field">
+                    <span class="field-label" data-i18n="cred.ntfy.topic">topic</span>
+                    <input id="cred-ntfy-topic" type="text" autocomplete="off" spellcheck="false"
+                           placeholder="r1-alerts-xxxxx">
+                </label>
+                <button id="cred-ntfy-save" class="primary-btn" data-i18n="cred.save">save</button>
+                <div id="cred-ntfy-status" class="hint"></div>
+            </fieldset>
         </div>
     </section>
 
