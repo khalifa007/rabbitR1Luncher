@@ -97,6 +97,24 @@ object WebRpc {
             host.voiceClearCustomVoiceId(); JsonNull
         }
 
+        "credentials.get" -> buildCredentialsBlock(ctx)
+
+        "credentials.set_voice_key" -> {
+            host.voiceSaveKey(params.requireString("key")); JsonNull
+        }
+        "credentials.set_voice_id" -> {
+            host.voiceSetVoiceId(params.requireString("id")); JsonNull
+        }
+        "credentials.set_voice_custom_id" -> {
+            val v = params.requireString("id").trim()
+            if (v.isEmpty()) host.voiceClearCustomVoiceId()
+            else host.voiceSaveCustomVoiceId(v)
+            JsonNull
+        }
+        "credentials.set_ntfy_topic" -> {
+            host.ntfySetTopic(params.requireString("topic").trim()); JsonNull
+        }
+
         "terminal.run" -> {
             requireWebTerminal(state)
             host.terminalRun(params.requireString("cmd")); JsonNull
