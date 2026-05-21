@@ -288,7 +288,6 @@ function setView(name) {
     document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
     document.body.className = 'view-' + name;
     // Lazy-load when opening certain panels.
-    if (name === 'sms') refreshSmsList();
     if (name === 'terminal') refreshTerminalHistory();
     if (name === 'meetings') refreshMeetings();
 }
@@ -454,6 +453,7 @@ function applySnapshot(s) {
             : t('system.notSet');
     }
     if (s.terminal) applyTerminalSnapshot(s.terminal);
+    if (s.credentials) applyCredentialsSnapshot(s.credentials);
 }
 
 // ============== utilities ==============
@@ -470,119 +470,6 @@ function escapeHtml(s) {
         { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
     ));
 }
-
-// ============== sms ==============
-let smsActiveAddr = null;
-async function refreshSmsList() {
-    try {
-        const list = await rpc('sms.list');
-        const ul = document.getElementById('sms-threads');
-        ul.innerHTML = '';
-        if (!Array.isArray(list) || list.length === 0) {
-            const li = document.createElement('li');
-            li.style.cssText = 'cursor:default;color:var(--muted)';
-            li.textContent = t('sms.empty');
-            ul.appendChild(li);
-            return;
-        }
-        list.forEach((c) => {
-            const li = document.createElement('li');
-            const date = new Date(c.latestTimestampMs);
-            li.innerHTML = `
-                <div class="sms-from">${escapeHtml(c.name || c.address)}</div>
-                <div class="sms-preview">${escapeHtml((c.latestBody || '').slice(0, 80))}</div>
-                <div class="sms-preview" style="margin-top:4px">
-                    ${escapeHtml(date.toLocaleString())}
-                    ${c.unreadCount > 0 ? `· <span style="color:var(--accent)">●${c.unreadCount}</span>` : ''}
-                </div>
-            `;
-            li.addEventListener('click', () => {
-                document.querySelectorAll('#sms-threads li').forEach((x) => x.classList.remove('active'));
-                li.classList.add('active');
-                openSmsThread(c.address, c.name);
-            });
-            ul.appendChild(li);
-        });
-    } catch (e) { console.warn(e); }
-}
-async function openSmsThread(address, name) {
-    smsActiveAddr = address;
-    document.getElementById('sms-thread-header').textContent = name || address;
-    const body = document.getElementById('sms-thread-body');
-    body.innerHTML = '';
-    const loadingSpan = document.createElement('span');
-    loadingSpan.style.color = 'var(--muted)';
-    loadingSpan.textContent = t('sms.loading');
-    body.appendChild(loadingSpan);
-    try {
-        const items = await rpc('sms.thread', { address });
-        body.innerHTML = '';
-        if (!items.length) {
-            const empty = document.createElement('span');
-            empty.style.color = 'var(--muted)';
-            empty.textContent = t('sms.threadEmpty');
-            body.appendChild(empty);
-            return;
-        }
-        items.forEach((m) => {
-            const div = document.createElement('div');
-            div.className = 'sms-msg ' + (m.incoming ? 'in' : 'out');
-            const time = new Date(m.timestampMs).toLocaleString();
-            div.innerHTML = `
-                <div>${escapeHtml(m.body)}</div>
-                <div class="sms-time">${escapeHtml(time)}</div>
-            `;
-            body.appendChild(div);
-        });
-        body.scrollTop = body.scrollHeight;
-    } catch (e) { body.textContent = 'failed: ' + e.message; }
-}
-document.getElementById('sms-refresh').addEventListener('click', refreshSmsList);
-
-// ============== send text ==============
-const sendText = document.getElementById('send-text');
-const sendTarget = document.getElementById('send-target');
-const sendHint = document.getElementById('send-hint');
-const sendBtn = document.getElementById('send-button');
-
-function updateSendHint() {
-    const text = sendText.value;
-    if (sendTarget.value === 'voice_key') {
-        const v = text.trim();
-        if (!v) sendHint.textContent = t('send.hintEmpty');
-        else if (v.startsWith('sk_') && v.length >= 32) sendHint.textContent = t('send.hintValid');
-        else if (/^[0-9a-fA-F]{32}$/.test(v)) sendHint.textContent = t('send.hintValid');
-        else sendHint.textContent = t('send.hintInvalid');
-    } else if (sendTarget.value === 'voice_custom_id') {
-        const v = text.trim();
-        if (!v) sendHint.textContent = t('send.hintCustomIdEmpty');
-        // ElevenLabs voice_id is a 20-char alphanumeric token. Accept anything
-        // close to that shape; let the server reject the rest at synth time.
-        else if (/^[A-Za-z0-9]{16,32}$/.test(v)) sendHint.textContent = t('send.hintValid');
-        else sendHint.textContent = t('send.hintCustomIdInvalid');
-    } else {
-        sendHint.textContent = text ? t('send.hintChars', text.length) : t('send.hintTypeMsg');
-    }
-}
-sendText.addEventListener('input', updateSendHint);
-sendTarget.addEventListener('change', updateSendHint);
-sendBtn.addEventListener('click', async () => {
-    const text = sendText.value;
-    if (!text) return;
-    sendBtn.disabled = true;
-    try {
-        await rpc('text.send', { target: sendTarget.value, text });
-        sendHint.textContent = t('send.sent');
-        sendText.value = '';
-        flash(t('send.sentToR1'));
-    } catch (e) {
-        sendHint.textContent = 'failed: ' + e.message;
-        showErr(e);
-    } finally {
-        sendBtn.disabled = false;
-    }
-});
-updateSendHint();
 
 // ============== system toggles + sliders ==============
 document.getElementById('toggle-wifi').addEventListener('change', (e) =>
@@ -676,6 +563,306 @@ termClear.addEventListener('click', async () => {
         await rpc('terminal.clear');
         termOutput.textContent = '';
     } catch (err) { showErr(err); }
+});
+
+
+// ============== credentials ==============
+// Renders three blocks from snapshot.credentials (eleven / hermes / ntfy)
+// and wires each block's save / add / edit / delete / activate to the
+// corresponding credentials.* RPC. Secrets come back as tails from the
+// server; we never store full values client-side beyond the moment they
+// leave a save button.
+
+const credElevenKey     = document.getElementById('cred-eleven-key');
+const credElevenKeyTail = document.getElementById('cred-eleven-key-tail');
+const credElevenVoice   = document.getElementById('cred-eleven-voice');
+const credElevenCustom  = document.getElementById('cred-eleven-custom');
+const credElevenSave    = document.getElementById('cred-eleven-save');
+const credElevenStatus  = document.getElementById('cred-eleven-status');
+
+const credHermesList    = document.getElementById('cred-hermes-list');
+const credHermesUrl     = document.getElementById('cred-hermes-url');
+const credHermesBearer  = document.getElementById('cred-hermes-bearer');
+const credHermesAdd     = document.getElementById('cred-hermes-add');
+const credHermesStatus  = document.getElementById('cred-hermes-status');
+
+const credNtfyTopic     = document.getElementById('cred-ntfy-topic');
+const credNtfySave      = document.getElementById('cred-ntfy-save');
+const credNtfyStatus    = document.getElementById('cred-ntfy-status');
+
+// Track which Hermes row (if any) is in edit mode so the user's in-flight
+// edits aren't blown away when a 1 Hz snapshot triggers re-render.
+let credHermesEditingId = null;
+let credHermesEditDraft = { url: '', bearer: '' };
+
+function credFieldFocused(el) {
+    return document.activeElement === el;
+}
+
+function applyCredentialsSnapshot(cred) {
+    if (!cred) return;
+
+    // --- ElevenLabs ---
+    const eleven = cred.elevenlabs || {};
+    if (!credFieldFocused(credElevenKey)) {
+        credElevenKey.value = '';
+        credElevenKey.placeholder = eleven.hasApiKey ? (eleven.apiKeyTail || 'sk_...') : 'sk_... or 32-char hex';
+    }
+    credElevenKeyTail.textContent = eleven.hasApiKey
+        ? t('cred.status.tail', eleven.apiKeyTail || '')
+        : t('cred.status.unset');
+
+    if (!credFieldFocused(credElevenVoice)) {
+        const wanted = eleven.voiceId;
+        const opts = Array.from(credElevenVoice.options).map((o) => o.value);
+        credElevenVoice.value = opts.includes(wanted) ? wanted : opts[0];
+    }
+
+    if (!credFieldFocused(credElevenCustom)) {
+        credElevenCustom.value = eleven.voiceCustomId || '';
+    }
+
+    // --- Hermes ---
+    const hermes = cred.hermes || { connections: [], maxConnections: 5, activeId: '' };
+    renderHermesList(hermes);
+
+    // --- Ntfy ---
+    const ntfy = cred.ntfy || {};
+    if (!credFieldFocused(credNtfyTopic)) {
+        credNtfyTopic.value = ntfy.topic || '';
+    }
+}
+
+function renderHermesList(hermes) {
+    const conns = Array.isArray(hermes.connections) ? hermes.connections : [];
+    const activeId = hermes.activeId || '';
+    const cap = hermes.maxConnections || 5;
+
+    credHermesList.innerHTML = '';
+    conns.forEach((c) => {
+        const li = document.createElement('li');
+        if (c.id === activeId) li.classList.add('cred-hermes-active');
+
+        const row = document.createElement('div');
+        row.className = 'cred-hermes-row';
+
+        const host = document.createElement('div');
+        host.className = 'cred-hermes-host';
+        host.textContent = c.hostLabel || c.url || '';
+        row.appendChild(host);
+
+        if (c.id === activeId) {
+            const mark = document.createElement('span');
+            mark.className = 'cred-hermes-active-mark';
+            mark.textContent = t('cred.hermes.activeMark');
+            row.appendChild(mark);
+        }
+
+        const actions = document.createElement('div');
+        actions.className = 'cred-hermes-actions';
+        if (c.id !== activeId) {
+            const btnActivate = document.createElement('button');
+            btnActivate.type = 'button';
+            btnActivate.textContent = t('cred.hermes.activate');
+            btnActivate.addEventListener('click', () => activateHermesConn(c.id));
+            actions.appendChild(btnActivate);
+        }
+        const btnEdit = document.createElement('button');
+        btnEdit.type = 'button';
+        btnEdit.textContent = t('cred.hermes.edit');
+        btnEdit.addEventListener('click', () => beginEditHermesConn(c));
+        actions.appendChild(btnEdit);
+
+        const btnDelete = document.createElement('button');
+        btnDelete.type = 'button';
+        btnDelete.textContent = t('cred.hermes.delete');
+        btnDelete.addEventListener('click', () => deleteHermesConn(c.id));
+        actions.appendChild(btnDelete);
+
+        row.appendChild(actions);
+        li.appendChild(row);
+
+        const bearer = document.createElement('div');
+        bearer.className = 'cred-hermes-bearer';
+        bearer.textContent = c.hasBearer
+            ? t('cred.status.tail', c.bearerTail || '')
+            : t('cred.status.unset');
+        li.appendChild(bearer);
+
+        if (credHermesEditingId === c.id) {
+            li.appendChild(buildHermesEditForm(c));
+        }
+
+        credHermesList.appendChild(li);
+    });
+
+    const atCap = conns.length >= cap;
+    credHermesAdd.disabled = atCap;
+    credHermesStatus.textContent = atCap ? t('cred.hermes.capReached') : '';
+}
+
+function buildHermesEditForm(c) {
+    const form = document.createElement('div');
+    form.className = 'cred-hermes-edit-form';
+
+    const urlLabel = document.createElement('label');
+    urlLabel.className = 'field';
+    const urlSpan = document.createElement('span');
+    urlSpan.className = 'field-label';
+    urlSpan.textContent = t('cred.hermes.url');
+    urlLabel.appendChild(urlSpan);
+    const urlInput = document.createElement('input');
+    urlInput.type = 'text';
+    urlInput.autocomplete = 'off';
+    urlInput.spellcheck = false;
+    urlInput.value = credHermesEditDraft.url || c.url || '';
+    urlInput.addEventListener('input', () => { credHermesEditDraft.url = urlInput.value; });
+    urlLabel.appendChild(urlInput);
+    form.appendChild(urlLabel);
+
+    const bearerLabel = document.createElement('label');
+    bearerLabel.className = 'field';
+    const bearerSpan = document.createElement('span');
+    bearerSpan.className = 'field-label';
+    bearerSpan.textContent = t('cred.hermes.bearer');
+    bearerLabel.appendChild(bearerSpan);
+    const bearerInput = document.createElement('input');
+    bearerInput.type = 'text';
+    bearerInput.autocomplete = 'off';
+    bearerInput.spellcheck = false;
+    bearerInput.placeholder = c.hasBearer ? (c.bearerTail || '') : '';
+    bearerInput.value = credHermesEditDraft.bearer || '';
+    bearerInput.addEventListener('input', () => { credHermesEditDraft.bearer = bearerInput.value; });
+    bearerLabel.appendChild(bearerInput);
+    form.appendChild(bearerLabel);
+
+    const actions = document.createElement('div');
+    actions.className = 'cred-hermes-edit-form-actions';
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'primary-btn';
+    saveBtn.textContent = t('cred.save');
+    saveBtn.addEventListener('click', () => saveHermesEdit(c));
+    actions.appendChild(saveBtn);
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = t('cred.hermes.cancel');
+    cancelBtn.addEventListener('click', () => cancelHermesEdit());
+    actions.appendChild(cancelBtn);
+
+    form.appendChild(actions);
+    return form;
+}
+
+function beginEditHermesConn(c) {
+    credHermesEditingId = c.id;
+    credHermesEditDraft = { url: c.url || '', bearer: '' };
+    rpc('credentials.get').then(applyCredentialsSnapshot).catch(() => {});
+}
+
+function cancelHermesEdit() {
+    credHermesEditingId = null;
+    credHermesEditDraft = { url: '', bearer: '' };
+    rpc('credentials.get').then(applyCredentialsSnapshot).catch(() => {});
+}
+
+async function saveHermesEdit(c) {
+    // hermesUpdateConnection overwrites both url and bearer with whatever
+    // we pass. Bearer field comes back masked, so an empty bearer field
+    // means "I didn't retype" — we refuse rather than silently wipe the
+    // saved bearer.
+    const newUrl = (credHermesEditDraft.url || c.url || '').trim();
+    const newBearer = credHermesEditDraft.bearer.trim();
+    if (!newUrl) {
+        credHermesStatus.textContent = t('cred.status.failed', 'url required');
+        return;
+    }
+    if (!newBearer && c.hasBearer) {
+        credHermesStatus.textContent = t('cred.status.failed', 'bearer required (retype to confirm)');
+        return;
+    }
+    try {
+        await rpc('credentials.hermes_update', { id: c.id, url: newUrl, bearer: newBearer });
+        flash(t('cred.status.saved'));
+        cancelHermesEdit();
+    } catch (e) {
+        credHermesStatus.textContent = t('cred.status.failed', e.message);
+    }
+}
+
+async function activateHermesConn(id) {
+    try {
+        await rpc('credentials.hermes_activate', { id });
+        flash(t('cred.status.saved'));
+    } catch (e) {
+        credHermesStatus.textContent = t('cred.status.failed', e.message);
+    }
+}
+
+async function deleteHermesConn(id) {
+    if (!window.confirm(t('cred.hermes.delete') + '?')) return;
+    try {
+        await rpc('credentials.hermes_delete', { id });
+        if (credHermesEditingId === id) cancelHermesEdit();
+        flash(t('cred.status.saved'));
+    } catch (e) {
+        credHermesStatus.textContent = t('cred.status.failed', e.message);
+    }
+}
+
+credHermesAdd.addEventListener('click', async () => {
+    const url = (credHermesUrl.value || '').trim();
+    const bearer = (credHermesBearer.value || '').trim();
+    if (!url || !bearer) {
+        credHermesStatus.textContent = t('cred.status.failed', 'url + bearer required');
+        return;
+    }
+    credHermesAdd.disabled = true;
+    try {
+        await rpc('credentials.hermes_add', { url, bearer });
+        credHermesUrl.value = '';
+        credHermesBearer.value = '';
+        flash(t('cred.status.saved'));
+    } catch (e) {
+        credHermesStatus.textContent = t('cred.status.failed', e.message);
+    } finally {
+        credHermesAdd.disabled = false;
+    }
+});
+
+credElevenSave.addEventListener('click', async () => {
+    const key = credElevenKey.value.trim();
+    const voiceId = credElevenVoice.value;
+    const customId = credElevenCustom.value.trim();
+    credElevenSave.disabled = true;
+    try {
+        if (key) await rpc('credentials.set_voice_key', { key });
+        await rpc('credentials.set_voice_id', { id: voiceId });
+        await rpc('credentials.set_voice_custom_id', { id: customId });
+        credElevenKey.value = '';
+        flash(t('cred.status.saved'));
+        credElevenStatus.textContent = t('cred.status.saved');
+    } catch (e) {
+        credElevenStatus.textContent = t('cred.status.failed', e.message);
+    } finally {
+        credElevenSave.disabled = false;
+    }
+});
+
+credNtfySave.addEventListener('click', async () => {
+    const topic = credNtfyTopic.value.trim();
+    credNtfySave.disabled = true;
+    try {
+        await rpc('credentials.set_ntfy_topic', { topic });
+        flash(t('cred.status.saved'));
+        credNtfyStatus.textContent = t('cred.status.saved');
+    } catch (e) {
+        credNtfyStatus.textContent = t('cred.status.failed', e.message);
+    } finally {
+        credNtfySave.disabled = false;
+    }
 });
 
 
