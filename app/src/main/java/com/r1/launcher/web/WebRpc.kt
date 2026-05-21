@@ -114,6 +114,32 @@ object WebRpc {
         "credentials.set_ntfy_topic" -> {
             host.ntfySetTopic(params.requireString("topic").trim()); JsonNull
         }
+        "credentials.hermes_add" -> {
+            val url = params.requireString("url").trim()
+            val bearer = params.requireString("bearer").trim()
+            val added = host.hermesAddConnection(url, bearer)
+            if (added == null) {
+                throw RpcException(
+                    "hermes_add_failed",
+                    "could not add (cap reached or invalid url)",
+                )
+            }
+            buildJsonObject { put("id", added.id) }
+        }
+        "credentials.hermes_update" -> {
+            host.hermesUpdateConnection(
+                id = params.requireString("id"),
+                url = params.requireString("url").trim(),
+                key = params.requireString("bearer").trim(),
+            )
+            JsonNull
+        }
+        "credentials.hermes_delete" -> {
+            host.hermesDeleteConnection(params.requireString("id")); JsonNull
+        }
+        "credentials.hermes_activate" -> {
+            host.hermesSetActiveConnection(params.requireString("id")); JsonNull
+        }
 
         "terminal.run" -> {
             requireWebTerminal(state)
