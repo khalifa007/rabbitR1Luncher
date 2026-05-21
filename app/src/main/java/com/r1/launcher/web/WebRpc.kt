@@ -3,7 +3,6 @@ package com.r1.launcher.web
 import android.content.Context
 import com.r1.launcher.LauncherHost
 import com.r1.launcher.LauncherState
-import com.r1.launcher.messages.SmsLoader
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -58,11 +57,6 @@ object WebRpc {
         params: JsonObject?,
     ): JsonElement = when (method) {
         "state.snapshot" -> buildSnapshot(state, ctx)
-
-        "sms.list" -> buildSmsList(ctx)
-        "sms.thread" -> buildSmsThread(ctx, params.requireString("address"))
-
-        "text.send" -> handleTextSend(host, state, params)
 
         "wifi.toggle" -> {
             host.toggleWifi(params.requireBool("on")); JsonNull
@@ -339,36 +333,6 @@ object WebRpc {
         }
     }
 
-    private fun buildSmsList(ctx: Context): JsonArray {
-        val convs = runCatching { SmsLoader.loadConversations(ctx) }.getOrDefault(emptyList())
-        return buildJsonArray {
-            convs.forEach { c ->
-                add(buildJsonObject {
-                    put("address", c.address)
-                    put("name", c.displayName)
-                    put("latestBody", c.latestBody)
-                    put("latestTimestampMs", c.latestTimestampMs)
-                    put("unreadCount", c.unreadCount)
-                    put("totalCount", c.totalCount)
-                })
-            }
-        }
-    }
-
-    private fun buildSmsThread(ctx: Context, address: String): JsonArray {
-        val items = runCatching { SmsLoader.loadMessagesFor(ctx, address) }.getOrDefault(emptyList())
-        return buildJsonArray {
-            items.forEach { m ->
-                add(buildJsonObject {
-                    put("body", m.body)
-                    put("timestampMs", m.timestampMs)
-                    put("incoming", m.incoming)
-                    put("read", m.read)
-                })
-            }
-        }
-    }
-
     /** Build the credentials block for `credentials.get` and for inclusion in
      *  the 1 Hz `state.snapshot`. Secrets are tailed; URLs / voice ids / topic
      *  are returned in full. See spec for the threat model rationale. */
@@ -406,51 +370,6 @@ object WebRpc {
         }
     }
 
-    /**
-     * `text.send` is a multi-target relay: paste arbitrary text from a phone
-     * keyboard into one of the launcher's input sinks.
-     *
-     * targets:
-     *   - "voice_key"       → save as ElevenLabs API key (sk_* or 32-char hex)
-     *   - "voice_custom_id" → save as ElevenLabs voice id (clones / pro voices);
-     *                         empty string clears the override
-     *   - "openclaw_chat"   → send as a chat message (only when a session is live)
-     */
-    private fun handleTextSend(
-        host: LauncherHost,
-        state: LauncherState,
-        params: JsonObject?,
-    ): JsonElement {
-        val target = params.requireString("target")
-        val text = params.requireString("text")
-        return when (target) {
-            "voice_key" -> {
-                host.voiceSaveKey(text.trim())
-                JsonNull
-            }
-            "voice_custom_id" -> {
-                val v = text.trim()
-                if (v.isEmpty()) host.voiceClearCustomVoiceId()
-                else host.voiceSaveCustomVoiceId(v)
-                JsonNull
-            }
-            "openclaw_chat" -> {
-                if (!state.chatStatus.startsWith("live")) {
-                    throw RpcException("openclaw_offline", "openclaw not connected")
-                }
-                host.openClawSendText(text)
-                JsonNull
-            }
-            "hermes_chat" -> {
-                if (state.hermesActiveId == null) {
-                    throw RpcException("hermes_unconfigured", "hermes server url not set")
-                }
-                host.hermesSendText(text)
-                JsonNull
-            }
-            else -> throw RpcException("unknown_target", "unknown target: $target")
-        }
-    }
 }
 
 private fun JsonObject?.requireString(key: String): String =
