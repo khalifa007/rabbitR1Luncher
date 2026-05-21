@@ -28,6 +28,26 @@ import kotlinx.serialization.json.put
  */
 class RpcException(val code: String, message: String) : RuntimeException(message)
 
+/**
+ * Mask a secret for read-back over the web channel. Keeps the first 3 visible
+ * chars of the value (or the `sk_` / `eyJ` literal when the value starts with
+ * one) and the last 5, ellipsizing the middle. Short values (<= 8 chars) come
+ * back unchanged because tailing them would reveal more than masking.
+ */
+internal fun secretTail(value: String): String {
+    if (value.isEmpty()) return ""
+    val v = value.trim()
+    val prefix = when {
+        v.startsWith("sk_") -> "sk_"
+        v.startsWith("eyJ") -> "eyJ"
+        v.length >= 3 -> v.take(3)
+        else -> ""
+    }
+    val last5 = v.takeLast(5)
+    if (v.length <= prefix.length + last5.length) return v
+    return "$prefix…$last5"
+}
+
 object WebRpc {
 
     fun dispatch(
@@ -299,6 +319,43 @@ object WebRpc {
                     put("read", m.read)
                 })
             }
+        }
+    }
+
+    /** Build the credentials block for `credentials.get` and for inclusion in
+     *  the 1 Hz `state.snapshot`. Secrets are tailed; URLs / voice ids / topic
+     *  are returned in full. See spec for the threat model rationale. */
+    internal fun buildCredentialsBlock(ctx: Context): JsonObject {
+        val voicePrefs = com.r1.launcher.voice.VoicePrefs.get(ctx)
+        val hermesPrefs = com.r1.launcher.hermes.HermesPrefs.get(ctx)
+        val ntfyPrefs = com.r1.launcher.notifications.NtfyPrefs.get(ctx)
+
+        return buildJsonObject {
+            put("elevenlabs", buildJsonObject {
+                val key = voicePrefs.elevenlabsKey.orEmpty()
+                put("hasApiKey", key.isNotBlank())
+                put("apiKeyTail", secretTail(key))
+                put("voiceId", voicePrefs.voiceId)
+                put("voiceCustomId", voicePrefs.customVoiceId.orEmpty())
+            })
+            put("hermes", buildJsonObject {
+                put("maxConnections", com.r1.launcher.hermes.HermesPrefs.MAX_CONNECTIONS)
+                put("activeId", hermesPrefs.active?.id ?: "")
+                put("connections", buildJsonArray {
+                    hermesPrefs.connections.forEach { c ->
+                        add(buildJsonObject {
+                            put("id", c.id)
+                            put("url", c.url)
+                            put("hostLabel", c.hostLabel)
+                            put("hasBearer", c.apiKey.isNotBlank())
+                            put("bearerTail", secretTail(c.apiKey))
+                        })
+                    }
+                })
+            })
+            put("ntfy", buildJsonObject {
+                put("topic", ntfyPrefs.topic)
+            })
         }
     }
 
