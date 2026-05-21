@@ -43,6 +43,11 @@ interface LauncherHost {
     fun openClawSendText(text: String)
     fun voiceToggleEnabled()
     fun voiceCycleVoiceId()
+    /** Set the catalog voice to the exact id [id]. No-ops with a warning log
+     *  when [id] is not in [com.r1.launcher.voice.VoicePrefs.VOICES]. Used by
+     *  the web companion's credentials view where the user picks a voice from
+     *  a dropdown instead of cycling. */
+    fun voiceSetVoiceId(id: String)
     fun voiceSaveKey(key: String)
     fun voiceClearKey()
     fun voicePasteKeyFromClipboard()

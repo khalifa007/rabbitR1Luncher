@@ -3509,6 +3509,18 @@ override fun hermesPasteServerUrlFromClipboard() {
         popTone()
     }
 
+    override fun voiceSetVoiceId(id: String) {
+        val voices = com.r1.launcher.voice.VoicePrefs.VOICES
+        val match = voices.firstOrNull { it.second == id }
+        if (match == null) {
+            android.util.Log.w("R1Voice", "voiceSetVoiceId($id) ignored: not in catalog")
+            return
+        }
+        state.voiceId = match.second
+        voicePrefs.voiceId = match.second
+        toast("voice: ${match.first}")
+    }
+
     override fun voiceSaveKey(key: String) {
         val k = key.trim()
         when {
