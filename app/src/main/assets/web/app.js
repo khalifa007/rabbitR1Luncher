@@ -290,6 +290,7 @@ function setView(name) {
     // Lazy-load when opening certain panels.
     if (name === 'terminal') refreshTerminalHistory();
     if (name === 'meetings') refreshMeetings();
+    if (name === 'media') Media.refresh();
 }
 
 // ============== meetings ==============
@@ -392,6 +393,8 @@ window.addEventListener('keydown', (e) => {
 function handleEvent(event, payload) {
     if (event === 'state.snapshot') applySnapshot(payload);
     else if (event === 'terminal.output') appendTerminalLine(payload);
+    else if (event === 'capture.added') Media.onCaptureAdded(payload);
+    else if (event === 'capture.recording') Media.onCaptureRecording(payload);
 }
 
 function setToggle(id, v) {
@@ -454,6 +457,7 @@ function applySnapshot(s) {
     }
     if (s.terminal) applyTerminalSnapshot(s.terminal);
     if (s.credentials) applyCredentialsSnapshot(s.credentials);
+    if (s.media) Media.onSnapshot(s.media);
 }
 
 // ============== utilities ==============
@@ -867,8 +871,219 @@ credNtfySave.addEventListener('click', async () => {
 
 
 // ============== boot ==============
+// ============== media capture view ==============
+
+const Media = (() => {
+    const grid = () => document.getElementById('media-grid');
+    const empty = () => document.getElementById('media-empty');
+    const statsText = () => document.getElementById('media-stats-text');
+    const snapBtn = () => document.getElementById('media-snap');
+    const recordBtn = () => document.getElementById('media-record');
+    const recordLabel = () => recordBtn().querySelector('.rec-label');
+    const clearBtn = () => document.getElementById('media-clear-all');
+
+    let items = [];
+    let recordingTicker = null;
+    let clearConfirm = false;
+    let clearConfirmTimer = null;
+    let bound = false;
+
+    function relTime(takenAt) {
+        const diff = Date.now() - takenAt;
+        if (diff < 60_000) return 'just now';
+        if (diff < 3_600_000) return Math.floor(diff / 60_000) + 'm ago';
+        if (diff < 86_400_000) return Math.floor(diff / 3_600_000) + 'h ago';
+        const d = new Date(takenAt);
+        return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+    }
+
+    function formatBytes(n) {
+        if (n < 1024) return n + ' B';
+        if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+        return (n / 1024 / 1024).toFixed(1) + ' MB';
+    }
+
+    function renderStats(totalBytes) {
+        statsText().textContent = `${items.length} ${t('media.statsItems')} · ${formatBytes(totalBytes)}`;
+        clearBtn().style.display = items.length ? '' : 'none';
+    }
+
+    function renderGrid() {
+        empty().style.display = items.length ? 'none' : '';
+        grid().innerHTML = '';
+        items.forEach((item) => {
+            const tile = document.createElement('div');
+            tile.className = 'media-tile';
+            tile.dataset.name = item.name;
+
+            const img = document.createElement('img');
+            img.loading = 'lazy';
+            img.src = item.thumbUrl;
+            img.alt = item.name;
+            tile.appendChild(img);
+
+            const meta = document.createElement('div');
+            meta.className = 'media-tile-meta';
+            const kind = document.createElement('span');
+            kind.className = 'media-tile-kind';
+            kind.textContent = item.kind === 'video' ? 'MP4' : 'PNG';
+            const when = document.createElement('span');
+            when.textContent = relTime(item.takenAt);
+            meta.appendChild(kind);
+            meta.appendChild(when);
+            tile.appendChild(meta);
+
+            const del = document.createElement('button');
+            del.className = 'media-tile-delete';
+            del.textContent = '×';
+            del.dataset.confirm = '0';
+            del.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (del.dataset.confirm === '1') {
+                    rpc('capture.delete', { name: item.name }).then(refresh).catch(showErr);
+                } else {
+                    del.dataset.confirm = '1';
+                    del.classList.add('confirm');
+                    setTimeout(() => {
+                        del.dataset.confirm = '0';
+                        del.classList.remove('confirm');
+                    }, 2000);
+                }
+            });
+            tile.appendChild(del);
+
+            tile.addEventListener('click', () => Lightbox.open(item));
+            grid().appendChild(tile);
+        });
+    }
+
+    function refresh() {
+        return rpc('capture.list', { limit: 100 }).then((payload) => {
+            items = (payload && payload.items) || [];
+            renderGrid();
+            renderStats((payload && payload.totalBytes) || 0);
+        }).catch((e) => console.warn('media refresh failed', e));
+    }
+
+    function setRecordingUi(recording, startedAt) {
+        if (recording) {
+            recordBtn().classList.add('recording');
+            snapBtn().disabled = true;
+            tickRecording(startedAt);
+            if (recordingTicker) clearInterval(recordingTicker);
+            recordingTicker = setInterval(() => tickRecording(startedAt), 1000);
+        } else {
+            recordBtn().classList.remove('recording');
+            snapBtn().disabled = false;
+            recordLabel().textContent = t('media.record');
+            if (recordingTicker) { clearInterval(recordingTicker); recordingTicker = null; }
+        }
+    }
+
+    function tickRecording(startedAt) {
+        const elapsed = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+        const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
+        const ss = String(elapsed % 60).padStart(2, '0');
+        const remain = 180 - elapsed;
+        let label = `${t('media.stop')} (${mm}:${ss})`;
+        if (remain <= 5 && remain > 0) {
+            label += ` — ${t('media.autoStop')} ${String(remain).padStart(2, '0')}s`;
+        }
+        recordLabel().textContent = label;
+    }
+
+    function onCaptureAdded(payload) {
+        if (!payload) return;
+        items = [payload, ...items.filter((it) => it.name !== payload.name)];
+        renderGrid();
+        // Stats refresh is best-effort; the snapshot tick will correct it.
+        rpc('capture.list', { limit: 0 })
+            .then((p) => renderStats((p && p.totalBytes) || 0))
+            .catch(() => {});
+    }
+
+    function onCaptureRecording(payload) {
+        if (!payload) return;
+        setRecordingUi(!!payload.recording, payload.startedAt || 0);
+    }
+
+    function onSnapshot(media) {
+        if (!media) return;
+        const uiRecording = recordBtn().classList.contains('recording');
+        if (!!media.recording !== uiRecording) {
+            setRecordingUi(!!media.recording, media.startedAt || 0);
+        }
+    }
+
+    function bind() {
+        if (bound) return;
+        bound = true;
+
+        snapBtn().addEventListener('click', async () => {
+            snapBtn().disabled = true;
+            try {
+                await rpc('capture.screenshot', {});
+                // capture.added event prepends the tile.
+            } catch (e) {
+                flash(`${t('media.failedCapture')} — ${e.message || ''}`, true);
+            } finally {
+                snapBtn().disabled = false;
+            }
+        });
+
+        recordBtn().addEventListener('click', async () => {
+            const isRecording = recordBtn().classList.contains('recording');
+            try {
+                if (isRecording) {
+                    await rpc('capture.stopVideo', {});
+                } else {
+                    await rpc('capture.startVideo', {});
+                }
+            } catch (e) {
+                const msg = e.message || '';
+                const tag = msg.startsWith('free=') ? t('media.lowStorage') : t('media.failedRecord');
+                flash(`${tag} — ${msg}`, true);
+            }
+        });
+
+        clearBtn().addEventListener('click', () => {
+            if (clearConfirm) {
+                rpc('capture.clear', {}).then(refresh).catch(showErr);
+                clearConfirm = false;
+                clearBtn().classList.remove('confirm');
+                clearBtn().textContent = t('media.clearAll');
+                if (clearConfirmTimer) { clearTimeout(clearConfirmTimer); clearConfirmTimer = null; }
+            } else {
+                clearConfirm = true;
+                clearBtn().classList.add('confirm');
+                clearBtn().textContent = t('media.confirmClear');
+                if (clearConfirmTimer) clearTimeout(clearConfirmTimer);
+                clearConfirmTimer = setTimeout(() => {
+                    clearConfirm = false;
+                    clearBtn().classList.remove('confirm');
+                    clearBtn().textContent = t('media.clearAll');
+                }, 2000);
+            }
+        });
+    }
+
+    return { bind, refresh, onCaptureAdded, onCaptureRecording, onSnapshot };
+})();
+
+// Lightbox stub — real impl in Task 11. Defined here so Media.renderGrid's
+// tile click handler resolves at parse time even before Task 11 lands.
+const Lightbox = (() => {
+    return {
+        open: () => {},
+        close: () => {},
+        bind: () => {},
+    };
+})();
+
 setView('home');
 renderUnlockDots();
+Media.bind();
+Lightbox.bind();
 if (panelToken) {
     // We already have a token (sessionStorage or legacy `?t=` URL) — hide
     // the overlay and dive straight into the live UI. If the token turns
