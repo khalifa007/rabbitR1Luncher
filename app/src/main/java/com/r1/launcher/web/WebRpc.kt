@@ -13,6 +13,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.int
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -260,8 +261,87 @@ object WebRpc {
             JsonNull
         }
 
+        "capture.screenshot" -> {
+            host.mediaCaptureScreenshot().fold(
+                onSuccess = { item -> captureItemJson(item) },
+                onFailure = { t ->
+                    throw RpcException(
+                        code = (t as? RpcException)?.code ?: "capture_failed",
+                        message = t.message ?: "capture failed",
+                    )
+                },
+            )
+        }
+        "capture.startVideo" -> {
+            if (host.mediaIsRecording()) {
+                buildJsonObject {
+                    put("code", "already_recording")
+                    put("startedAt", state.mediaRecordingStartedAt)
+                }
+            } else {
+                host.mediaStartVideo().fold(
+                    onSuccess = { startedAt ->
+                        buildJsonObject {
+                            put("ok", true)
+                            put("startedAt", startedAt)
+                        }
+                    },
+                    onFailure = { t ->
+                        when (t) {
+                            is com.r1.launcher.media.MediaCaptureManager.LowStorageException ->
+                                throw RpcException("low_storage", "free=${t.freeBytes}")
+                            else ->
+                                throw RpcException("recording_start_failed", t.message ?: "start failed")
+                        }
+                    },
+                )
+            }
+        }
+        "capture.stopVideo" -> {
+            host.mediaStopVideo().fold(
+                onSuccess = { item -> captureItemJson(item) },
+                onFailure = { t ->
+                    val code = when (t.message) {
+                        "not_recording" -> "not_recording"
+                        else -> "recording_lost"
+                    }
+                    throw RpcException(code, t.message ?: "stop failed")
+                },
+            )
+        }
+        "capture.list" -> {
+            val limit = (params?.get("limit") as? JsonPrimitive)?.intOrNull ?: 50
+            val items = host.mediaList(limit)
+            buildJsonObject {
+                put("items", buildJsonArray { items.forEach { add(captureItemJson(it)) } })
+                put("totalBytes", host.mediaTotalBytes())
+            }
+        }
+        "capture.delete" -> {
+            val name = params.requireString("name")
+            if (host.mediaDelete(name)) {
+                buildJsonObject { put("ok", true) }
+            } else {
+                throw RpcException("not_found", "no such capture: $name")
+            }
+        }
+        "capture.clear" -> {
+            buildJsonObject { put("deleted", host.mediaClear()) }
+        }
+
         else -> throw RpcException("unknown_method", "unknown method: $method")
     }
+
+    private fun captureItemJson(item: com.r1.launcher.media.CaptureItem): JsonObject =
+        buildJsonObject {
+            put("name", item.name)
+            put("kind", item.kind)
+            put("sizeBytes", item.sizeBytes)
+            put("takenAt", item.takenAt)
+            item.durationMs?.let { put("durationMs", it) }
+            put("url", item.url)
+            put("thumbUrl", item.thumbUrl)
+        }
 
     /** Gate the web-terminal methods behind the explicit opt-in toggle so that
      *  the launcher's root shell isn't silently exposed to anyone on the LAN. */
@@ -327,6 +407,12 @@ object WebRpc {
             put("unread", state.notificationsUnread)
             put("total", state.notifications.size)
             put("soundEnabled", state.notificationSoundEnabled)
+        })
+        put("media", buildJsonObject {
+            put("recording", state.mediaRecording)
+            put("startedAt", state.mediaRecordingStartedAt)
+            put("count", com.r1.launcher.media.MediaCaptureManager.count())
+            put("totalBytes", com.r1.launcher.media.MediaCaptureManager.totalBytes())
         })
         ctx?.let {
             put("credentials", buildCredentialsBlock(it))

@@ -619,12 +619,31 @@ class R1WebServer(
     /** New notification landed — push to every web client so the companion
      *  panel can mirror the on-device badge / list. Cheap no-op when no one
      *  is connected. */
+    /** A new screenshot or video is on disk — push to every web client so the
+     *  media-view grid can prepend the new tile without a full refresh. */
     fun broadcastCaptureAdded(item: com.r1.launcher.media.CaptureItem) {
-        // Real impl in Task 7
+        if (sockets.isEmpty()) return
+        val payload = buildJsonObject {
+            put("name", item.name)
+            put("kind", item.kind)
+            put("sizeBytes", item.sizeBytes)
+            put("takenAt", item.takenAt)
+            item.durationMs?.let { put("durationMs", it) }
+            put("url", item.url)
+            put("thumbUrl", item.thumbUrl)
+        }
+        sockets.toList().forEach { it.sendEvent("capture.added", payload) }
     }
 
+    /** Recording state changed — sync `recording` chip + duration counter
+     *  across every connected client (multi-tab / multi-device). */
     fun broadcastCaptureRecording(recording: Boolean, startedAt: Long) {
-        // Real impl in Task 7
+        if (sockets.isEmpty()) return
+        val payload = buildJsonObject {
+            put("recording", recording)
+            put("startedAt", startedAt)
+        }
+        sockets.toList().forEach { it.sendEvent("capture.recording", payload) }
     }
 
     fun broadcastNotification(n: com.r1.launcher.notifications.Notification) {
