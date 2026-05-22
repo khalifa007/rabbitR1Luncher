@@ -1,9 +1,12 @@
 package com.r1.launcher.media
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
 import android.util.Log
 import java.io.BufferedReader
 import java.io.File
+import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.net.Socket
 import java.text.SimpleDateFormat
@@ -176,14 +179,117 @@ object MediaCaptureManager {
         // Task 4
     }
 
-    fun startVideoRecording(): Result<Long> =
-        Result.failure(NotImplementedError("Task 3"))
+    class LowStorageException(val freeBytes: Long) : RuntimeException("low_storage")
 
-    fun stopVideoRecording(): Result<CaptureItem> =
-        Result.failure(NotImplementedError("Task 3"))
+    fun startVideoRecording(): Result<Long> {
+        if (!initialized) return Result.failure(IllegalStateException("not_initialized"))
+        if (recordingPid > 0) return Result.failure(IllegalStateException("already_recording"))
+
+        val freeBytes = rootDir.usableSpace
+        if (freeBytes < LOW_STORAGE_FREE_BYTES) {
+            return Result.failure(LowStorageException(freeBytes))
+        }
+
+        val tmpPath = "/data/local/tmp/r1cap-${System.nanoTime()}.mp4"
+        val cmd = "screenrecord --audio-source mic --bit-rate $VIDEO_BIT_RATE " +
+            "--time-limit $VIDEO_TIME_LIMIT_S $tmpPath"
+
+        val pid = sendCarrootBackground(cmd)
+        if (pid <= 0) {
+            return Result.failure(RuntimeException("recording_start_failed"))
+        }
+
+        recordingPid = pid
+        recordingTmpPath = tmpPath
+        recordingStartedAt = System.currentTimeMillis()
+        Log.i(TAG, "startVideoRecording: pid=$pid tmp=$tmpPath")
+        return Result.success(recordingStartedAt)
+    }
+
+    fun stopVideoRecording(): Result<CaptureItem> {
+        if (!initialized) return Result.failure(IllegalStateException("not_initialized"))
+        val pid = recordingPid
+        val tmpPath = recordingTmpPath
+        val startedAt = recordingStartedAt
+        if (pid <= 0) return Result.failure(IllegalStateException("not_recording"))
+
+        sendCarroot("kill -2 $pid")
+        Thread.sleep(500)
+        val stillAlive = sendCarroot("kill -0 $pid 2>/dev/null && echo ALIVE || echo DEAD").contains("ALIVE")
+        if (stillAlive) {
+            Thread.sleep(500)
+            sendCarroot("kill -9 $pid")
+        }
+
+        val durationMs = System.currentTimeMillis() - startedAt
+        val fname = nextFilename("video", "mp4")
+        val destFile = File(videosDir, fname)
+        val cpOut = sendCarroot(
+            "cp $tmpPath ${destFile.absolutePath} && chmod 644 ${destFile.absolutePath} && echo OK"
+        )
+        sendCarroot("rm -f $tmpPath")
+
+        recordingPid = -1
+        recordingTmpPath = ""
+        recordingStartedAt = 0L
+
+        if (!cpOut.contains("OK") || !destFile.exists() || destFile.length() < 1024) {
+            destFile.delete()
+            return Result.failure(RuntimeException("recording_lost"))
+        }
+
+        generateThumb(destFile)
+        enforceRetention()
+
+        Log.i(TAG, "stopVideoRecording: $fname ${destFile.length()}B ${durationMs}ms")
+        return Result.success(toItem(destFile).copy(durationMs = durationMs))
+    }
+
+    private fun generateThumb(mp4: File): File? {
+        val out = File(thumbsDir, mp4.nameWithoutExtension + ".jpg")
+        return try {
+            val mmr = MediaMetadataRetriever()
+            mmr.setDataSource(mp4.absolutePath)
+            val bmp = mmr.getFrameAtTime(1_000_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            mmr.release()
+            if (bmp == null) {
+                Log.w(TAG, "generateThumb: null frame for ${mp4.name}")
+                return null
+            }
+            FileOutputStream(out).use { fos ->
+                bmp.compress(Bitmap.CompressFormat.JPEG, 70, fos)
+            }
+            bmp.recycle()
+            Log.i(TAG, "generateThumb: ${out.name} ${out.length()}B")
+            out
+        } catch (t: Throwable) {
+            Log.w(TAG, "generateThumb failed for ${mp4.name}: ${t.message}")
+            out.delete()
+            null
+        }
+    }
 
     private fun recoverOrphanRecording() {
-        // Task 3
+        // pgrep -f is broken on this toybox; use ps + grep + awk.
+        val out = sendCarroot("ps -ef | grep screenrecord | grep -v grep | awk '{print \$2}'")
+        val pid = out.lines().mapNotNull { it.trim().toIntOrNull() }.firstOrNull() ?: return
+        Log.w(TAG, "recoverOrphanRecording: found orphan pid=$pid, sending SIGINT")
+        sendCarroot("kill -2 $pid")
+        Thread.sleep(500)
+        val tmp = sendCarroot("ls /data/local/tmp/r1cap-*.mp4 2>/dev/null | head -1").trim()
+        if (tmp.isEmpty()) return
+        val fname = nextFilename("video", "mp4")
+        val destFile = File(videosDir, fname)
+        val cpOut = sendCarroot(
+            "cp $tmp ${destFile.absolutePath} && chmod 644 ${destFile.absolutePath} && echo OK"
+        )
+        sendCarroot("rm -f $tmp")
+        if (cpOut.contains("OK") && destFile.length() > 1024) {
+            generateThumb(destFile)
+            Log.i(TAG, "recoverOrphanRecording: salvaged ${destFile.name}")
+        } else {
+            destFile.delete()
+        }
     }
 
     internal fun sendCarroot(cmd: String, timeoutMs: Int = 5000): String {
