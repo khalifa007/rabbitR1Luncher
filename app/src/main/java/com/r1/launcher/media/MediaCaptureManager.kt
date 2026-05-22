@@ -12,6 +12,9 @@ import java.net.Socket
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 object MediaCaptureManager {
@@ -321,17 +324,37 @@ object MediaCaptureManager {
         }
     }
 
+    // Socket I/O must run off the main thread (StrictMode throws
+    // NetworkOnMainThreadException on Android 4+). The RPC dispatch invokes
+    // host.mediaX from the UI thread, so we shunt every carroot call through
+    // this single-thread executor and block the caller on Future.get. UI
+    // freezes briefly (~screencap ~1s, stopVideo ~500ms) — acceptable for
+    // the current button-disabled-during-capture UX. If we ever want a
+    // jank-free async path the LauncherActivity overrides should hand the
+    // whole Result<T> back via broadcasts instead.
+    private val ioExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "MediaCaptureIO").apply { isDaemon = true }
+    }
+
     internal fun sendCarroot(cmd: String, timeoutMs: Int = 5000): String {
-        return try {
-            Socket("127.0.0.1", 1337).use { sock ->
-                sock.soTimeout = timeoutMs
-                sock.getOutputStream().write((cmd + "\nexit\n").toByteArray())
-                sock.getOutputStream().flush()
-                sock.shutdownOutput()
-                BufferedReader(InputStreamReader(sock.getInputStream())).readText()
+        val callable = Callable {
+            try {
+                Socket("127.0.0.1", 1337).use { sock ->
+                    sock.soTimeout = timeoutMs
+                    sock.getOutputStream().write((cmd + "\nexit\n").toByteArray())
+                    sock.getOutputStream().flush()
+                    sock.shutdownOutput()
+                    BufferedReader(InputStreamReader(sock.getInputStream())).readText()
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "sendCarroot failed: ${t.javaClass.simpleName}: ${t.message}")
+                ""
             }
+        }
+        return try {
+            ioExecutor.submit(callable).get(timeoutMs.toLong() + 1000, TimeUnit.MILLISECONDS)
         } catch (t: Throwable) {
-            Log.w(TAG, "sendCarroot failed: ${t.message}")
+            Log.w(TAG, "sendCarroot future timed out: ${t.javaClass.simpleName}")
             ""
         }
     }
