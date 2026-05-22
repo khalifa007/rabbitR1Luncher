@@ -90,6 +90,13 @@ class R1WebServer(
     private val sendExecutor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "r1-ws-send").apply { isDaemon = true }
     }
+    /** Blocking RPCs (carroot + Thread.sleep chains for capture / terminal) run
+     *  here instead of the UI thread, otherwise a multi-second screenrecord
+     *  start sequence ANRs the launcher. Host methods that mutate Compose
+     *  state already wrap their writes in `ui.post { ... }`. */
+    private val rpcWorker = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "r1-rpc-worker").apply { isDaemon = true }
+    }
 
     private val stateTick = object : Runnable {
         override fun run() {
@@ -119,6 +126,7 @@ class R1WebServer(
         sockets.clear()
         runCatching { stop() }
         runCatching { sendExecutor.shutdownNow() }
+        runCatching { rpcWorker.shutdownNow() }
         releaseWifiLock()
     }
 
@@ -527,9 +535,18 @@ class R1WebServer(
                 ?: return sendError(id, "missing_method", "method required")
             val params = req["params"] as? JsonObject
 
-            // Dispatch on the UI thread because most LauncherHost methods
-            // mutate Compose state and post back to it.
-            ui.post {
+            // Most RPCs mutate Compose state, so default to the UI thread.
+            // But capture.* and terminal.run do multi-second carroot+sleep
+            // chains that ANR the launcher when run on the UI looper —
+            // route those onto rpcWorker. Their host methods already wrap
+            // any state writes in `ui.post { ... }` so this is safe.
+            val blocking = method.startsWith("capture.") || method == "terminal.run"
+            val executor: (Runnable) -> Unit = if (blocking) {
+                { r -> rpcWorker.execute(r) }
+            } else {
+                { r -> ui.post(r) }
+            }
+            executor {
                 runCatching {
                     val payload = WebRpc.dispatch(host, state, ctx, method, params)
                     sendResponse(id, payload)
