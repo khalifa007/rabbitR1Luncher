@@ -176,7 +176,36 @@ object MediaCaptureManager {
     }
 
     private fun enforceRetention() {
-        // Task 4
+        val imgs = imagesDir.listFiles()?.toList().orEmpty()
+        val vids = videosDir.listFiles()?.toList().orEmpty()
+        val all = (imgs + vids)
+            .filter { it.isFile }
+            .sortedBy { it.lastModified() }
+            .toMutableList()
+
+        var totalBytes = all.sumOf { it.length() }
+        val beforeBytes = totalBytes
+        var evicted = 0
+
+        while (all.isNotEmpty() && (all.size > MAX_FILES || totalBytes > MAX_BYTES)) {
+            val victim = all.removeAt(0)
+            val size = victim.length()
+            val isVideo = victim.parentFile == videosDir
+            val baseName = victim.nameWithoutExtension
+            if (victim.delete()) {
+                totalBytes -= size
+                evicted++
+                if (isVideo) {
+                    File(thumbsDir, "$baseName.jpg").delete()
+                }
+            } else {
+                break
+            }
+        }
+
+        if (evicted > 0) {
+            Log.i(TAG, "enforceRetention: evicted $evicted files (was ${beforeBytes}B, now ${totalBytes}B)")
+        }
     }
 
     class LowStorageException(val freeBytes: Long) : RuntimeException("low_storage")
