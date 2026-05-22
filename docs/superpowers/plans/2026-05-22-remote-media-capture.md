@@ -784,9 +784,6 @@ Then add the helper somewhere in the class:
 
 ```kotlin
 private fun serveMediaStatic(session: IHTTPSession, rest: String): Response {
-    val ctx = activity ?: return NanoHTTPD.newFixedLengthResponse(
-        Response.Status.INTERNAL_ERROR, "text/plain", "no ctx"
-    )
     // _play_placeholder synthetic
     if (rest == "_play_placeholder") {
         val svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
@@ -828,7 +825,7 @@ private fun serveMediaStatic(session: IHTTPSession, rest: String): Response {
 }
 ```
 
-Note: `activity` is the `LauncherActivity` reference held by `R1WebServer`. If the existing code uses a different field name (e.g. `ctx`, `host`, `appContext`), use that. Confirm by reading the existing field declarations near the top of `R1WebServer.kt`.
+`ctx: Context` is the existing constructor field on `R1WebServer` (declared around line 49). It's already in scope inside any method on the class.
 
 - [ ] **Step 3: Build + install + curl the route**
 
@@ -871,58 +868,59 @@ git commit -m "feat(media): /static/media/ asset route + play placeholder"
 
 - [ ] **Step 1: Add `capture.*` cases to `WebRpc.dispatch`**
 
-In `WebRpc.kt`, find the `dispatch` function. Add a new branch group following the existing pattern (e.g. how `terminal.run` / `claude.send` are handled):
+In `WebRpc.kt`, find the `dispatch` `when (method) {...}` block. Failures throw `RpcException(code, message)` — the existing `R1WebServer.kt:499-503` wrapper catches it and emits a proper `{ok:false, error:{code,message}}` frame. Successes return a `JsonElement`. Add these cases following the existing pattern (e.g. how `hermes.send` / `transcriber.delete` are handled):
 
 ```kotlin
 "capture.screenshot" -> {
-    val r = host.mediaCaptureScreenshot()
-    r.fold(
+    host.mediaCaptureScreenshot().fold(
         onSuccess = { item -> captureItemJson(item) },
         onFailure = { t ->
-            when (t) {
-                is com.r1.launcher.media.MediaCaptureManager.LowStorageException ->
-                    errorJson("low_storage", t.message ?: "low storage")
-                        .plus("freeBytes" to JsonPrimitive(t.freeBytes)).let { JsonObject(it) }
-                else -> errorJson(t.message ?: "capture_failed", t.message ?: "")
-            }
+            throw RpcException(
+                code = (t as? RpcException)?.code ?: "capture_failed",
+                message = t.message ?: "capture failed"
+            )
         }
     )
 }
 "capture.startVideo" -> {
     if (host.mediaIsRecording()) {
-        // Already recording — return startedAt from state so the second client can sync.
+        // Already recording — echo current startedAt so a second client can sync.
         buildJsonObject {
             put("code", "already_recording")
             put("startedAt", state.mediaRecordingStartedAt)
         }
     } else {
-        val r = host.mediaStartVideo()
-        r.fold(
+        host.mediaStartVideo().fold(
             onSuccess = { startedAt ->
-                buildJsonObject { put("ok", true); put("startedAt", startedAt) }
+                buildJsonObject {
+                    put("ok", true)
+                    put("startedAt", startedAt)
+                }
             },
             onFailure = { t ->
                 when (t) {
                     is com.r1.launcher.media.MediaCaptureManager.LowStorageException ->
-                        buildJsonObject {
-                            put("code", "low_storage")
-                            put("freeBytes", t.freeBytes)
-                        }
-                    else -> errorJson(t.message ?: "recording_start_failed", t.message ?: "")
+                        throw RpcException("low_storage", "free=${t.freeBytes}")
+                    else ->
+                        throw RpcException("recording_start_failed", t.message ?: "start failed")
                 }
             }
         )
     }
 }
 "capture.stopVideo" -> {
-    val r = host.mediaStopVideo()
-    r.fold(
+    host.mediaStopVideo().fold(
         onSuccess = { item -> captureItemJson(item) },
-        onFailure = { t -> errorJson(t.message ?: "stop_failed", t.message ?: "") }
+        onFailure = { t ->
+            throw RpcException(
+                code = if (t.message == "not_recording") "not_recording" else "recording_lost",
+                message = t.message ?: "stop failed"
+            )
+        }
     )
 }
 "capture.list" -> {
-    val limit = (params?.get("limit") as? JsonPrimitive)?.intOrNull ?: 50
+    val limit = params?.get("limit")?.let { (it as? JsonPrimitive)?.intOrNull } ?: 50
     val items = host.mediaList(limit)
     buildJsonObject {
         put("items", buildJsonArray { items.forEach { add(captureItemJson(it)) } })
@@ -931,18 +929,18 @@ In `WebRpc.kt`, find the `dispatch` function. Add a new branch group following t
 }
 "capture.delete" -> {
     val name = params.requireString("name")
-    val ok = host.mediaDelete(name)
-    if (ok) buildJsonObject { put("ok", true) }
-    else buildJsonObject { put("code", "not_found") }
+    if (host.mediaDelete(name)) {
+        buildJsonObject { put("ok", true) }
+    } else {
+        throw RpcException("not_found", "no such capture: $name")
+    }
 }
 "capture.clear" -> {
     buildJsonObject { put("deleted", host.mediaClear()) }
 }
 ```
 
-(Adapt the surrounding boilerplate — `errorJson(...)`, `params.requireString(...)`, etc. — to match the existing helpers in `WebRpc.kt`. The point of the snippets above is the method names, fields, and decision logic; the JSON-builder ergonomics match what's already in the file.)
-
-Add a helper `captureItemJson(item: CaptureItem): JsonObject`:
+Add a helper at the bottom of the file (next to `secretTail` / `requireString`):
 
 ```kotlin
 private fun captureItemJson(item: com.r1.launcher.media.CaptureItem): JsonObject = buildJsonObject {
@@ -986,10 +984,11 @@ The snapshot fires at 1 Hz; both helpers just stat directory entries (no per-fil
 
 - [ ] **Step 3: Replace the broadcast stubs in `R1WebServer`**
 
-Replace the stubs added in Task 5:
+Match the existing `broadcastTerminalOutput` shape exactly — there's no `broadcastEvent` wrapper, just direct `sockets.toList().forEach { it.sendEvent(...) }`. Replace the stubs added in Task 5:
 
 ```kotlin
 fun broadcastCaptureAdded(item: com.r1.launcher.media.CaptureItem) {
+    if (sockets.isEmpty()) return
     val payload = buildJsonObject {
         put("name", item.name)
         put("kind", item.kind)
@@ -999,19 +998,18 @@ fun broadcastCaptureAdded(item: com.r1.launcher.media.CaptureItem) {
         put("url", item.url)
         put("thumbUrl", item.thumbUrl)
     }
-    broadcastEvent("capture.added", payload)
+    sockets.toList().forEach { it.sendEvent("capture.added", payload) }
 }
 
 fun broadcastCaptureRecording(recording: Boolean, startedAt: Long) {
+    if (sockets.isEmpty()) return
     val payload = buildJsonObject {
         put("recording", recording)
         put("startedAt", startedAt)
     }
-    broadcastEvent("capture.recording", payload)
+    sockets.toList().forEach { it.sendEvent("capture.recording", payload) }
 }
 ```
-
-`broadcastEvent` is the existing helper used by `broadcastTerminalOutput` et al. — match its signature.
 
 - [ ] **Step 4: Build + install + curl-test the RPCs**
 
@@ -1060,16 +1058,17 @@ git commit -m "feat(media): capture.* RPCs + snapshot + broadcast events"
 
 - [ ] **Step 1: Add the home-grid media tile**
 
-Find the existing home grid (`<section id="view-home">` block, around line 70). Add a new tile button consistent with the other tiles. Place it logically (e.g. after the system tile):
+Find the existing home grid in `index.html` (`<nav class="apps-grid">` block, around line 78). Tiles use `class="app-tile"` with `data-app="<name>"` attribute and three children (`tile-glyph`, `tile-label`, `tile-sub`). The click handler at `app.js:374` routes `data-app` → `setView`. Add the new tile after the meetings tile, with the next `--i` index:
 
 ```html
-<button class="home-tile" data-view="media">
-  <span class="home-tile-icon">📷</span>
-  <span class="home-tile-label" data-i18n-key="home.media">media</span>
-</button>
+            <button class="app-tile" data-app="media" style="--i:5">
+                <span class="tile-glyph">📷</span>
+                <span class="tile-label" data-i18n="tile.media.label">media</span>
+                <span class="tile-sub" data-i18n="tile.media.sub">screenshots + video</span>
+            </button>
 ```
 
-(Match the exact attribute names used by the other tiles. Adapt class names and structure to whatever the existing tiles use.)
+Note: i18n attribute is `data-i18n` (not `data-i18n-key`) — match what's already used by adjacent tiles.
 
 - [ ] **Step 2: Add the `view-media` section**
 
@@ -1077,7 +1076,8 @@ Right before `view-meetings` (around line 256), insert:
 
 ```html
 <section id="view-media" class="view view-app" data-title-key="view.media" data-title="media">
-  <!-- header injected from tpl-app-header -->
+  <div class="app-mount"></div>
+  <div class="app-body">
   <div class="media-actions">
     <button id="media-snap" class="media-btn media-btn-snap" data-i18n-key="media.snap">snap</button>
     <button id="media-record" class="media-btn media-btn-record">
@@ -1101,6 +1101,7 @@ Right before `view-meetings` (around line 256), insert:
       <button id="media-lightbox-close" class="media-lightbox-btn">×</button>
     </div>
   </div>
+  </div><!-- /.app-body -->
 </section>
 ```
 
@@ -1108,9 +1109,12 @@ Right before `view-meetings` (around line 256), insert:
 
 Locate the `en` and `ar` translation tables and add to both:
 
+Existing keys in `i18n.js` use flat dot-notation (e.g. `tile.terminal.label`, `tile.terminal.sub`). Match that style for the tile keys and add the rest under `media.*` and `view.*`:
+
 ```js
 // English
-'home.media': 'media',
+'tile.media.label': 'media',
+'tile.media.sub': 'screenshots + video',
 'view.media': 'media',
 'media.snap': 'snap',
 'media.record': 'record',
@@ -1129,7 +1133,8 @@ Locate the `en` and `ar` translation tables and add to both:
 
 ```js
 // Arabic
-'home.media': 'الوسائط',
+'tile.media.label': 'الوسائط',
+'tile.media.sub': 'لقطات وفيديو',
 'view.media': 'الوسائط',
 'media.snap': 'لقطة',
 'media.record': 'تسجيل',
@@ -1458,11 +1463,12 @@ const Media = (() => {
       recordBtn().classList.add('recording');
       snapBtn().disabled = true;
       tickRecording(startedAt);
+      if (recordingTicker) clearInterval(recordingTicker);
       recordingTicker = setInterval(() => tickRecording(startedAt), 1000);
     } else {
       recordBtn().classList.remove('recording');
       snapBtn().disabled = false;
-      recordLabel().textContent = i18n.t('media.record');
+      recordLabel().textContent = t('media.record');
       if (recordingTicker) { clearInterval(recordingTicker); recordingTicker = null; }
     }
   }
@@ -1552,39 +1558,39 @@ const Media = (() => {
 })();
 ```
 
-- [ ] **Step 2: Wire the module into the existing view router and event dispatch**
+- [ ] **Step 2: Wire the module into `setView` and the WS event handler**
 
-Find where other views are initialized (e.g. `setView('media')` handlers, or where `view-terminal` / `view-system` are bound). Hook in:
-
-```js
-// In the view-switch handler when activating 'media':
-case 'media':
-  Media.bind();        // safe to call repeatedly; bind is idempotent if you wrap with a flag
-  Media.refresh();
-  break;
-```
-
-(If the existing code structure uses a different routing pattern, mirror it. Look at how `view-terminal` is activated — `Media.bind()` corresponds to terminal's `bind` step, and `Media.refresh` corresponds to the initial history fetch.)
-
-Idempotency guard for `bind` — add at the top of `Media.bind`:
+`setView` lives at `app.js:287` and is a plain function that lazy-loads per-view data. Add the media case alongside terminal/meetings:
 
 ```js
-if (Media._bound) return;
-Media._bound = true;
+function setView(name) {
+    document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
+    document.body.className = 'view-' + name;
+    if (name === 'terminal') refreshTerminalHistory();
+    if (name === 'meetings') refreshMeetings();
+    if (name === 'media') { Media.bind(); Media.refresh(); }
+}
 ```
 
-Wire the event handlers in the central WS event dispatcher (where `event.terminal.output` etc. are routed):
+`Media.bind` has its own `_bound` guard, so repeat calls are cheap.
+
+Wire the event handlers in the existing WS message dispatcher. Grep for `terminal.output` in `app.js` to find the central event switch and add alongside:
 
 ```js
-case 'capture.added':       Media.onCaptureAdded(payload); break;
-case 'capture.recording':   Media.onCaptureRecording(payload); break;
+} else if (msg.event === 'capture.added') {
+    Media.onCaptureAdded(msg.payload);
+} else if (msg.event === 'capture.recording') {
+    Media.onCaptureRecording(msg.payload);
+}
 ```
 
-And in the snapshot handler:
+And in the snapshot handler (grep for `state.snapshot`), add:
 
 ```js
-Media.onSnapshot(snapshot);
+Media.onSnapshot(snap);
 ```
+
+(`snap` is whatever variable the existing snapshot handler uses for the parsed payload — adapt naming.)
 
 - [ ] **Step 3: Build + install + click-through**
 
