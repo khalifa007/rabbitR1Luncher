@@ -222,9 +222,35 @@ object MediaCaptureManager {
             return Result.failure(LowStorageException(freeBytes))
         }
 
+        // screenrecord aborts with "INVALID_LAYER_STACK" when the display
+        // surface is OFF. Force a wake before starting. KEYCODE_WAKEUP alone
+        // is not enough on this build — display surface stays OFF; a touch
+        // event reliably flips mState to ON. Sleep 200ms for SurfaceFlinger
+        // to settle before screenrecord queries the display.
+        sendCarroot("input keyevent KEYCODE_WAKEUP; input touchscreen tap 240 240")
+        Thread.sleep(200)
+
         val tmpPath = "/data/local/tmp/r1cap-${System.nanoTime()}.mp4"
-        val cmd = "screenrecord --audio-source mic --bit-rate $VIDEO_BIT_RATE " +
-            "--time-limit $VIDEO_TIME_LIMIT_S $tmpPath"
+        val logPath = "/data/local/tmp/r1cap-${System.nanoTime()}.screenrecord.log"
+        // nohup (not setsid): toybox setsid forks before exec, so `echo $!`
+        // returns the PID of the dying setsid wrapper, not screenrecord —
+        // then our kill -2 in stopVideoRecording is a no-op and the mp4
+        // is cp'd while screenrecord is still writing it (no moov atom).
+        // nohup exec's into the child without forking, so $! is correct,
+        // AND it makes screenrecord ignore SIGHUP when our carroot shell
+        // exits. Both are required.
+        //
+        // No --audio-source flag: CarrotOS ships screenrecord v1.3 which
+        // predates the Android 12+ audio support. Video is silent. Audio
+        // could be added via a parallel AudioRecord + MediaMuxer pass on
+        // stop, but that's a follow-up.
+        //
+        // Note on static UIs: screenrecord encodes a new frame only when
+        // SurfaceFlinger reports a buffer update. Recording the R1's clock
+        // home screen produces a ~1-frame mp4 because nothing redraws.
+        // Verified by recording the Settings activity (253 frames / 8s).
+        val cmd = "nohup screenrecord --bit-rate $VIDEO_BIT_RATE " +
+            "--time-limit $VIDEO_TIME_LIMIT_S $tmpPath > $logPath 2>&1"
 
         val pid = sendCarrootBackground(cmd)
         if (pid <= 0) {
