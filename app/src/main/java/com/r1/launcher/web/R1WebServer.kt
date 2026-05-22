@@ -154,6 +154,7 @@ class R1WebServer(
             when {
                 // SPA assets — ungated, see class-doc auth section
                 uri == "/" || uri == "/index.html" -> serveAsset("web/index.html", "text/html")
+                uri.startsWith("/static/media/") -> serveMediaStatic(session, uri.removePrefix("/static/media/"))
                 uri.startsWith("/static/") -> serveAsset("web/" + uri.removePrefix("/static/"), guessMime(uri))
                 uri == "/app.js" -> serveAsset("web/app.js", "application/javascript")
                 uri == "/i18n.js" -> serveAsset("web/i18n.js", "application/javascript")
@@ -415,12 +416,46 @@ class R1WebServer(
         uri.endsWith(".js") -> "application/javascript"
         uri.endsWith(".css") -> "text/css"
         uri.endsWith(".png") -> "image/png"
+        uri.endsWith(".jpg") || uri.endsWith(".jpeg") -> "image/jpeg"
+        uri.endsWith(".mp4") -> "video/mp4"
         uri.endsWith(".svg") -> "image/svg+xml"
         uri.endsWith(".json") -> "application/json"
         uri.endsWith(".ttf") -> "font/ttf"
         uri.endsWith(".woff") -> "font/woff"
         uri.endsWith(".woff2") -> "font/woff2"
         else -> "application/octet-stream"
+    }
+
+    private fun serveMediaStatic(session: IHTTPSession, rest: String): Response {
+        if (rest == "_play_placeholder") {
+            val svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+<rect width="120" height="120" fill="#222"/>
+<polygon points="45,30 90,60 45,90" fill="#FF6A00"/>
+</svg>""".trimIndent()
+            return newFixedLengthResponse(Response.Status.OK, "image/svg+xml", svg)
+        }
+
+        val captures = java.io.File(ctx.filesDir, "captures")
+        val file: java.io.File = if (rest.startsWith(".thumbs/")) {
+            java.io.File(captures, "videos/$rest")
+        } else {
+            val img = java.io.File(captures, "images/$rest")
+            val vid = java.io.File(captures, "videos/$rest")
+            when {
+                img.exists() -> img
+                vid.exists() -> vid
+                else -> img
+            }
+        }
+        if (!file.exists() || !file.isFile) return notFound()
+
+        val mime = guessMime(file.name)
+        val download = session.parameters["download"]?.firstOrNull() == "1"
+        val resp = newChunkedResponse(Response.Status.OK, mime, file.inputStream())
+        if (download) {
+            resp.addHeader("Content-Disposition", "attachment; filename=\"${file.name}\"")
+        }
+        return resp
     }
 
     // --- WebSocket routing ---
