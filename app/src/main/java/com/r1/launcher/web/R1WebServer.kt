@@ -584,6 +584,14 @@ class R1WebServer(
     /** New notification landed — push to every web client so the companion
      *  panel can mirror the on-device badge / list. Cheap no-op when no one
      *  is connected. */
+    fun broadcastCaptureAdded(item: com.r1.launcher.media.CaptureItem) {
+        // Real impl in Task 7
+    }
+
+    fun broadcastCaptureRecording(recording: Boolean, startedAt: Long) {
+        // Real impl in Task 7
+    }
+
     fun broadcastNotification(n: com.r1.launcher.notifications.Notification) {
         if (sockets.isEmpty()) return
         val payload = buildJsonObject {

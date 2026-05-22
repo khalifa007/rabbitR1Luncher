@@ -637,6 +637,13 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
         loadApps()
 
+        // Media capture (web companion): ensure dirs exist, clean stale tmps,
+        // recover any orphan screenrecord from a prior crash. Off-thread so a
+        // dead carroot socket doesn't slow onCreate.
+        Thread {
+            runCatching { com.r1.launcher.media.MediaCaptureManager.init(this) }
+        }.start()
+
         // Default the remote panel and Bluetooth to off on every cold start —
         // user opts in via the Network panel.
         toggleBluetooth(false)
@@ -2227,6 +2234,76 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 tryBtProfileActionWithRetry(dev, connect = true)
             }
         }
+    }
+
+    // ===== Media capture (web companion only) =====
+
+    private var recordingWatchdog: Runnable? = null
+
+    override fun mediaCaptureScreenshot(): Result<com.r1.launcher.media.CaptureItem> {
+        val r = com.r1.launcher.media.MediaCaptureManager.captureScreenshot()
+        r.onSuccess { item -> webServer?.broadcastCaptureAdded(item) }
+        return r
+    }
+
+    override fun mediaStartVideo(): Result<Long> {
+        val r = com.r1.launcher.media.MediaCaptureManager.startVideoRecording()
+        r.onSuccess { startedAt ->
+            ui.post {
+                state.mediaRecording = true
+                state.mediaRecordingStartedAt = startedAt
+            }
+            webServer?.broadcastCaptureRecording(true, startedAt)
+            armRecordingWatchdog()
+        }
+        return r
+    }
+
+    override fun mediaStopVideo(): Result<com.r1.launcher.media.CaptureItem> {
+        val r = com.r1.launcher.media.MediaCaptureManager.stopVideoRecording()
+        ui.post {
+            state.mediaRecording = false
+            state.mediaRecordingStartedAt = 0L
+        }
+        webServer?.broadcastCaptureRecording(false, 0L)
+        cancelRecordingWatchdog()
+        r.onSuccess { item -> webServer?.broadcastCaptureAdded(item) }
+        return r
+    }
+
+    override fun mediaList(limit: Int) =
+        com.r1.launcher.media.MediaCaptureManager.list(limit)
+
+    override fun mediaTotalBytes() =
+        com.r1.launcher.media.MediaCaptureManager.totalBytes()
+
+    override fun mediaCount() =
+        com.r1.launcher.media.MediaCaptureManager.count()
+
+    override fun mediaIsRecording() =
+        com.r1.launcher.media.MediaCaptureManager.isRecording()
+
+    override fun mediaDelete(name: String) =
+        com.r1.launcher.media.MediaCaptureManager.delete(name)
+
+    override fun mediaClear() =
+        com.r1.launcher.media.MediaCaptureManager.clear()
+
+    private fun armRecordingWatchdog() {
+        cancelRecordingWatchdog()
+        val r = Runnable {
+            if (state.mediaRecording) {
+                android.util.Log.w("LauncherActivity", "recording watchdog fired — forcing stop")
+                mediaStopVideo()
+            }
+        }
+        recordingWatchdog = r
+        ui.postDelayed(r, (com.r1.launcher.media.MediaCaptureManager.VIDEO_TIME_LIMIT_S + 5) * 1000L)
+    }
+
+    private fun cancelRecordingWatchdog() {
+        recordingWatchdog?.let { ui.removeCallbacks(it) }
+        recordingWatchdog = null
     }
 
     /** Drive A2DP/HSP transition. The proper sequence on Android 14:

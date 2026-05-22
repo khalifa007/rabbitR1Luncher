@@ -208,6 +208,17 @@ interface LauncherHost {
     fun startBtScan()
     fun stopBtScan()
     fun pairBtDevice(address: String)
+
+    // --- media capture (web companion only) ---
+    fun mediaCaptureScreenshot(): Result<com.r1.launcher.media.CaptureItem>
+    fun mediaStartVideo(): Result<Long>
+    fun mediaStopVideo(): Result<com.r1.launcher.media.CaptureItem>
+    fun mediaList(limit: Int): List<com.r1.launcher.media.CaptureItem>
+    fun mediaTotalBytes(): Long
+    fun mediaCount(): Int
+    fun mediaIsRecording(): Boolean
+    fun mediaDelete(name: String): Boolean
+    fun mediaClear(): Int
 }
 
 fun LauncherState.wheelUp(host: LauncherHost) {

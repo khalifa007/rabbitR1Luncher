@@ -3,6 +3,7 @@ package com.r1.launcher
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -268,6 +269,14 @@ class LauncherState {
      *  Off by default — the launcher's root shell over LAN is a real risk and
      *  the user must explicitly opt in via Settings → Network → "remote terminal". */
     var webTerminalEnabled by mutableStateOf(false)
+
+    // --- media capture (web companion only) ---
+    /** True while a screenrecord is active. Drives the recording-state UI in
+     *  the companion (pulsing dot + duration counter). */
+    var mediaRecording by mutableStateOf(false)
+    /** Epoch ms when the current recording started; 0 when idle. Companion ticks
+     *  the elapsed counter against this. */
+    var mediaRecordingStartedAt by mutableLongStateOf(0L)
 
     // --- terminal panel ---
     /** Current input buffer; submitted on wheel-press, edited via RetroKeyboard. */
