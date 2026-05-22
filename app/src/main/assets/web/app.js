@@ -1070,14 +1070,88 @@ const Media = (() => {
     return { bind, refresh, onCaptureAdded, onCaptureRecording, onSnapshot };
 })();
 
-// Lightbox stub — real impl in Task 11. Defined here so Media.renderGrid's
-// tile click handler resolves at parse time even before Task 11 lands.
+// ============== media lightbox ==============
+
 const Lightbox = (() => {
-    return {
-        open: () => {},
-        close: () => {},
-        bind: () => {},
-    };
+    const root = () => document.getElementById('media-lightbox');
+    const stage = () => document.getElementById('media-lightbox-stage');
+    const dlAnchor = () => document.getElementById('media-lightbox-download');
+    const delBtn = () => document.getElementById('media-lightbox-delete');
+    const closeBtn = () => document.getElementById('media-lightbox-close');
+
+    let currentItem = null;
+    let deleteConfirm = false;
+    let deleteConfirmTimer = null;
+    let bound = false;
+
+    function open(item) {
+        currentItem = item;
+        stage().innerHTML = '';
+        if (item.kind === 'video') {
+            const v = document.createElement('video');
+            v.src = item.url;
+            v.controls = true;
+            v.autoplay = true;
+            v.playsInline = true;
+            stage().appendChild(v);
+        } else {
+            const img = document.createElement('img');
+            img.src = item.url;
+            img.alt = item.name;
+            stage().appendChild(img);
+        }
+        dlAnchor().href = item.url + '?download=1';
+        dlAnchor().setAttribute('download', item.name);
+        delBtn().textContent = t('media.delete');
+        delBtn().classList.remove('confirm');
+        deleteConfirm = false;
+        root().hidden = false;
+    }
+
+    function close() {
+        root().hidden = true;
+        const vid = stage().querySelector('video');
+        if (vid) { vid.pause(); vid.removeAttribute('src'); vid.load(); }
+        stage().innerHTML = '';
+        currentItem = null;
+        if (deleteConfirmTimer) { clearTimeout(deleteConfirmTimer); deleteConfirmTimer = null; }
+    }
+
+    function bind() {
+        if (bound) return;
+        bound = true;
+
+        closeBtn().addEventListener('click', close);
+        root().addEventListener('click', (e) => {
+            if (e.target === root()) close();
+        });
+        document.addEventListener('keydown', (e) => {
+            if (!root().hidden && e.key === 'Escape') {
+                e.stopPropagation();
+                close();
+            }
+        });
+        delBtn().addEventListener('click', () => {
+            if (!currentItem) return;
+            if (deleteConfirm) {
+                rpc('capture.delete', { name: currentItem.name })
+                    .then(() => { close(); Media.refresh(); })
+                    .catch(showErr);
+            } else {
+                deleteConfirm = true;
+                delBtn().classList.add('confirm');
+                delBtn().textContent = t('media.confirmDelete');
+                if (deleteConfirmTimer) clearTimeout(deleteConfirmTimer);
+                deleteConfirmTimer = setTimeout(() => {
+                    deleteConfirm = false;
+                    delBtn().classList.remove('confirm');
+                    delBtn().textContent = t('media.delete');
+                }, 2000);
+            }
+        });
+    }
+
+    return { open, close, bind };
 })();
 
 setView('home');
