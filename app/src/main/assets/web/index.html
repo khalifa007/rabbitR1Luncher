@@ -98,6 +98,11 @@
                 <span class="tile-label">meetings</span>
                 <span class="tile-sub">recordings + transcripts</span>
             </button>
+            <button class="app-tile" data-app="media" style="--i:5">
+                <span class="tile-glyph">📷</span>
+                <span class="tile-label" data-i18n="tile.media.label">media</span>
+                <span class="tile-sub" data-i18n="tile.media.sub">screenshots + video</span>
+            </button>
         </nav>
     </section>
 
@@ -250,6 +255,33 @@
                 <h3 class="card-title" data-i18n="system.openclaw">openclaw</h3>
                 <div class="card-row"><span data-i18n="system.status">status</span><span id="oc-status">—</span></div>
                 <div class="card-row"><span data-i18n="system.voiceKey">voice key</span><span id="oc-key">—</span></div>
+            </div>
+        </div>
+    </section>
+    <section id="view-media" class="view view-app" data-title-key="view.media" data-title="media">
+        <div class="app-mount"></div>
+        <div class="app-body">
+            <div class="media-actions">
+                <button id="media-snap" class="media-btn media-btn-snap" data-i18n="media.snap">snap</button>
+                <button id="media-record" class="media-btn media-btn-record">
+                    <span class="rec-dot"></span>
+                    <span class="rec-label" data-i18n="media.record">record</span>
+                </button>
+            </div>
+            <div class="media-stats">
+                <span id="media-stats-text"></span>
+                <button id="media-clear-all" class="media-clear" data-i18n="media.clearAll">clear all</button>
+            </div>
+            <div id="media-grid" class="media-grid"></div>
+            <div id="media-empty" class="media-empty" data-i18n="media.empty">no captures yet. tap snap or record.</div>
+
+            <div id="media-lightbox" class="media-lightbox" hidden>
+                <div class="media-lightbox-stage" id="media-lightbox-stage"></div>
+                <div class="media-lightbox-bar">
+                    <a id="media-lightbox-download" class="media-lightbox-btn" download data-i18n="media.download">download</a>
+                    <button id="media-lightbox-delete" class="media-lightbox-btn" data-i18n="media.delete">delete</button>
+                    <button id="media-lightbox-close" class="media-lightbox-btn">×</button>
+                </div>
             </div>
         </div>
     </section>
