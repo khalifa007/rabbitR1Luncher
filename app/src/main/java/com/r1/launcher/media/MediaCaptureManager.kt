@@ -2,7 +2,10 @@ package com.r1.launcher.media
 
 import android.content.Context
 import android.util.Log
+import java.io.BufferedReader
 import java.io.File
+import java.io.InputStreamReader
+import java.net.Socket
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -137,8 +140,41 @@ object MediaCaptureManager {
         return "%s-%s-%03d.%s".format(prefix, stamp, seq, ext)
     }
 
-    fun captureScreenshot(): Result<CaptureItem> =
-        Result.failure(NotImplementedError("Task 2"))
+    fun captureScreenshot(): Result<CaptureItem> {
+        if (!initialized) return Result.failure(IllegalStateException("not_initialized"))
+
+        val fname = nextFilename("image", "png")
+        val tmpPath = "/data/local/tmp/r1cap-${System.nanoTime()}.png"
+        val destFile = File(imagesDir, fname)
+
+        var copied = runCapture(tmpPath, destFile)
+        if (!copied) {
+            Thread.sleep(200)
+            copied = runCapture(tmpPath, destFile)
+        }
+
+        sendCarroot("rm -f $tmpPath")
+
+        if (!copied || destFile.length() < 1024) {
+            destFile.delete()
+            return Result.failure(RuntimeException("capture_failed"))
+        }
+
+        enforceRetention()
+        return Result.success(toItem(destFile))
+    }
+
+    private fun runCapture(tmpPath: String, destFile: File): Boolean {
+        sendCarroot("screencap -p $tmpPath")
+        val cpOut = sendCarroot(
+            "cp $tmpPath ${destFile.absolutePath} && chmod 644 ${destFile.absolutePath} && echo OK"
+        )
+        return cpOut.contains("OK") && destFile.exists() && destFile.length() > 1024
+    }
+
+    private fun enforceRetention() {
+        // Task 4
+    }
 
     fun startVideoRecording(): Result<Long> =
         Result.failure(NotImplementedError("Task 3"))
@@ -150,8 +186,23 @@ object MediaCaptureManager {
         // Task 3
     }
 
-    internal fun sendCarroot(cmd: String): String {
-        // Task 2 wires this up. For init's `rm`, runCatching swallows the empty return.
-        return ""
+    internal fun sendCarroot(cmd: String, timeoutMs: Int = 5000): String {
+        return try {
+            Socket("127.0.0.1", 1337).use { sock ->
+                sock.soTimeout = timeoutMs
+                sock.getOutputStream().write((cmd + "\nexit\n").toByteArray())
+                sock.getOutputStream().flush()
+                sock.shutdownOutput()
+                BufferedReader(InputStreamReader(sock.getInputStream())).readText()
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "sendCarroot failed: ${t.message}")
+            ""
+        }
+    }
+
+    internal fun sendCarrootBackground(cmd: String): Int {
+        val out = sendCarroot("$cmd & echo \$!")
+        return out.lines().mapNotNull { it.trim().toIntOrNull() }.firstOrNull() ?: -1
     }
 }
