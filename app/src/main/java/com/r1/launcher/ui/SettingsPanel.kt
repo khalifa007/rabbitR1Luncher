@@ -356,7 +356,7 @@ fun SettingsAboutPanel(state: LauncherState, onRowClick: (Int) -> Unit) {
                 ) {
                     itemsIndexed(entries, key = { i, _ -> "ab$i" }) { _, e ->
                         when (e) {
-                            is AboutEntry.Header -> AboutSectionHeader(e.label)
+                            is AboutEntry.Header -> SectionHeader(e.label, themeColor = AppThemes.Settings)
                             is AboutEntry.Row -> AboutRow(e.label, e.value, focused = false)
                         }
                     }
@@ -369,24 +369,6 @@ fun SettingsAboutPanel(state: LauncherState, onRowClick: (Int) -> Unit) {
 private sealed class AboutEntry {
     data class Header(val label: String) : AboutEntry()
     data class Row(val label: String, val value: String) : AboutEntry()
-}
-
-@Composable
-private fun AboutSectionHeader(label: String) {
-    val type = LocalR1Type.current
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 14.dp, bottom = 2.dp, start = 12.dp, end = 12.dp),
-    ) {
-        Text(
-            text = label.uppercase(),
-            color = AppThemes.Settings,
-            fontSize = 12.sp,
-            fontFamily = type.appCard.fontFamily,
-            fontWeight = FontWeight.Bold,
-        )
-    }
 }
 
 /** Hidden `android.os.SystemProperties.get(String)` via reflection. Platform-signed
@@ -478,6 +460,11 @@ internal fun SettingsRow(
     subtitleColor: Color = Color(0xFFFF4500),
     leadingIcon: Int? = null,
     labelColor: Color = Color.White,
+    // Right-aligned slot rendered after the toggle (if any). Used for things
+    // like the Hermes active-connection chip. Toggles and trailing are not
+    // intended to be combined on the same row, but if both are passed the
+    // toggle renders first, then trailing.
+    trailing: (@Composable () -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val bgColor = if (focused) HIGHLIGHT_BG else Color.Transparent
@@ -530,6 +517,10 @@ internal fun SettingsRow(
                     checked = toggleChecked,
                     focused = focused,
                 )
+            }
+            if (trailing != null) {
+                Spacer(modifier = Modifier.width(8.dp))
+                trailing()
             }
         }
     }

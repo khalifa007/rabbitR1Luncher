@@ -7,21 +7,16 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
@@ -29,11 +24,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
 import com.r1.launcher.R
 import com.r1.launcher.hermes.HermesPrefs
+
+// One renderable row inside the Hermes config LazyColumn.
+//   Header   — non-focusable section divider (uppercase amber label)
+//   Focusable — carries a wheel-nav focus index that maps 1:1 to the
+//               idx passed back into LauncherActivity.hermesConfigRowActivate.
+//
+// Section headers don't take a focus index, so the flat focus space stays
+// identical to the pre-refactor layout — LauncherNav.kt and the host
+// dispatch don't need to change.
+private sealed class HermesRow {
+    data class Header(val label: String) : HermesRow()
+    data class Focusable(val focusIdx: Int, val render: @Composable () -> Unit) : HermesRow()
+}
 
 @Composable
 fun HermesConfigPanel(
@@ -45,32 +52,123 @@ fun HermesConfigPanel(
         enter = fadeIn(tween(ANIM_OPEN_MS)) + slideInVertically(tween(ANIM_OPEN_MS)) { it },
         exit = fadeOut(tween(ANIM_CLOSE_MS)) + slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
     ) {
-        val type = LocalR1Type.current
         val ok = Color(0xFF35D26F)
+        val err = Color(0xFFE53935)
         val dim = Color(0xFFAAAAAA)
         val accent = AppThemes.Hermes
 
         val connections = state.hermesConnections.toList()
         val canAdd = connections.size < HermesPrefs.MAX_CONNECTIONS
 
-        // Row layout:
-        //   0                                          back header
-        //   1..connections.size                        connection rows
-        //   connections.size + 1                       "add new" (hidden if !canAdd)
-        //   + 1 (or 0 when hidden)                     "scan from qr"
-        //   + 1                                        "speak replies" toggle
-        //   + 1                                        "hide text input" toggle
-        //   + 1                                        "test active connection"
+        // Flat focus index space — kept in lockstep with
+        //   LauncherActivity.hermesConfigRowActivate(idx)
+        // and wheelUp/wheelDown handling in LauncherNav.kt.
+        //   0           back
+        //   1..N        connections (N = connections.size)
+        //   N+1         + add new (only when canAdd)
+        //   N+1 or N+2  scan from qr
+        //   +1          speak replies
+        //   +1          hide text input
+        //   +1          test connection
         val addRowIdx = if (canAdd) connections.size + 1 else -1
-        val scanRowIdx = (if (canAdd) connections.size + 2 else connections.size + 1)
+        val scanRowIdx = if (canAdd) connections.size + 2 else connections.size + 1
         val speakRowIdx = scanRowIdx + 1
         val hideRowIdx = scanRowIdx + 2
         val testRowIdx = scanRowIdx + 3
-        val totalRows = testRowIdx + 1
+
+        val rows = buildList<HermesRow> {
+            // Page header doubles as focus index 0 (back pill lives inside it).
+            add(HermesRow.Focusable(0) {
+                AppPageHeader(
+                    titleIconRes = R.drawable.ic_hermes,
+                    title = "hermes",
+                    backFocused = state.hermesConfigFocus == 0,
+                    onBack = { onRowClick(0) },
+                    themeColor = accent,
+                )
+            })
+
+            add(HermesRow.Header("connections"))
+            connections.forEachIndexed { i, conn ->
+                val focusIdx = i + 1
+                add(HermesRow.Focusable(focusIdx) {
+                    val focused = state.hermesConfigFocus == focusIdx
+                    val isActive = state.hermesActiveId == conn.id
+                    SettingsRow(
+                        label = conn.hostLabel,
+                        focused = focused,
+                        subtitle = conn.subtitle,
+                        subtitleColor = dim,
+                        leadingIcon = R.drawable.ic_network,
+                        trailing = {
+                            ActiveChip(active = isActive, focused = focused, accent = accent)
+                        },
+                        onClick = { onRowClick(focusIdx) },
+                    )
+                })
+            }
+            if (canAdd) {
+                add(HermesRow.Focusable(addRowIdx) {
+                    SettingsRow(
+                        label = "+ add new connection",
+                        focused = state.hermesConfigFocus == addRowIdx,
+                        leadingIcon = R.drawable.ic_settings,
+                        onClick = { onRowClick(addRowIdx) },
+                    )
+                })
+            }
+            add(HermesRow.Focusable(scanRowIdx) {
+                SettingsRow(
+                    label = "scan config from qr",
+                    focused = state.hermesConfigFocus == scanRowIdx,
+                    leadingIcon = R.drawable.ic_dots_9,
+                    onClick = { onRowClick(scanRowIdx) },
+                )
+            })
+
+            add(HermesRow.Header("chat"))
+            add(HermesRow.Focusable(speakRowIdx) {
+                SettingsRow(
+                    label = "speak replies",
+                    focused = state.hermesConfigFocus == speakRowIdx,
+                    toggleChecked = state.voiceEnabled,
+                    leadingIcon = R.drawable.ic_voice,
+                    onClick = { onRowClick(speakRowIdx) },
+                )
+            })
+            add(HermesRow.Focusable(hideRowIdx) {
+                SettingsRow(
+                    label = "hide text input",
+                    focused = state.hermesConfigFocus == hideRowIdx,
+                    toggleChecked = state.hermesHideChat,
+                    leadingIcon = R.drawable.ic_messages,
+                    onClick = { onRowClick(hideRowIdx) },
+                )
+            })
+
+            add(HermesRow.Header("diagnostic"))
+            add(HermesRow.Focusable(testRowIdx) {
+                SettingsRow(
+                    label = "test connection",
+                    focused = state.hermesConfigFocus == testRowIdx,
+                    subtitle = statusLine(state.hermesStatus),
+                    subtitleColor = when {
+                        state.hermesStatus == "live" -> ok
+                        state.hermesStatus.startsWith("error") -> err
+                        else -> dim
+                    },
+                    leadingIcon = R.drawable.ic_about,
+                    onClick = { onRowClick(testRowIdx) },
+                )
+            })
+        }
 
         val listState = rememberLazyListState()
-        LaunchedEffect(state.hermesConfigFocus, totalRows) {
-            listState.animateScrollToItem(state.hermesConfigFocus.coerceIn(0, totalRows - 1))
+        LaunchedEffect(state.hermesConfigFocus, rows.size) {
+            val itemIdx = rows.indexOfFirst {
+                it is HermesRow.Focusable && it.focusIdx == state.hermesConfigFocus
+            }
+            if (itemIdx >= 0) listState.animateScrollToItem(itemIdx)
         }
 
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
@@ -80,71 +178,10 @@ fun HermesConfigPanel(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
-                itemsIndexed(List(totalRows) { it }) { idx, _ ->
-                    when (idx) {
-                        0 -> AppPageHeader(
-                            titleIconRes = R.drawable.ic_hermes,
-                            title = "hermes",
-                            backFocused = state.hermesConfigFocus == 0,
-                            onBack = { onRowClick(0) },
-                            themeColor = accent,
-                        )
-                        in 1..connections.size -> {
-                            val conn = connections[idx - 1]
-                            val isActive = state.hermesActiveId == conn.id
-                            ConnectionRow(
-                                label = conn.hostLabel,
-                                subtitle = conn.subtitle,
-                                isActive = isActive,
-                                focused = state.hermesConfigFocus == idx,
-                                accent = accent,
-                                onClick = { onRowClick(idx) },
-                            )
-                        }
-                        addRowIdx -> SettingsRow(
-                            label = "+ add new connection",
-                            focused = state.hermesConfigFocus == idx,
-                            subtitle = "",
-                            subtitleColor = dim,
-                            toggleChecked = null,
-                            onClick = { onRowClick(idx) },
-                        )
-                        scanRowIdx -> SettingsRow(
-                            label = "scan config from qr",
-                            focused = state.hermesConfigFocus == idx,
-                            subtitle = "",
-                            subtitleColor = dim,
-                            toggleChecked = null,
-                            onClick = { onRowClick(idx) },
-                        )
-                        speakRowIdx -> SettingsRow(
-                            label = "speak replies",
-                            focused = state.hermesConfigFocus == idx,
-                            subtitle = "",
-                            subtitleColor = dim,
-                            toggleChecked = state.voiceEnabled,
-                            onClick = { onRowClick(idx) },
-                        )
-                        hideRowIdx -> SettingsRow(
-                            label = "hide text input",
-                            focused = state.hermesConfigFocus == idx,
-                            subtitle = "",
-                            subtitleColor = dim,
-                            toggleChecked = state.hermesHideChat,
-                            onClick = { onRowClick(idx) },
-                        )
-                        testRowIdx -> SettingsRow(
-                            label = "test connection",
-                            focused = state.hermesConfigFocus == idx,
-                            subtitle = statusLine(state.hermesStatus),
-                            subtitleColor = when {
-                                state.hermesStatus == "live" -> ok
-                                state.hermesStatus.startsWith("error") -> Color(0xFFE53935)
-                                else -> dim
-                            },
-                            toggleChecked = null,
-                            onClick = { onRowClick(idx) },
-                        )
+                itemsIndexed(rows) { _, row ->
+                    when (row) {
+                        is HermesRow.Header -> SectionHeader(row.label, themeColor = accent)
+                        is HermesRow.Focusable -> row.render()
                     }
                 }
             }
@@ -152,54 +189,36 @@ fun HermesConfigPanel(
     }
 }
 
+/**
+ * "This is the active connection" chip. Visual grammar matches [MinimalSwitch]
+ * so connection rows + toggles read as one pixel-art-adjacent family:
+ *   - 14×14dp square frame, 2dp border
+ *   - Active = amber border + inner 6dp amber square (radio-button look)
+ *   - Inactive = dim border, empty interior
+ *   - Focused row flips the border to black and fills the frame so the chip
+ *     stays legible against the orange highlight.
+ */
 @Composable
-private fun ConnectionRow(
-    label: String,
-    subtitle: String,
-    isActive: Boolean,
-    focused: Boolean,
-    accent: Color,
-    onClick: () -> Unit,
-) {
-    val type = LocalR1Type.current
-    val dim = Color(0xFFAAAAAA)
-    val bgColor = if (focused) Color(0xFFFF4500) else Color.Transparent
-    val textColor = if (focused) Color.Black else Color.White
+private fun ActiveChip(active: Boolean, focused: Boolean, accent: Color) {
+    val border = when {
+        focused -> Color.Black
+        active -> accent
+        else -> Color(0xFF3A3A3A)
+    }
+    val fill = if (focused) Color.Black else Color.Transparent
     Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .background(bgColor)
-            .clickable { onClick() }
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .size(14.dp)
+            .clip(RoundedCornerShape(2.dp))
+            .background(fill)
+            .border(2.dp, border, RoundedCornerShape(2.dp)),
+        contentAlignment = Alignment.Center,
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = label,
-                color = textColor,
-                fontSize = 24.sp,
-                fontFamily = type.appCard.fontFamily,
-                modifier = Modifier.weight(1f),
-            )
-            if (isActive) {
-                Box(
-                    modifier = Modifier
-                        .size(10.dp)
-                        .clip(CircleShape)
-                        .background(accent),
-                )
-            }
-        }
-        if (subtitle.isNotBlank()) {
-            Text(
-                text = subtitle,
-                color = dim,
-                fontSize = 12.sp,
-                fontFamily = type.appCard.fontFamily,
-                modifier = Modifier.padding(top = 36.dp),
+        if (active) {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .background(accent, RoundedCornerShape(1.dp)),
             )
         }
     }

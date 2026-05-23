@@ -336,6 +336,33 @@ private fun HeaderTextButton(label: String, focused: Boolean, themeColor: Color,
 }
 
 /**
+ * Section divider inside a settings list. Uppercase 12sp themed label with the
+ * same indent/padding as the surrounding rows. Non-focusable; used to group
+ * adjacent [SettingsRow]s by purpose.
+ */
+@Composable
+fun SectionHeader(
+    label: String,
+    themeColor: Color = DEFAULT_THEME,
+    modifier: Modifier = Modifier,
+) {
+    val type = LocalR1Type.current
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(top = 14.dp, bottom = 2.dp, start = 12.dp, end = 12.dp),
+    ) {
+        Text(
+            text = label.uppercase(),
+            color = themeColor,
+            fontSize = 12.sp,
+            fontFamily = type.appCard.fontFamily,
+            fontWeight = FontWeight.Bold,
+        )
+    }
+}
+
+/**
  * Per-app theme colors — match the launch-tile palette in `AppsPanel.kt` so the
  * top-bar reads as the same brand as the card the user just tapped. Sub-panels
  * inherit their parent app's color.
