@@ -412,6 +412,9 @@ class LauncherState {
     /** Toggle mirrors for the settings page. */
     var translatorAutoDetect by mutableStateOf(true)
     var translatorAutoSpeak by mutableStateOf(true)
+    /** When true, the chat-style text input row is hidden (voice-first mode) —
+     *  input via the side-button PTT + a compact hold-to-talk pill. */
+    var translatorHideInput by mutableStateOf(false)
     /** Per-provider "has key" + masked-tail mirrors. Hydrated in
      *  hydrateTranslatorStateFromPrefs(). */
     var translatorGeminiHasKey by mutableStateOf(false)

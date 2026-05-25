@@ -154,6 +154,7 @@ interface LauncherHost {
     fun translatorReplay(messageId: String)
     fun translatorClearHistory()
     fun translatorSettingsRowActivate(idx: Int)
+    fun translatorToggleHideInput()
     fun translatorSaveKey(provider: String, value: String)
     fun translatorPasteKey(provider: String)
     fun translatorClearKey(provider: String)
@@ -758,8 +759,9 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.TRANSLATOR_SETTINGS -> {
             val prev = translatorSettingsFocus
-            // back, provider, gemini, openai, claude, source, target, auto-detect, auto-speak, clear
-            translatorSettingsFocus = (translatorSettingsFocus + 1).coerceAtMost(9)
+            // back, provider, gemini, openai, claude, source, target, auto-detect,
+            // auto-speak, hide-input, clear
+            translatorSettingsFocus = (translatorSettingsFocus + 1).coerceAtMost(10)
             if (prev != translatorSettingsFocus) host.navTone()
         }
         Panel.TRANSCRIBER_LIST -> {

@@ -82,6 +82,7 @@ fun TranslatorPanel(
     onCopySource: (String) -> Unit,
     onClear: () -> Unit,
     onOpenSettings: () -> Unit,
+    onToggleHideInput: () -> Unit,
     getClipboardText: () -> String,
     onMicStart: () -> Unit,
     onMicStop: () -> Unit,
@@ -179,68 +180,95 @@ fun TranslatorPanel(
                     }
                 }
 
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .border(2.dp, AppThemes.Translator, RoundedCornerShape(12.dp))
-                        .background(Color.Black)
-                        .combinedClickable(
-                            onClick = { showKeyboard = !showKeyboard },
-                            onLongClick = {
-                                pasteText = getClipboardText()
-                                showPaste = true
+                if (!state.translatorHideInput) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .border(2.dp, AppThemes.Translator, RoundedCornerShape(12.dp))
+                            .background(Color.Black)
+                            .combinedClickable(
+                                onClick = { showKeyboard = !showKeyboard },
+                                onLongClick = {
+                                    pasteText = getClipboardText()
+                                    showPaste = true
+                                },
+                            )
+                            .padding(start = 12.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = if (state.translatorInputText.isEmpty()) "type or hold side button…"
+                                else state.translatorInputText + if (showKeyboard) "_" else "",
+                            style = type.appCard,
+                            color = if (state.translatorInputText.isEmpty()) Color.Gray else Color.White,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        HoldToTalkPill(
+                            recording = state.translatorRecording,
+                            themeColor = AppThemes.Translator,
+                            onStart = onMicStart,
+                            onStop = onMicStop,
+                            size = 32.dp,
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        SendIconButton(
+                            tint = AppThemes.Translator,
+                            enabled = state.translatorInputText.isNotBlank(),
+                            onClick = {
+                                if (state.translatorInputText.isNotBlank()) {
+                                    onSend(state.translatorInputText)
+                                    state.translatorInputText = ""
+                                    showKeyboard = false
+                                }
                             },
                         )
-                        .padding(start = 12.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = if (state.translatorInputText.isEmpty()) "type or hold side button…"
-                            else state.translatorInputText + if (showKeyboard) "_" else "",
-                        style = type.appCard,
-                        color = if (state.translatorInputText.isEmpty()) Color.Gray else Color.White,
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    HoldToTalkPill(
-                        recording = state.translatorRecording,
-                        themeColor = AppThemes.Translator,
-                        onStart = onMicStart,
-                        onStop = onMicStop,
-                        size = 32.dp,
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    SendIconButton(
-                        tint = AppThemes.Translator,
-                        enabled = state.translatorInputText.isNotBlank(),
-                        onClick = {
-                            if (state.translatorInputText.isNotBlank()) {
-                                onSend(state.translatorInputText)
-                                state.translatorInputText = ""
-                                showKeyboard = false
-                            }
-                        },
-                    )
-                }
+                    }
 
-                AnimatedVisibility(
-                    visible = showKeyboard,
-                    enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                    exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
-                ) {
-                    RetroKeyboard(
-                        onKeyPress = { ch -> state.translatorInputText += ch },
-                        onBackspace = {
-                            if (state.translatorInputText.isNotEmpty()) {
-                                state.translatorInputText = state.translatorInputText.dropLast(1)
-                            }
-                        },
-                        onDismiss = { showKeyboard = false },
-                    )
+                    AnimatedVisibility(
+                        visible = showKeyboard,
+                        enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                        exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+                    ) {
+                        RetroKeyboard(
+                            onKeyPress = { ch -> state.translatorInputText += ch },
+                            onBackspace = {
+                                if (state.translatorInputText.isNotEmpty()) {
+                                    state.translatorInputText = state.translatorInputText.dropLast(1)
+                                }
+                            },
+                            onDismiss = { showKeyboard = false },
+                        )
+                    }
+                } else {
+                    // Voice-first mode: the text row collapses to a single
+                    // hold-to-talk pill so the translation owns the screen.
+                    // The side-button PTT still works regardless.
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 12.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        HoldToTalkPill(
+                            recording = state.translatorRecording,
+                            themeColor = AppThemes.Translator,
+                            onStart = onMicStart,
+                            onStop = onMicStop,
+                            size = 46.dp,
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            text = if (state.translatorRecording) "listening…" else "hold to talk",
+                            style = type.appCard.copy(fontSize = 15.sp),
+                            color = AppThemes.Translator.copy(alpha = 0.85f),
+                        )
+                    }
                 }
             }
 
@@ -268,8 +296,10 @@ fun TranslatorPanel(
 
             TranslatorDropdownMenu(
                 expanded = menuOpen,
+                hideInput = state.translatorHideInput,
                 onDismiss = { menuOpen = false },
                 onSwap = { menuOpen = false; onSwapLangs() },
+                onToggleHideInput = { menuOpen = false; onToggleHideInput() },
                 onClear = { menuOpen = false; onClear() },
                 onSettings = { menuOpen = false; onOpenSettings() },
             )
@@ -555,8 +585,10 @@ private fun TranslatorEmptyHint(status: String) {
 @Composable
 private fun TranslatorDropdownMenu(
     expanded: Boolean,
+    hideInput: Boolean,
     onDismiss: () -> Unit,
     onSwap: () -> Unit,
+    onToggleHideInput: () -> Unit,
     onClear: () -> Unit,
     onSettings: () -> Unit,
 ) {
@@ -588,6 +620,10 @@ private fun TranslatorDropdownMenu(
                     .padding(vertical = 4.dp),
             ) {
                 TranslatorMenuItem(label = "swap langs", onClick = onSwap)
+                TranslatorMenuItem(
+                    label = if (hideInput) "show input" else "hide input",
+                    onClick = onToggleHideInput,
+                )
                 TranslatorMenuItem(label = "clear", onClick = onClear)
                 TranslatorMenuItem(label = "settings", onClick = onSettings)
             }

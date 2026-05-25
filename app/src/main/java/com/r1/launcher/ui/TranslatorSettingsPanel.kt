@@ -98,6 +98,7 @@ fun TranslatorSettingsPanel(
             add(TranslatorRow.TargetLang)
             add(TranslatorRow.AutoDetect)
             add(TranslatorRow.AutoSpeak)
+            add(TranslatorRow.HideInput)
             add(TranslatorRow.ClearHistory)
         }
 
@@ -191,14 +192,23 @@ fun TranslatorSettingsPanel(
                             leadingIcon = R.drawable.ic_sound,
                             onClick = { onRowClick(8) },
                         )
+                        TranslatorRow.HideInput -> SettingsRow(
+                            label = "hide text input",
+                            focused = state.translatorSettingsFocus == 9,
+                            toggleChecked = state.translatorHideInput,
+                            subtitle = "voice-only — talk with the side button",
+                            subtitleColor = dim,
+                            leadingIcon = R.drawable.ic_voice,
+                            onClick = { onRowClick(9) },
+                        )
                         TranslatorRow.ClearHistory -> SettingsRow(
                             label = "clear history",
-                            focused = state.translatorSettingsFocus == 9,
+                            focused = state.translatorSettingsFocus == 10,
                             subtitle = "delete all saved translations",
                             subtitleColor = dim,
                             leadingIcon = R.drawable.ic_factory_reset,
                             labelColor = warn,
-                            onClick = { onRowClick(9) },
+                            onClick = { onRowClick(10) },
                         )
                     }
                 }
@@ -343,6 +353,7 @@ private sealed class TranslatorRow {
     object TargetLang : TranslatorRow()
     object AutoDetect : TranslatorRow()
     object AutoSpeak : TranslatorRow()
+    object HideInput : TranslatorRow()
     object ClearHistory : TranslatorRow()
 }
 

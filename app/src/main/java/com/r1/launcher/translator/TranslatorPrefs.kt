@@ -102,6 +102,13 @@ class TranslatorPrefs private constructor(ctx: Context) {
         get() = plain.getBoolean(KEY_ONBOARDED, false)
         set(value) = plain.edit { putBoolean(KEY_ONBOARDED, value) }
 
+    /** Hide the text input row → voice-first mode. The translation gets the
+     *  whole screen and input happens via the side-button PTT (plus a compact
+     *  hold-to-talk pill). */
+    var hideInput: Boolean
+        get() = plain.getBoolean(KEY_HIDE_INPUT, false)
+        set(value) = plain.edit { putBoolean(KEY_HIDE_INPUT, value) }
+
     fun clear() {
         secure.edit {
             ProviderId.values().forEach { remove(it.keyName) }
@@ -113,6 +120,7 @@ class TranslatorPrefs private constructor(ctx: Context) {
             remove(KEY_AUTO_DETECT)
             remove(KEY_AUTO_SPEAK)
             remove(KEY_ONBOARDED)
+            remove(KEY_HIDE_INPUT)
         }
     }
 
@@ -128,6 +136,7 @@ class TranslatorPrefs private constructor(ctx: Context) {
         private const val KEY_AUTO_DETECT = "translator.auto_detect"
         private const val KEY_AUTO_SPEAK = "translator.auto_speak"
         private const val KEY_ONBOARDED = "translator.onboarded"
+        private const val KEY_HIDE_INPUT = "translator.hide_input"
 
         @Volatile private var instance: TranslatorPrefs? = null
         fun get(ctx: Context): TranslatorPrefs =

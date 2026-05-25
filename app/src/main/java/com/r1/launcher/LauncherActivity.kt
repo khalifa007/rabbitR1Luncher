@@ -3916,6 +3916,7 @@ override fun hermesPasteServerUrlFromClipboard() {
         state.translatorTarget = translatorPrefs.targetLang
         state.translatorAutoDetect = translatorPrefs.autoDetectSource
         state.translatorAutoSpeak = translatorPrefs.autoSpeak
+        state.translatorHideInput = translatorPrefs.hideInput
         state.translatorGeminiHasKey = translatorPrefs.hasKey(com.r1.launcher.translator.ProviderId.GEMINI)
         state.translatorGeminiKeyTail = translatorPrefs.keyTail(com.r1.launcher.translator.ProviderId.GEMINI)
         state.translatorOpenAIHasKey = translatorPrefs.hasKey(com.r1.launcher.translator.ProviderId.OPENAI)
@@ -4035,6 +4036,12 @@ override fun hermesPasteServerUrlFromClipboard() {
         state.translatorProvider = id
     }
 
+    override fun translatorToggleHideInput() {
+        val next = !translatorPrefs.hideInput
+        translatorPrefs.hideInput = next
+        state.translatorHideInput = next
+    }
+
     override fun translatorSetSource(code: String) {
         translatorPrefs.sourceLang = code
         state.translatorSource = code
@@ -4107,6 +4114,10 @@ override fun hermesPasteServerUrlFromClipboard() {
                 popTone()
             }
             9 -> {
+                translatorToggleHideInput()
+                popTone()
+            }
+            10 -> {
                 translatorClearHistory()
                 popTone()
             }

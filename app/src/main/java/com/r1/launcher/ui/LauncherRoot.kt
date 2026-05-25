@@ -577,6 +577,7 @@ fun LauncherRoot(
             onCopySource = { text -> host.copyToClipboard(text, "translator-source"); host.popTone() },
             onClear = { host.translatorClearHistory(); host.popTone() },
             onOpenSettings = { state.openTranslatorSettings(); host.selectTone() },
+            onToggleHideInput = { host.translatorToggleHideInput(); host.popTone() },
             getClipboardText = { host.getClipboardText() },
             onMicStart = { host.translatorRecordStart() },
             onMicStop = { host.translatorRecordStop() },
