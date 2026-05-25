@@ -52,6 +52,10 @@ fun LauncherRoot(
         // Tapping the unread badge / banner opens the notifications panel.
         HomeScreen(
             state = state,
+            onOpenApps = {
+                state.openApps()
+                host.selectTone()
+            },
             onOpenNotifications = {
                 state.openNotifications()
                 state.notificationBanner = null
@@ -548,6 +552,47 @@ fun LauncherRoot(
             onSaveKey = { value -> host.hermesConnectionEditSaveKey(value) },
             onPasteUrl = { host.hermesConnectionEditPasteUrl() },
             onPasteKey = { host.hermesConnectionEditPasteKey() },
+        )
+
+        TranslatorOnboardingPanel(
+            state = state,
+            onPickSource = { code -> host.translatorOnboardingPickSource(code) },
+            onPickTarget = { code -> host.translatorOnboardingPickTarget(code) },
+            onEnablePhoneKey = { host.translatorOnboardingEnablePhoneKey() },
+            onPasteKey = { host.translatorOnboardingPasteKey() },
+            onSkipKey = { host.translatorOnboardingSkipKey() },
+            onFinish = { host.translatorOnboardingFinish() },
+        )
+
+        TranslatorPanel(
+            state = state,
+            onBack = { state.back(); host.backTone() },
+            onSend = { text -> host.translatorSendText(text) },
+            onCycleSource = { delta -> host.translatorCycleSource(delta) },
+            onCycleTarget = { delta -> host.translatorCycleTarget(delta) },
+            onPickSource = { code -> host.translatorSetSource(code) },
+            onPickTarget = { code -> host.translatorSetTarget(code) },
+            onSwapLangs = { host.translatorSwapLangs(); host.popTone() },
+            onReplay = { id -> host.translatorReplay(id) },
+            onCopySource = { text -> host.copyToClipboard(text, "translator-source"); host.popTone() },
+            onClear = { host.translatorClearHistory(); host.popTone() },
+            onOpenSettings = { state.openTranslatorSettings(); host.selectTone() },
+            getClipboardText = { host.getClipboardText() },
+            onMicStart = { host.translatorRecordStart() },
+            onMicStop = { host.translatorRecordStop() },
+        )
+
+        TranslatorSettingsPanel(
+            state = state,
+            onRowClick = { idx ->
+                if (idx == 0) { state.back(); host.backTone() }
+                else host.translatorSettingsRowActivate(idx)
+            },
+            onSaveKey = { provider, value -> host.translatorSaveKey(provider, value) },
+            onPasteKey = { provider -> host.translatorPasteKey(provider) },
+            onClearKey = { provider -> host.translatorClearKey(provider) },
+            onPickSource = { code -> host.translatorSetSource(code) },
+            onPickTarget = { code -> host.translatorSetTarget(code) },
         )
 
         TranscriberListPanel(

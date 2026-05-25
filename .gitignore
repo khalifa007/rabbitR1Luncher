@@ -37,3 +37,9 @@ carroot.rc
 # code review loop artifacts — local-only
 REVIEW_PROGRESS.md
 REVIEW_FINDINGS.md
+
+# local dev artifacts — screenshots, logs, venvs, agent state
+/*.png
+*.log
+.venv/
+.claude/

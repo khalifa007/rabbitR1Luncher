@@ -4,10 +4,15 @@ import android.util.LruCache
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -16,6 +21,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalOverscrollConfiguration
@@ -49,13 +55,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -131,6 +144,44 @@ fun AppsPanel(
             }
         }
 
+        // Pull-down-from-top-of-list closes the apps panel (back to home).
+        // Implemented via NestedScrollConnection so it doesn't conflict with
+        // normal list scrolling: only the OVERSCROLL beyond the top edge
+        // accumulates as "pull" — when the list is mid-scroll, downward drags
+        // are consumed by the LazyColumn and never reach us. Pulling back UP
+        // decrements the pull budget so the user can cancel before release.
+        val density = LocalDensity.current
+        val triggerPx = remember(density) { with(density) { 80.dp.toPx() } }
+        val pulled = remember { mutableStateOf(0f) }
+        val nestedScroll = remember(triggerPx, onBack) {
+            object : NestedScrollConnection {
+                override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                    if (source == NestedScrollSource.Drag && available.y < 0f && pulled.value > 0f) {
+                        val consume = minOf(-available.y, pulled.value)
+                        pulled.value -= consume
+                        return Offset(0f, -consume)
+                    }
+                    return Offset.Zero
+                }
+                override fun onPostScroll(
+                    consumed: Offset,
+                    available: Offset,
+                    source: NestedScrollSource,
+                ): Offset {
+                    if (source == NestedScrollSource.Drag && available.y > 0f) {
+                        pulled.value += available.y
+                    }
+                    return Offset.Zero
+                }
+                override suspend fun onPreFling(available: Velocity): Velocity {
+                    if (pulled.value > triggerPx) onBack()
+                    pulled.value = 0f
+                    return Velocity.Zero
+                }
+            }
+        }
+
+        Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         CompositionLocalProvider(LocalOverscrollConfiguration provides null) {
         LazyColumn(
             state = listState,
@@ -140,7 +191,7 @@ fun AppsPanel(
             verticalArrangement = Arrangement.spacedBy((-20).dp),
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black),
+                .nestedScroll(nestedScroll),
         ) {
             itemsIndexed(
                 items = state.apps,
@@ -172,6 +223,50 @@ fun AppsPanel(
             }
         }
         }
+        // Top-center chevron hint: signals the pull-down-to-home gesture.
+        // Drawn on top of the list (zIndex unset = above the LazyColumn).
+        SwipeDownHint(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 6.dp),
+        )
+        }
+    }
+}
+
+/** Top-center `﹀` chevron — mirror of HomeScreen's SwipeUpHint. Signals the
+ *  pull-down gesture that returns to home. */
+@Composable
+private fun SwipeDownHint(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "swipeHintDown")
+    val alpha by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.85f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1400, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "swipeHintDownAlpha",
+    )
+    Canvas(modifier = modifier.size(width = 22.dp, height = 6.dp)) {
+        val w = size.width
+        val h = size.height
+        val color = Color(0xFFFF6B00).copy(alpha = alpha)
+        // Two strokes meeting at bottom-center → `﹀`
+        drawLine(
+            color = color,
+            start = Offset(0f, 0f),
+            end = Offset(w / 2f, h),
+            strokeWidth = 2.dp.toPx(),
+            cap = StrokeCap.Round,
+        )
+        drawLine(
+            color = color,
+            start = Offset(w / 2f, h),
+            end = Offset(w, 0f),
+            strokeWidth = 2.dp.toPx(),
+            cap = StrokeCap.Round,
+        )
     }
 }
 
@@ -193,6 +288,7 @@ private fun AppCard(
         AppEntry.Terminal -> "_r1_terminal"
         AppEntry.Hermes -> "_r1_hermes"
         AppEntry.Meetings -> "_r1_meetings"
+        AppEntry.Translator -> "_r1_translator"
     }
     // Only the matching synthetic resource is resolved — previous code called
     // painterResource() + stringResource() six times per card (one per
@@ -205,6 +301,7 @@ private fun AppCard(
         AppEntry.Terminal -> painterResource(R.drawable.ic_terminal)
         AppEntry.Hermes -> painterResource(R.drawable.ic_hermes)
         AppEntry.Meetings -> painterResource(R.drawable.ic_meetings)
+        AppEntry.Translator -> painterResource(R.drawable.ic_language)
     }
 
     var iconPainter by remember(pkg) {
@@ -219,6 +316,7 @@ private fun AppCard(
         AppEntry.Terminal -> stringResource(R.string.app_label_terminal)
         AppEntry.Hermes -> stringResource(R.string.app_label_hermes)
         AppEntry.Meetings -> stringResource(R.string.app_label_meetings)
+        AppEntry.Translator -> stringResource(R.string.app_label_translator)
     }
     var label by remember(pkg, syntheticLabel) {
         mutableStateOf(
@@ -352,6 +450,7 @@ private fun cardBackground(entry: AppEntry, idx: Int): Color = when (entry) {
     AppEntry.Terminal -> AppThemes.Terminal
     AppEntry.Hermes -> AppThemes.Hermes
     AppEntry.Meetings -> AppThemes.Meetings
+    AppEntry.Translator -> AppThemes.Translator
 }
 
 private fun appKey(entry: AppEntry): String = when (entry) {
@@ -362,6 +461,7 @@ private fun appKey(entry: AppEntry): String = when (entry) {
     AppEntry.Terminal -> "terminal/terminal"
     AppEntry.Hermes -> "hermes/hermes"
     AppEntry.Meetings -> "meetings/meetings"
+    AppEntry.Translator -> "translator/translator"
 }
 
 private fun appContentType(entry: AppEntry): String = when (entry) {
@@ -372,6 +472,7 @@ private fun appContentType(entry: AppEntry): String = when (entry) {
     AppEntry.Terminal -> "terminal"
     AppEntry.Hermes -> "hermes"
     AppEntry.Meetings -> "meetings"
+    AppEntry.Translator -> "translator"
 }
 
 class FolderShape : androidx.compose.ui.graphics.Shape {

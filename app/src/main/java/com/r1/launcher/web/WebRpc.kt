@@ -109,6 +109,19 @@ object WebRpc {
         "credentials.set_ntfy_topic" -> {
             host.ntfySetTopic(params.requireString("topic").trim()); JsonNull
         }
+        "credentials.set_translator_key" -> {
+            // provider ∈ {gemini, openai, claude}. Empty key = no-op (use clear).
+            val provider = params.requireString("provider").trim()
+            val key = params.requireString("key").trim()
+            if (key.isNotEmpty()) host.translatorSaveKey(provider, key)
+            JsonNull
+        }
+        "credentials.clear_translator_key" -> {
+            host.translatorClearKey(params.requireString("provider").trim()); JsonNull
+        }
+        "credentials.set_translator_provider" -> {
+            host.translatorSetProvider(params.requireString("provider").trim()); JsonNull
+        }
         "credentials.hermes_add" -> {
             val url = params.requireString("url").trim()
             val bearer = params.requireString("bearer").trim()
@@ -453,6 +466,27 @@ object WebRpc {
             put("ntfy", buildJsonObject {
                 put("topic", ntfyPrefs.topic)
             })
+            put("translator", buildTranslatorCredentials(ctx))
+        }
+    }
+
+    /** Translator key status block. The three LLM keys are tailed (never
+     *  returned in full); the active provider + language pair come back plain
+     *  so the web panel can show what's selected. */
+    private fun buildTranslatorCredentials(ctx: Context): JsonObject {
+        val tp = com.r1.launcher.translator.TranslatorPrefs.get(ctx)
+        fun keyBlock(id: com.r1.launcher.translator.ProviderId) = buildJsonObject {
+            val k = tp.keyFor(id).orEmpty()
+            put("hasKey", k.isNotBlank())
+            put("keyTail", secretTail(k))
+        }
+        return buildJsonObject {
+            put("provider", tp.provider.label) // "gemini" | "openai" | "claude"
+            put("source", tp.sourceLang)
+            put("target", tp.targetLang)
+            put("gemini", keyBlock(com.r1.launcher.translator.ProviderId.GEMINI))
+            put("openai", keyBlock(com.r1.launcher.translator.ProviderId.OPENAI))
+            put("claude", keyBlock(com.r1.launcher.translator.ProviderId.ANTHROPIC))
         }
     }
 

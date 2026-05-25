@@ -10,4 +10,5 @@ sealed class AppEntry {
     object Terminal : AppEntry()
     object Hermes : AppEntry()
     object Meetings : AppEntry()
+    object Translator : AppEntry()
 }

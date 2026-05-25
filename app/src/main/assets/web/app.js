@@ -594,6 +594,16 @@ const credNtfyTopic     = document.getElementById('cred-ntfy-topic');
 const credNtfySave      = document.getElementById('cred-ntfy-save');
 const credNtfyStatus    = document.getElementById('cred-ntfy-status');
 
+const credTrProvider    = document.getElementById('cred-tr-provider');
+const credTrGemini      = document.getElementById('cred-tr-gemini');
+const credTrGeminiTail  = document.getElementById('cred-tr-gemini-tail');
+const credTrOpenai      = document.getElementById('cred-tr-openai');
+const credTrOpenaiTail  = document.getElementById('cred-tr-openai-tail');
+const credTrClaude      = document.getElementById('cred-tr-claude');
+const credTrClaudeTail  = document.getElementById('cred-tr-claude-tail');
+const credTrSave        = document.getElementById('cred-tr-save');
+const credTrStatus      = document.getElementById('cred-tr-status');
+
 // Track which Hermes row (if any) is in edit mode so the user's in-flight
 // edits aren't blown away when a 1 Hz snapshot triggers re-render.
 let credHermesEditingId = null;
@@ -634,6 +644,31 @@ function applyCredentialsSnapshot(cred) {
     const ntfy = cred.ntfy || {};
     if (!credFieldFocused(credNtfyTopic)) {
         credNtfyTopic.value = ntfy.topic || '';
+    }
+
+    // --- Translator ---
+    const tr = cred.translator || {};
+    if (!credFieldFocused(credTrProvider) && tr.provider) {
+        const opts = Array.from(credTrProvider.options).map((o) => o.value);
+        if (opts.includes(tr.provider)) credTrProvider.value = tr.provider;
+    }
+    applyTrKeyField(credTrGemini, credTrGeminiTail, tr.gemini, 'AIza…');
+    applyTrKeyField(credTrOpenai, credTrOpenaiTail, tr.openai, 'sk-…');
+    applyTrKeyField(credTrClaude, credTrClaudeTail, tr.claude, 'sk-ant-…');
+}
+
+// Render one translator key field: blank the input (we never echo secrets),
+// move the saved tail into the placeholder, and show set/unset beside it.
+function applyTrKeyField(input, tailEl, block, emptyPh) {
+    const b = block || {};
+    if (!credFieldFocused(input)) {
+        input.value = '';
+        input.placeholder = b.hasKey ? (b.keyTail || emptyPh) : emptyPh;
+    }
+    if (tailEl) {
+        tailEl.textContent = b.hasKey
+            ? t('cred.status.tail', b.keyTail || '')
+            : t('cred.status.unset');
     }
 }
 
@@ -866,6 +901,35 @@ credNtfySave.addEventListener('click', async () => {
         credNtfyStatus.textContent = t('cred.status.failed', e.message);
     } finally {
         credNtfySave.disabled = false;
+    }
+});
+
+credTrSave.addEventListener('click', async () => {
+    // Only non-empty key fields are sent — leaving a field blank keeps the
+    // existing key (the placeholder shows its tail). To remove a key, clear
+    // it on-device (Translate → settings → clear), or we could add a clear
+    // button per field later.
+    const provider = credTrProvider.value;
+    const keys = [
+        ['gemini', credTrGemini.value.trim()],
+        ['openai', credTrOpenai.value.trim()],
+        ['claude', credTrClaude.value.trim()],
+    ];
+    credTrSave.disabled = true;
+    try {
+        await rpc('credentials.set_translator_provider', { provider });
+        for (const [p, key] of keys) {
+            if (key) await rpc('credentials.set_translator_key', { provider: p, key });
+        }
+        credTrGemini.value = '';
+        credTrOpenai.value = '';
+        credTrClaude.value = '';
+        flash(t('cred.status.saved'));
+        credTrStatus.textContent = t('cred.status.saved');
+    } catch (e) {
+        credTrStatus.textContent = t('cred.status.failed', e.message);
+    } finally {
+        credTrSave.disabled = false;
     }
 });
 

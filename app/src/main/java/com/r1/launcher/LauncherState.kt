@@ -19,8 +19,10 @@ import com.r1.launcher.openclaw.ChatMessage
 import com.r1.launcher.openclaw.SessionEntry
 import com.r1.launcher.transcriber.MeetingIndexEntry
 import com.r1.launcher.transcriber.TranscriberDetailAction
+import com.r1.launcher.translator.ProviderId
+import com.r1.launcher.translator.TranslationMessage
 
-enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, SETTINGS_CREDENTIALS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, REMOTE_PANEL, PANEL_PASSCODE, NTFY_CONFIG, BT_SCAN, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_VOICE, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, HERMES_CHAT, HERMES_VOICE, HERMES_CONFIG, HERMES_QR, HERMES_CONNECTION_EDIT, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS, NOTIFICATIONS }
+enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, SETTINGS_CREDENTIALS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, REMOTE_PANEL, PANEL_PASSCODE, NTFY_CONFIG, BT_SCAN, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_VOICE, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, HERMES_CHAT, HERMES_VOICE, HERMES_CONFIG, HERMES_QR, HERMES_CONNECTION_EDIT, TRANSLATOR_ONBOARDING, TRANSLATOR, TRANSLATOR_SETTINGS, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS, NOTIFICATIONS }
 
 enum class WifiShareEditTarget { SSID, PASSWORD }
 
@@ -395,6 +397,58 @@ class LauncherState {
      *  was first armed. Second activate within 3000 ms confirms. */
     var hermesConnectionEditDeleteArmedAt by mutableStateOf(0L)
 
+    // --- translator (Panel.TRANSLATOR / TRANSLATOR_SETTINGS) ---
+    /** Conversation log. Each entry is one source→target pair. Persisted to
+     *  filesDir/translator-history.json (capped at 100 in TranslationHistoryStore)
+     *  so it survives launcher restarts; useful for re-showing earlier
+     *  translations to the same person. */
+    val translatorMessages = mutableStateListOf<TranslationMessage>()
+    /** Active source language (ISO 639-1). Mirror of TranslatorPrefs.sourceLang. */
+    var translatorSource by mutableStateOf(com.r1.launcher.translator.TranslatorPrefs.DEFAULT_SOURCE)
+    /** Active target language (ISO 639-1). Mirror of TranslatorPrefs.targetLang. */
+    var translatorTarget by mutableStateOf(com.r1.launcher.translator.TranslatorPrefs.DEFAULT_TARGET)
+    /** Active LLM provider. Mirror of TranslatorPrefs.provider. */
+    var translatorProvider by mutableStateOf(ProviderId.GEMINI)
+    /** Toggle mirrors for the settings page. */
+    var translatorAutoDetect by mutableStateOf(true)
+    var translatorAutoSpeak by mutableStateOf(true)
+    /** Per-provider "has key" + masked-tail mirrors. Hydrated in
+     *  hydrateTranslatorStateFromPrefs(). */
+    var translatorGeminiHasKey by mutableStateOf(false)
+    var translatorGeminiKeyTail by mutableStateOf("")
+    var translatorOpenAIHasKey by mutableStateOf(false)
+    var translatorOpenAIKeyTail by mutableStateOf("")
+    var translatorClaudeHasKey by mutableStateOf(false)
+    var translatorClaudeKeyTail by mutableStateOf("")
+    /** Live STT partial for the source bubble while the mic is open. */
+    var translatorPartialText by mutableStateOf("")
+    /** Draft text in the input row. Hoisted so committed voice transcripts
+     *  can land here when auto-send is off. */
+    var translatorInputText by mutableStateOf("")
+    /** "ready" | "busy" | "error: …" — drives the status dot on the header. */
+    var translatorStatus by mutableStateOf("ready")
+    var translatorRecording by mutableStateOf(false)
+    /** True between submit and translation reply (or error). */
+    var translatorBusy by mutableStateOf(false)
+    /** True while a translator TTS playback is in flight. */
+    var translatorSpeaking by mutableStateOf(false)
+    /** Wheel-driven scroll tick — same protocol as hermesScrollIndex. */
+    var translatorScrollIndex by mutableIntStateOf(0)
+    /** Settings panel row focus (see TranslatorSettingsPanel row layout). */
+    var translatorSettingsFocus by mutableIntStateOf(0)
+    /** When non-empty, the shared keyboard overlay on TRANSLATOR_SETTINGS is
+     *  open. Values: "gemini" | "openai" | "claude". */
+    var translatorEditField by mutableStateOf("")
+    var translatorEditInput by mutableStateOf("")
+    /** First-run wizard step: 0 = source ("i speak"), 1 = target
+     *  ("translate to"), 2 = key ("add a key"). */
+    var translatorOnboardingStep by mutableIntStateOf(0)
+    /** Wheel focus within the current onboarding step's option list. */
+    var translatorOnboardingFocus by mutableIntStateOf(0)
+    /** True while the key step is showing the phone-handoff card (panel URL +
+     *  passcode, polling for a key to land). */
+    var translatorOnboardingWaitingForKey by mutableStateOf(false)
+
     // --- meetings (transcriber) ---
     /** Index of saved meetings, newest first. Hydrated from MeetingStore on
      *  panel entry; updated in-place after start/stop/transcribe/delete. */
@@ -767,6 +821,27 @@ class LauncherState {
         panel = Panel.HERMES_QR
     }
 
+    fun openTranslator() {
+        translatorScrollIndex = 0
+        translatorPartialText = ""
+        if (translatorStatus.startsWith("error")) translatorStatus = "ready"
+        panel = Panel.TRANSLATOR
+    }
+
+    fun openTranslatorOnboarding() {
+        translatorOnboardingStep = 0
+        translatorOnboardingFocus = 0
+        translatorOnboardingWaitingForKey = false
+        panel = Panel.TRANSLATOR_ONBOARDING
+    }
+
+    fun openTranslatorSettings() {
+        translatorSettingsFocus = 0
+        translatorEditField = ""
+        translatorEditInput = ""
+        panel = Panel.TRANSLATOR_SETTINGS
+    }
+
     fun openHermesConnectionEdit(id: String?) {
         hermesConnectionEditId = id
         hermesConnectionEditFocus = 0
@@ -852,6 +927,9 @@ class LauncherState {
             Panel.HERMES_CONFIG -> if (hermesConfigCameFromChat) Panel.HERMES_CHAT else Panel.APPS
             Panel.HERMES_QR -> Panel.HERMES_CONFIG
             Panel.HERMES_CONNECTION_EDIT -> Panel.HERMES_CONFIG
+            Panel.TRANSLATOR_ONBOARDING -> Panel.APPS
+            Panel.TRANSLATOR -> Panel.APPS
+            Panel.TRANSLATOR_SETTINGS -> Panel.TRANSLATOR
             Panel.TRANSCRIBER_LIST -> Panel.APPS
             // Recording-stop side-effect is fired by LauncherActivity's
             // backPressed handling; here we just unwind the panel.

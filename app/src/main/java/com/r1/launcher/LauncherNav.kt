@@ -141,6 +141,30 @@ interface LauncherHost {
     fun hermesConnectionEditSaveKey(value: String)
     fun hermesConnectionEditPasteUrl()
     fun hermesConnectionEditPasteKey()
+    // --- translator ---
+    fun translatorSendText(text: String)
+    fun translatorRecordStart()
+    fun translatorRecordStop()
+    fun translatorCycleSource(delta: Int)
+    fun translatorCycleTarget(delta: Int)
+    fun translatorSetProvider(provider: String)
+    fun translatorSetSource(code: String)
+    fun translatorSetTarget(code: String)
+    fun translatorSwapLangs()
+    fun translatorReplay(messageId: String)
+    fun translatorClearHistory()
+    fun translatorSettingsRowActivate(idx: Int)
+    fun translatorSaveKey(provider: String, value: String)
+    fun translatorPasteKey(provider: String)
+    fun translatorClearKey(provider: String)
+    // --- translator onboarding ---
+    fun translatorOnboardingPickSource(code: String)
+    fun translatorOnboardingPickTarget(code: String)
+    fun translatorOnboardingEnablePhoneKey()
+    fun translatorOnboardingPasteKey()
+    fun translatorOnboardingSkipKey()
+    fun translatorOnboardingFinish()
+
     fun copyToClipboard(text: String, label: String = "r1-launcher")
     /** Read the current Android system clipboard as a plain string (or empty
      *  if nothing is available). Used by the long-press paste popup in chat
@@ -435,6 +459,30 @@ fun LauncherState.wheelUp(host: LauncherHost) {
                 hermesConfigFocus = (hermesConfigFocus - 1).coerceAtLeast(0); host.navTone()
             }
         }
+        Panel.TRANSLATOR_ONBOARDING -> {
+            if (translatorOnboardingFocus > 0) {
+                translatorOnboardingFocus--; host.navTone()
+            } else if (translatorOnboardingStep > 0) {
+                // Step back to the previous wizard step.
+                translatorOnboardingStep--
+                translatorOnboardingFocus = 0
+                translatorOnboardingWaitingForKey = false
+                host.backTone()
+            } else {
+                back(); host.backTone()
+            }
+        }
+        Panel.TRANSLATOR -> {
+            // Wheel-up = cycle target language (one step toward index 0).
+            host.translatorCycleTarget(-1); host.navTone()
+        }
+        Panel.TRANSLATOR_SETTINGS -> {
+            if (translatorSettingsFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                translatorSettingsFocus--; host.navTone()
+            }
+        }
         Panel.TRANSCRIBER_LIST -> {
             if (transcriberListFocus <= 0) {
                 back(); host.backTone()
@@ -694,6 +742,26 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             hermesConfigFocus = (hermesConfigFocus + 1).coerceAtMost(totalRows - 1)
             if (prev != hermesConfigFocus) host.navTone()
         }
+        Panel.TRANSLATOR_ONBOARDING -> {
+            val max = when (translatorOnboardingStep) {
+                0 -> com.r1.launcher.translator.Languages.ALL.size // [auto] + langs → idx 0..ALL.size
+                1 -> com.r1.launcher.translator.Languages.ALL.size - 1 // langs only
+                else -> 2 // set-from-phone, paste, skip
+            }
+            val prev = translatorOnboardingFocus
+            translatorOnboardingFocus = (translatorOnboardingFocus + 1).coerceAtMost(max)
+            if (prev != translatorOnboardingFocus) host.navTone()
+        }
+        Panel.TRANSLATOR -> {
+            // Wheel-down = cycle target language (one step toward end of list).
+            host.translatorCycleTarget(+1); host.navTone()
+        }
+        Panel.TRANSLATOR_SETTINGS -> {
+            val prev = translatorSettingsFocus
+            // back, provider, gemini, openai, claude, source, target, auto-detect, auto-speak, clear
+            translatorSettingsFocus = (translatorSettingsFocus + 1).coerceAtMost(9)
+            if (prev != translatorSettingsFocus) host.navTone()
+        }
         Panel.TRANSCRIBER_LIST -> {
             // 0=back, 1="+ new recording", 2..=meetings ; +1 for settings shortcut at the end
             val max = 2 + meetings.size  // back + new + N meetings + settings = last idx N+2
@@ -927,6 +995,47 @@ fun LauncherState.activate(host: LauncherHost) {
         Panel.HERMES_VOICE -> { /* voice page handles its own controls */ }
         Panel.HERMES_CONFIG -> {
             host.hermesConfigRowActivate(hermesConfigFocus)
+            host.selectTone()
+        }
+        Panel.TRANSLATOR_ONBOARDING -> {
+            val langs = com.r1.launcher.translator.Languages.ALL
+            when (translatorOnboardingStep) {
+                0 -> {
+                    // 0 = auto-detect, 1..N = langs[focus-1]
+                    if (translatorOnboardingFocus == 0) {
+                        host.translatorOnboardingPickSource(com.r1.launcher.translator.Languages.AUTO)
+                    } else {
+                        langs.getOrNull(translatorOnboardingFocus - 1)?.let {
+                            host.translatorOnboardingPickSource(it.code)
+                        }
+                    }
+                    host.selectTone()
+                }
+                1 -> {
+                    langs.getOrNull(translatorOnboardingFocus)?.let {
+                        host.translatorOnboardingPickTarget(it.code)
+                    }
+                    host.selectTone()
+                }
+                else -> when (translatorOnboardingFocus) {
+                    0 -> { host.translatorOnboardingEnablePhoneKey(); host.selectTone() }
+                    1 -> { host.translatorOnboardingPasteKey(); host.popTone() }
+                    2 -> { host.translatorOnboardingSkipKey(); host.selectTone() }
+                }
+            }
+        }
+        Panel.TRANSLATOR -> {
+            // Wheel press in translator: if there's draft text, submit it.
+            // Otherwise no-op (PTT is the primary input gesture).
+            val draft = translatorInputText.trim()
+            if (draft.isNotEmpty()) {
+                host.translatorSendText(draft)
+                translatorInputText = ""
+                host.popTone()
+            }
+        }
+        Panel.TRANSLATOR_SETTINGS -> {
+            host.translatorSettingsRowActivate(translatorSettingsFocus)
             host.selectTone()
         }
         // Wheel press on the clock screen jumps straight to the apps grid.

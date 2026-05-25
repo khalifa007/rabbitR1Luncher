@@ -22,6 +22,7 @@
     <string name="app_label_terminal">terminal</string>
     <string name="app_label_hermes">hermes</string>
     <string name="app_label_meetings">meetings</string>
+    <string name="app_label_translator">translate</string>
 
     <!-- Settings root -->
     <string name="settings_title">settings</string>

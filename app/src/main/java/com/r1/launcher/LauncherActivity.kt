@@ -129,6 +129,16 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private val openClawPrefs by lazy { OpenClawPrefs.get(this) }
     private val hermesPrefs by lazy { com.r1.launcher.hermes.HermesPrefs.get(this) }
     private val hermesClient by lazy { com.r1.launcher.hermes.HermesClient() }
+    private val translatorPrefs by lazy { com.r1.launcher.translator.TranslatorPrefs.get(this) }
+    private val translatorClient by lazy { com.r1.launcher.translator.TranslatorClient() }
+    /** In-flight Translator TTS HTTP call — cancellable when a new translation
+     *  arrives or the user starts a new mic capture. */
+    private var translatorTtsCall: okhttp3.Call? = null
+    private var translatorSpeechPlayer: MediaPlayer? = null
+    private var translatorSpeechFile: File? = null
+    /** Last-played key (messageId) — guards against double-speak when both the
+     *  auto-speak path and a tap-to-replay race the same MP3. */
+    private var translatorLastSpokenKey = ""
     /** In-flight Hermes TTS download/playback — separate slot from the OpenClaw
      *  TTS pipeline so the two apps don't fight over playback state. */
     private var hermesTtsCall: okhttp3.Call? = null
@@ -209,7 +219,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private var voiceCapture: com.r1.launcher.voice.StreamingAudioCapture? = null
     private var voiceSession: com.r1.launcher.voice.ElevenLabsRealtimeClient? = null
     /** Which sink to deliver the STT transcript to. */
-    private enum class VoiceSink { CHAT, TERMINAL, HERMES_CHAT }
+    private enum class VoiceSink { CHAT, TERMINAL, HERMES_CHAT, TRANSLATOR }
     private var voiceSink: VoiceSink? = null
     /** True when the active capture was triggered by a power-user gesture
      *  (side button hold / wheel-press toggle): committed transcript auto-
@@ -725,6 +735,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 state.apps.add(AppEntry.OpenClaw)
                 state.apps.add(AppEntry.Terminal)
                 state.apps.add(AppEntry.Hermes)
+                state.apps.add(AppEntry.Translator)
                 state.apps.add(AppEntry.Meetings)
                 state.apps.add(AppEntry.Settings)
                 state.appsLoaded = true
@@ -831,6 +842,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         // the user has left the app.
         if (state.chatRecording) runCatching { openClawRecordStop() }
         if (state.hermesRecording) runCatching { hermesRecordStop() }
+        if (state.translatorRecording) runCatching { translatorRecordStop() }
         ui.removeCallbacks(tick)
         runCatching { unregisterReceiver(netRx) }
         runCatching { unregisterReceiver(batteryRx) }
@@ -872,6 +884,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         openClawSpeechPlayer = null
         runCatching { cancelHermesSpeech() }
         runCatching { hermesClient.cancelAll() }
+        runCatching { cancelTranslatorSpeech() }
+        runCatching { translatorClient.cancel() }
         // Stop transcriber playback but DO NOT stop the FGS — if a meeting is
         // recording when the user kills the launcher, we want it to keep going
         // until they explicitly stop it. Just unbind from our side.
@@ -1054,6 +1068,14 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             AppEntry.Meetings -> {
                 selectTone()
                 transcriberOpen()
+            }
+            AppEntry.Translator -> {
+                selectTone()
+                hydrateTranslatorStateFromPrefs()
+                // First run → wizard (pick source/target, set a key). After that
+                // it goes straight to the focused translation screen.
+                if (translatorPrefs.onboarded) state.openTranslator()
+                else state.openTranslatorOnboarding()
             }
             null -> Unit
         }
@@ -2706,6 +2728,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         // cancelled streams).
         cancelOpenClawSpeech()
         cancelHermesSpeech()
+        cancelTranslatorSpeech()
         voiceSink = sink
         when (sink) {
             VoiceSink.CHAT -> {
@@ -2721,6 +2744,10 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 state.hermesRecording = true
                 state.hermesPartialText = ""
                 state.hermesInputLevel = 0
+            }
+            VoiceSink.TRANSLATOR -> {
+                state.translatorRecording = true
+                state.translatorPartialText = ""
             }
         }
         // Skip the record-start beep when the voice page is driving the loop
@@ -2759,12 +2786,14 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                             VoiceSink.HERMES_CHAT ->
                                 if (state.hermesSpeaking && state.panel == Panel.HERMES_VOICE) cancelHermesSpeech()
                             VoiceSink.TERMINAL -> {}
+                            VoiceSink.TRANSLATOR -> {}
                         }
                     }
                     when (sink) {
                         VoiceSink.CHAT -> state.chatPartialText = text
                         VoiceSink.TERMINAL -> state.terminalPartial = text
                         VoiceSink.HERMES_CHAT -> state.hermesPartialText = text
+                        VoiceSink.TRANSLATOR -> state.translatorPartialText = text
                     }
                 }
             },
@@ -2815,6 +2844,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                         VoiceSink.CHAT -> state.openClawSpeaking
                         VoiceSink.HERMES_CHAT -> state.hermesSpeaking
                         VoiceSink.TERMINAL -> false
+                        VoiceSink.TRANSLATOR -> state.translatorSpeaking
                     }
                     if (speakerActive) return
                     voiceSession?.sendPcm(chunk)
@@ -2852,6 +2882,9 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 state.hermesRecording = false
                 state.hermesInputLevel = 0
             }
+            VoiceSink.TRANSLATOR -> {
+                state.translatorRecording = false
+            }
             null -> {}
         }
         playRecordStopTone()
@@ -2878,6 +2911,10 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 state.hermesRecording = false
                 state.hermesPartialText = ""
                 state.hermesInputLevel = 0
+            }
+            VoiceSink.TRANSLATOR -> {
+                state.translatorRecording = false
+                state.translatorPartialText = ""
             }
             null -> {}
         }
@@ -2938,6 +2975,17 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     }
                 } else if (onVoicePage) {
                     maybeResumeHermesConversation()
+                }
+            }
+            VoiceSink.TRANSLATOR -> {
+                // Translator always auto-submits — the explicit hold-to-talk
+                // gesture is itself the "send" intent. Drop the transcript into
+                // the input draft AND fire translatorSendText so a failed
+                // translate doesn't lose the source phrase (the panel shows
+                // the partial draft until cleared by send success).
+                state.translatorPartialText = ""
+                if (clean.isNotEmpty()) {
+                    translatorSendText(clean)
                 }
             }
         }
@@ -3857,6 +3905,413 @@ override fun hermesPasteServerUrlFromClipboard() {
         state.hermesSpeaking = false
     }
 
+    // -------- Translator --------
+
+    /** Mirror current TranslatorPrefs values + per-provider key status into
+     *  LauncherState so the panels render reactively. Called on entry to the
+     *  Translator app and after any prefs mutation. */
+    private fun hydrateTranslatorStateFromPrefs() {
+        state.translatorProvider = translatorPrefs.provider
+        state.translatorSource = translatorPrefs.sourceLang
+        state.translatorTarget = translatorPrefs.targetLang
+        state.translatorAutoDetect = translatorPrefs.autoDetectSource
+        state.translatorAutoSpeak = translatorPrefs.autoSpeak
+        state.translatorGeminiHasKey = translatorPrefs.hasKey(com.r1.launcher.translator.ProviderId.GEMINI)
+        state.translatorGeminiKeyTail = translatorPrefs.keyTail(com.r1.launcher.translator.ProviderId.GEMINI)
+        state.translatorOpenAIHasKey = translatorPrefs.hasKey(com.r1.launcher.translator.ProviderId.OPENAI)
+        state.translatorOpenAIKeyTail = translatorPrefs.keyTail(com.r1.launcher.translator.ProviderId.OPENAI)
+        state.translatorClaudeHasKey = translatorPrefs.hasKey(com.r1.launcher.translator.ProviderId.ANTHROPIC)
+        state.translatorClaudeKeyTail = translatorPrefs.keyTail(com.r1.launcher.translator.ProviderId.ANTHROPIC)
+        if (state.translatorMessages.isEmpty()) {
+            val persisted = com.r1.launcher.translator.TranslationHistoryStore.load(this)
+            if (persisted.isNotEmpty()) state.translatorMessages.addAll(persisted)
+        }
+    }
+
+    private fun persistTranslatorHistory() {
+        val snapshot = state.translatorMessages.toList()
+        Thread { com.r1.launcher.translator.TranslationHistoryStore.save(this, snapshot) }.start()
+    }
+
+    override fun translatorSendText(text: String) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
+        val provider = com.r1.launcher.translator.TranslatorProvider.of(translatorPrefs.provider)
+        val key = translatorPrefs.keyFor(provider.id)
+        if (key.isNullOrBlank()) {
+            toastFail("translator: set ${provider.id.label} key in settings")
+            state.translatorStatus = "error: no api key"
+            return
+        }
+        val src = translatorPrefs.sourceLang
+        val tgt = translatorPrefs.targetLang
+        // Optimistically append a pending entry — the user sees their source
+        // bubble immediately while the network call is in flight.
+        val pending = com.r1.launcher.translator.TranslationMessage(
+            sourceText = trimmed,
+            sourceLang = src,
+            targetLang = tgt,
+            pending = true,
+        )
+        state.translatorMessages.add(pending)
+        trimTranslatorMessages()
+        state.translatorScrollIndex = 0
+        state.translatorBusy = true
+        state.translatorStatus = "busy"
+        // Cancel any in-flight TTS — if the user is mid-translation we don't
+        // want stale audio from the previous reply.
+        cancelTranslatorSpeech()
+
+        translatorClient.translate(
+            provider = provider,
+            apiKey = key,
+            text = trimmed,
+            sourceLangCode = src,
+            targetLangCode = tgt,
+        ) { result ->
+            ui.post {
+                val idx = state.translatorMessages.indexOfFirst { it.id == pending.id }
+                if (idx < 0) {
+                    // History was cleared mid-flight; nothing to update.
+                    state.translatorBusy = false
+                    return@post
+                }
+                result.onSuccess { translated ->
+                    state.translatorMessages[idx] = pending.copy(
+                        targetText = translated,
+                        pending = false,
+                    )
+                    state.translatorBusy = false
+                    state.translatorStatus = "ready"
+                    persistTranslatorHistory()
+                    if (translatorPrefs.autoSpeak && state.panel == Panel.TRANSLATOR) {
+                        speakTranslatorTarget(state.translatorMessages[idx])
+                    }
+                }.onFailure { err ->
+                    state.translatorMessages[idx] = pending.copy(
+                        pending = false,
+                        error = err.message ?: "translate failed",
+                    )
+                    state.translatorBusy = false
+                    state.translatorStatus = "error: ${err.message ?: "failed"}"
+                }
+            }
+        }
+    }
+
+    private fun trimTranslatorMessages() {
+        val over = state.translatorMessages.size - com.r1.launcher.translator.TranslationHistoryStore.MAX_ENTRIES
+        if (over > 0) repeat(over) { state.translatorMessages.removeAt(0) }
+    }
+
+    override fun translatorRecordStart() {
+        // The translator always auto-submits on commit (handled in
+        // handleCommittedTranscript). autoSend = true mirrors hermes power-user
+        // path but the value is effectively ignored — the sink's own commit
+        // handler does the dispatch directly.
+        voiceAutoSend = true
+        startVoiceCapture(VoiceSink.TRANSLATOR)
+    }
+
+    override fun translatorRecordStop() = stopVoiceCapture()
+
+    override fun translatorCycleSource(delta: Int) {
+        val next = com.r1.launcher.translator.Languages.cycle(state.translatorSource, delta)
+        translatorPrefs.sourceLang = next
+        state.translatorSource = next
+        toast("source: ${com.r1.launcher.translator.Languages.get(next).english}")
+    }
+
+    override fun translatorCycleTarget(delta: Int) {
+        val next = com.r1.launcher.translator.Languages.cycle(state.translatorTarget, delta)
+        translatorPrefs.targetLang = next
+        state.translatorTarget = next
+        toast("target: ${com.r1.launcher.translator.Languages.get(next).english}")
+    }
+
+    override fun translatorSetProvider(provider: String) {
+        val id = providerIdFromField(provider) ?: return
+        translatorPrefs.provider = id
+        state.translatorProvider = id
+    }
+
+    override fun translatorSetSource(code: String) {
+        translatorPrefs.sourceLang = code
+        state.translatorSource = code
+    }
+
+    override fun translatorSetTarget(code: String) {
+        translatorPrefs.targetLang = code
+        state.translatorTarget = code
+    }
+
+    override fun translatorSwapLangs() {
+        val oldSrc = state.translatorSource
+        val oldTgt = state.translatorTarget
+        translatorPrefs.sourceLang = oldTgt
+        translatorPrefs.targetLang = oldSrc
+        state.translatorSource = oldTgt
+        state.translatorTarget = oldSrc
+    }
+
+    override fun translatorReplay(messageId: String) {
+        val msg = state.translatorMessages.firstOrNull { it.id == messageId } ?: return
+        if (msg.pending || msg.error != null || msg.targetText.isBlank()) return
+        // Force re-speak even when key matches a prior playback by clearing the
+        // guard — explicit user tap is the intent to hear it again.
+        translatorLastSpokenKey = ""
+        speakTranslatorTarget(msg)
+    }
+
+    override fun translatorClearHistory() {
+        state.translatorMessages.clear()
+        state.translatorPartialText = ""
+        state.translatorScrollIndex = 0
+        com.r1.launcher.translator.TranslationHistoryStore.clear(this)
+        translatorClient.clearCache()
+        cancelTranslatorSpeech()
+        toast("translator: history cleared")
+    }
+
+    override fun translatorSettingsRowActivate(idx: Int) {
+        when (idx) {
+            0 -> { state.back(); backTone() }
+            1 -> {
+                // Cycle provider: gemini → openai → claude → gemini
+                val current = translatorPrefs.provider
+                val next = when (current) {
+                    com.r1.launcher.translator.ProviderId.GEMINI -> com.r1.launcher.translator.ProviderId.OPENAI
+                    com.r1.launcher.translator.ProviderId.OPENAI -> com.r1.launcher.translator.ProviderId.ANTHROPIC
+                    com.r1.launcher.translator.ProviderId.ANTHROPIC -> com.r1.launcher.translator.ProviderId.GEMINI
+                }
+                translatorPrefs.provider = next
+                state.translatorProvider = next
+                popTone()
+            }
+            2 -> openTranslatorKeyboard("gemini")
+            3 -> openTranslatorKeyboard("openai")
+            4 -> openTranslatorKeyboard("claude")
+            // Source / target rows: handled by overlay in the panel (no host
+            // call needed — the picker fires onPickSource/Target directly).
+            5, 6 -> { /* no-op — picker overlay drives changes */ }
+            7 -> {
+                val next = !translatorPrefs.autoDetectSource
+                translatorPrefs.autoDetectSource = next
+                state.translatorAutoDetect = next
+                popTone()
+            }
+            8 -> {
+                val next = !translatorPrefs.autoSpeak
+                translatorPrefs.autoSpeak = next
+                state.translatorAutoSpeak = next
+                popTone()
+            }
+            9 -> {
+                translatorClearHistory()
+                popTone()
+            }
+        }
+    }
+
+    private fun openTranslatorKeyboard(field: String) {
+        state.translatorEditField = field
+        state.translatorEditInput = ""
+        selectTone()
+    }
+
+    override fun translatorSaveKey(provider: String, value: String) {
+        val id = providerIdFromField(provider) ?: return
+        translatorPrefs.setKey(id, value)
+        hydrateTranslatorStateFromPrefs()
+        state.translatorEditField = ""
+        state.translatorEditInput = ""
+        toast("translator: $provider key saved")
+        popTone()
+    }
+
+    override fun translatorPasteKey(provider: String) {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val raw = cm?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()?.trim().orEmpty()
+        if (raw.isBlank()) {
+            toastFail("clipboard empty")
+            return
+        }
+        state.translatorEditInput = raw
+        translatorSaveKey(provider, raw)
+    }
+
+    override fun translatorClearKey(provider: String) {
+        val id = providerIdFromField(provider) ?: return
+        translatorPrefs.setKey(id, null)
+        hydrateTranslatorStateFromPrefs()
+        state.translatorEditField = ""
+        state.translatorEditInput = ""
+        toast("translator: $provider key cleared")
+        popTone()
+    }
+
+    private fun providerIdFromField(field: String): com.r1.launcher.translator.ProviderId? = when (field) {
+        "gemini" -> com.r1.launcher.translator.ProviderId.GEMINI
+        "openai" -> com.r1.launcher.translator.ProviderId.OPENAI
+        "claude" -> com.r1.launcher.translator.ProviderId.ANTHROPIC
+        else -> null
+    }
+
+    // ---- Translator first-run onboarding ----
+
+    override fun translatorOnboardingPickSource(code: String) {
+        translatorPrefs.sourceLang = code
+        state.translatorSource = code
+        // "auto-detect" implies STT shouldn't be pinned to one language.
+        translatorPrefs.autoDetectSource = com.r1.launcher.translator.Languages.isAuto(code)
+        state.translatorAutoDetect = translatorPrefs.autoDetectSource
+        state.translatorOnboardingStep = 1
+        state.translatorOnboardingFocus = 0
+    }
+
+    override fun translatorOnboardingPickTarget(code: String) {
+        translatorPrefs.targetLang = code
+        state.translatorTarget = code
+        state.translatorOnboardingStep = 2
+        state.translatorOnboardingFocus = 0
+        state.translatorOnboardingWaitingForKey = false
+    }
+
+    /** Phone-handoff key step: ensure the web companion is running so the user
+     *  can paste a key from their phone, then flip into "waiting" mode. The
+     *  onboarding panel polls [LauncherState.translatorGeminiHasKey] (et al.)
+     *  and auto-finishes when a key lands. Default provider is Gemini (free). */
+    override fun translatorOnboardingEnablePhoneKey() {
+        translatorPrefs.provider = com.r1.launcher.translator.ProviderId.GEMINI
+        state.translatorProvider = com.r1.launcher.translator.ProviderId.GEMINI
+        if (!state.webServerEnabled) toggleWebServer(true)
+        state.translatorOnboardingWaitingForKey = true
+    }
+
+    override fun translatorOnboardingPasteKey() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val raw = cm?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()?.trim().orEmpty()
+        if (raw.isEmpty()) {
+            toastFail("clipboard empty — copy your key first")
+            return
+        }
+        // Default provider Gemini; if the key looks like sk-ant-/sk- route it to
+        // the matching provider so a pasted OpenAI/Claude key isn't mis-filed.
+        val provider = when {
+            raw.startsWith("sk-ant-") -> com.r1.launcher.translator.ProviderId.ANTHROPIC
+            raw.startsWith("sk-") -> com.r1.launcher.translator.ProviderId.OPENAI
+            else -> com.r1.launcher.translator.ProviderId.GEMINI
+        }
+        translatorPrefs.setKey(provider, raw)
+        translatorPrefs.provider = provider
+        hydrateTranslatorStateFromPrefs()
+        toast("translator: ${provider.label} key saved")
+        finishTranslatorOnboarding()
+    }
+
+    override fun translatorOnboardingSkipKey() {
+        toast("translator: add a key anytime in settings")
+        finishTranslatorOnboarding()
+    }
+
+    override fun translatorOnboardingFinish() {
+        finishTranslatorOnboarding()
+    }
+
+    private fun finishTranslatorOnboarding() {
+        translatorPrefs.onboarded = true
+        state.translatorOnboardingWaitingForKey = false
+        hydrateTranslatorStateFromPrefs()
+        state.openTranslator()
+    }
+
+    /** Synthesize + play the target text via ElevenLabs TTS. Uses the global
+     *  ElevenLabs key from VoicePrefs — translator doesn't have its own TTS
+     *  key (TTS is a separate ElevenLabs product from translation). */
+    private fun speakTranslatorTarget(msg: com.r1.launcher.translator.TranslationMessage) {
+        val apiKey = voicePrefs.elevenlabsKey
+        if (apiKey.isNullOrBlank()) {
+            toast("translator: set elevenlabs key in voice settings to enable speech")
+            return
+        }
+        val key = "${msg.id}:${msg.targetText.hashCode()}"
+        if (key == translatorLastSpokenKey) return
+        translatorLastSpokenKey = key
+        cancelTranslatorSpeech()
+        val outFile = File(File(cacheDir, "translator-voice").apply { mkdirs() }, "tr.mp3")
+        translatorTtsCall = com.r1.launcher.voice.ElevenLabsTtsClient.synthesize(
+            text = msg.targetText,
+            apiKey = apiKey,
+            voiceId = voicePrefs.effectiveVoiceId(),
+            // Translation often involves non-English output (the whole point).
+            // Force the multilingual model so Arabic / Hindi / Mandarin etc
+            // come out intelligible instead of the Flash model's English-leaning
+            // phoneme set garbling them.
+            model = "eleven_multilingual_v2",
+            tuning = voicePrefs.tuning(),
+            outFile = outFile,
+        ) { _, err ->
+            translatorTtsCall = null
+            if (err == "canceled") return@synthesize
+            if (err != null) {
+                ui.post { toastFail("tts: $err") }
+                return@synthesize
+            }
+            ui.post { playTranslatorSpeech(outFile) }
+        }
+    }
+
+    private fun playTranslatorSpeech(file: File) {
+        runCatching { translatorSpeechPlayer?.release() }
+        val mp = MediaPlayer()
+        runCatching {
+            mp.setAudioAttributes(
+                android.media.AudioAttributes.Builder()
+                    .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            mp.setDataSource(file.absolutePath)
+            mp.setOnCompletionListener {
+                runCatching { it.release() }
+                if (translatorSpeechPlayer === mp) translatorSpeechPlayer = null
+                if (translatorSpeechFile === file) {
+                    runCatching { file.delete() }
+                    translatorSpeechFile = null
+                }
+                state.translatorSpeaking = false
+            }
+            mp.setOnErrorListener { player, _, _ ->
+                runCatching { player.release() }
+                if (translatorSpeechPlayer === player) translatorSpeechPlayer = null
+                state.translatorSpeaking = false
+                true
+            }
+            mp.prepare()
+            translatorSpeechPlayer = mp
+            translatorSpeechFile = file
+            mp.start()
+            state.translatorSpeaking = true
+            voiceSpeakingStartedAtMs = System.currentTimeMillis()
+        }.onFailure {
+            runCatching { mp.release() }
+            translatorSpeechPlayer = null
+            translatorSpeechFile = null
+            state.translatorSpeaking = false
+        }
+    }
+
+    private fun cancelTranslatorSpeech() {
+        runCatching { translatorTtsCall?.cancel() }
+        translatorTtsCall = null
+        runCatching { translatorSpeechPlayer?.stop() }
+        runCatching { translatorSpeechPlayer?.release() }
+        translatorSpeechPlayer = null
+        runCatching { translatorSpeechFile?.delete() }
+        translatorSpeechFile = null
+        state.translatorSpeaking = false
+    }
+
     override fun openClawCloseSession() {
         openClawCloseSessionInternal()
     }
@@ -4661,6 +5116,10 @@ override fun hermesPasteServerUrlFromClipboard() {
                             // Push-to-talk dictation. Stop fires on the matching UP
                             // (handled below in the sideLongFired branch).
                             terminalRecordStart()
+                        } else if (state.panel == Panel.TRANSLATOR) {
+                            // PTT translation. Commit auto-submits to the LLM
+                            // (see VoiceSink.TRANSLATOR branch in handleCommittedTranscript).
+                            translatorRecordStart()
                         }
                     }
                 }
@@ -4670,6 +5129,7 @@ override fun hermesPasteServerUrlFromClipboard() {
                         // start side-effect on UP for the terminal PTT path so
                         // recording stops when the user releases.
                         if (state.panel == Panel.TERMINAL) terminalRecordStop()
+                        else if (state.panel == Panel.TRANSLATOR) translatorRecordStop()
                         sideLongFired = false
                         return true
                     }
