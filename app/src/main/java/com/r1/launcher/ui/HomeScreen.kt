@@ -1,6 +1,11 @@
 package com.r1.launcher.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -9,9 +14,11 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -29,12 +36,16 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -60,6 +71,7 @@ import kotlinx.coroutines.delay
 fun HomeScreen(
     state: LauncherState,
     onOpenNotifications: () -> Unit = {},
+    onOpenApps: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalR1Colors.current
@@ -77,6 +89,37 @@ fun HomeScreen(
             modifier = modifier
                 .fillMaxSize()
                 .background(Color.Black)
+                .pointerInput(Unit) {
+                    // Swipe-up from bottom 40% opens the apps grid. Gated to the
+                    // lower band so the gesture can't be mistaken for a tap on
+                    // the notification badge sitting under the clock. Triggers
+                    // on ~80dp upward travel; consumed only after we know the
+                    // drag started in the armed zone.
+                    var totalDy = 0f
+                    var armed = false
+                    val triggerPx = 80.dp.toPx()
+                    detectVerticalDragGestures(
+                        onDragStart = { offset ->
+                            armed = offset.y > size.height * 0.6f
+                            totalDy = 0f
+                        },
+                        onVerticalDrag = { change, dy ->
+                            if (armed) {
+                                totalDy += dy
+                                change.consume()
+                            }
+                        },
+                        onDragEnd = {
+                            if (armed && totalDy < -triggerPx) onOpenApps()
+                            armed = false
+                            totalDy = 0f
+                        },
+                        onDragCancel = {
+                            armed = false
+                            totalDy = 0f
+                        },
+                    )
+                }
                 .padding(horizontal = 14.dp)
                 .padding(top = 6.dp, bottom = 14.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -123,7 +166,48 @@ fun HomeScreen(
                 }
             }
 
+            SwipeUpHint()
         }
+    }
+}
+
+/** Bottom-center chevron hint that signals the swipe-up-to-apps gesture. Two
+ *  short orange strokes forming `︿`, breathing alpha so it doesn't read as a
+ *  static UI chrome element. Sits inside the home Column's bottom padding. */
+@Composable
+private fun SwipeUpHint() {
+    val transition = rememberInfiniteTransition(label = "swipeHint")
+    val alpha by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.85f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1400, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "swipeHintAlpha",
+    )
+    Canvas(
+        modifier = Modifier
+            .size(width = 22.dp, height = 6.dp),
+    ) {
+        val w = size.width
+        val h = size.height
+        val color = Color(0xFFFF6B00).copy(alpha = alpha)
+        // Two strokes meeting at top-center → `︿`
+        drawLine(
+            color = color,
+            start = Offset(0f, h),
+            end = Offset(w / 2f, 0f),
+            strokeWidth = 2.dp.toPx(),
+            cap = StrokeCap.Round,
+        )
+        drawLine(
+            color = color,
+            start = Offset(w / 2f, 0f),
+            end = Offset(w, h),
+            strokeWidth = 2.dp.toPx(),
+            cap = StrokeCap.Round,
+        )
     }
 }
 

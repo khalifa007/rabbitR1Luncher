@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -73,15 +72,12 @@ fun Topbar(state: LauncherState, modifier: Modifier = Modifier) {
                 overflow = TextOverflow.Ellipsis,
             )
             if (state.simPresent && state.cellularOn && state.networkType.isNotEmpty()) {
-                androidx.compose.foundation.layout.Spacer(Modifier.width(4.dp))
+                androidx.compose.foundation.layout.Spacer(Modifier.width(5.dp))
                 Text(
                     text = state.networkType,
-                    style = type.appCard.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
-                    color = Color.Black,
-                    modifier = Modifier
-                        .pulse(active = true, peakScale = 1.05f)
-                        .background(Color(0xFFFF6B00), RoundedCornerShape(3.dp))
-                        .padding(horizontal = 4.dp, vertical = 1.dp),
+                    style = type.appCard.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold),
+                    color = Color(0xFFFF6B00),
+                    maxLines = 1,
                 )
             }
         }
