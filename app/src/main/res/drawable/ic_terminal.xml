@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Pixel-art terminal icon: 12x12 logical grid, each pixel = 2x2 viewport units.
+  Monitor frame + stand in white, chevron + cursor cut as black "windows".
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
@@ -6,11 +10,17 @@
     android:viewportHeight="24">
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M2,4h20a1,1 0 0 1 1,1v14a1,1 0 0 1 -1,1H2a1,1 0 0 1 -1,-1V5a1,1 0 0 1 1,-1z" />
+        android:pathData="M2,2 h20 v16 h-20 z" />
     <path
-        android:strokeColor="#FF000000"
-        android:strokeWidth="1.8"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round"
-        android:pathData="M5,9 L8.5,12 L5,15 M10.5,15 L16,15" />
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M10,18 h4 v2 h-4 z
+                          M6,20 h12 v2 h-12 z" />
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M4,6 h2 v2 h-2 z
+                          M6,8 h2 v2 h-2 z
+                          M4,10 h2 v2 h-2 z" />
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M8,14 h8 v2 h-8 z" />
 </vector>

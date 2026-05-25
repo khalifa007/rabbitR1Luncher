@@ -159,15 +159,17 @@ fun LauncherRoot(
             state = state,
             onRowClick = { idx ->
                 // Order must match SettingsDevicePanel rows + LauncherNav dispatcher:
-                //   updates, language, restart, power off, reset camera, factory reset
+                //   0=back, 1=haptics, 2=updates, 3=language, 4=reboot, 5=power off,
+                //   6=reset camera, 7=factory reset
                 when (idx) {
                     0 -> { state.back(); host.backTone() }
-                    1 -> { host.checkForUpdate(); host.selectTone() }
-                    2 -> { state.openSettingsLanguage(); host.selectTone() }
-                    3 -> { host.rebootDevice(); host.selectTone() }
-                    4 -> { host.powerOffDevice(); host.selectTone() }
-                    5 -> { host.resetCameraMotor(); host.popTone() }
-                    6 -> { state.openFactoryConfirm(); host.selectTone() }
+                    1 -> { host.toggleHaptics(!state.hapticsEnabled); host.popTone() }
+                    2 -> { host.checkForUpdate(); host.selectTone() }
+                    3 -> { state.openSettingsLanguage(); host.selectTone() }
+                    4 -> { host.rebootDevice(); host.selectTone() }
+                    5 -> { host.powerOffDevice(); host.selectTone() }
+                    6 -> { host.resetCameraMotor(); host.popTone() }
+                    7 -> { state.openFactoryConfirm(); host.selectTone() }
                 }
             },
         )
@@ -252,11 +254,23 @@ fun LauncherRoot(
                     2 -> { host.toggleCellular(!state.cellularOn); host.popTone() }
                     3 -> { state.openBtScan(); host.startBtScan(); host.selectTone() }
                     4 -> { state.openWifiShare(); host.selectTone() }
-                    5 -> { host.toggleWebServer(!state.webServerEnabled); host.popTone() }
-                    6 -> { state.openPanelPasscodeEditor(); host.selectTone() }
-                    7 -> { host.setWebTerminalEnabled(!state.webTerminalEnabled); host.popTone() }
-                    8 -> { state.openNtfyConfig(); host.selectTone() }
-                    9 -> { host.startWifiScan(); state.openWifiScan(); host.selectTone() }
+                    5 -> { state.openRemotePanel(); host.selectTone() }
+                    6 -> { state.openNtfyConfig(); host.selectTone() }
+                    7 -> { host.startWifiScan(); state.openWifiScan(); host.selectTone() }
+                }
+            },
+        )
+
+        RemotePanelSettings(
+            state = state,
+            onRowClick = { idx ->
+                when (idx) {
+                    0 -> { state.back(); host.backTone() }
+                    1 -> { host.toggleWebServer(!state.webServerEnabled); host.popTone() }
+                    2 -> { state.openPanelPasscodeEditor(); host.selectTone() }
+                    3 -> { host.setCaptureMicEnabled(!state.captureMicEnabled); host.popTone() }
+                    4 -> { host.setCapturePlaybackEnabled(!state.capturePlaybackEnabled); host.popTone() }
+                    5 -> { host.setWebTerminalEnabled(!state.webTerminalEnabled); host.popTone() }
                 }
             },
         )
@@ -382,6 +396,31 @@ fun LauncherRoot(
             onCompactContext = { host.openClawCompactSession(); host.popTone() },
             onClearContext = { host.openClawClearContext(); host.popTone() },
             getClipboardText = { host.getClipboardText() },
+            onMicStart = { host.openClawRecordStart() },
+            onMicStop = { host.openClawRecordStop() },
+            onOpenVoice = {
+                state.openOpenClawVoice()
+                host.toggleChatConversationMode(true)
+                host.selectTone()
+            },
+        )
+
+        VoiceChatPanel(
+            state = state,
+            visible = state.panel == Panel.OPENCLAW_VOICE,
+            themeColor = Color(0xFFFF4500),
+            serviceLabel = "openclaw",
+            recording = state.chatRecording,
+            transcribing = state.chatTranscribing,
+            busy = state.chatBusy,
+            speaking = state.openClawSpeaking,
+            partialText = state.chatPartialText,
+            micLevel = state.chatInputLevel,
+            onEnd = {
+                host.toggleChatConversationMode(false)
+                state.back()
+                host.backTone()
+            },
         )
 
         OpenClawCameraPanel(
@@ -452,6 +491,8 @@ fun LauncherRoot(
                 host.popTone()
             },
             getClipboardText = { host.getClipboardText() },
+            onMicStart = { host.terminalRecordStart() },
+            onMicStop = { host.terminalRecordStop() },
         )
 
         HermesChatPanel(
@@ -462,6 +503,31 @@ fun LauncherRoot(
             onOpenConfig = { state.openHermesConfig(fromChat = true); host.selectTone() },
             getClipboardText = { host.getClipboardText() },
             onCopyMessage = { text -> host.copyToClipboard(text, "hermes-message"); host.popTone() },
+            onMicStart = { host.hermesRecordStart() },
+            onMicStop = { host.hermesRecordStop() },
+            onOpenVoice = {
+                state.openHermesVoice()
+                host.toggleHermesConversationMode(true)
+                host.selectTone()
+            },
+        )
+
+        VoiceChatPanel(
+            state = state,
+            visible = state.panel == Panel.HERMES_VOICE,
+            themeColor = AppThemes.Hermes,
+            serviceLabel = "hermes",
+            recording = state.hermesRecording,
+            transcribing = state.hermesTranscribing,
+            busy = state.hermesBusy,
+            speaking = state.hermesSpeaking,
+            partialText = state.hermesPartialText,
+            micLevel = state.hermesInputLevel,
+            onEnd = {
+                host.toggleHermesConversationMode(false)
+                state.back()
+                host.backTone()
+            },
         )
 
         HermesConfigPanel(
@@ -487,11 +553,11 @@ fun LauncherRoot(
         TranscriberListPanel(
             state = state,
             onRowClick = { idx ->
-                // Layout: 0=back, 1=settings (gear), 2=record, 3..N+2=meetings.
+                // Layout: 0=back, 1=+ (record), 2=settings (gear), 3..N+2=meetings.
                 when {
                     idx == 0 -> { state.back(); host.backTone() }
-                    idx == 1 -> { host.transcriberOpenSettings(); host.selectTone() }
-                    idx == 2 -> { host.transcriberStartRecording(); host.popTone() }
+                    idx == 1 -> { host.transcriberStartRecording(); host.popTone() }
+                    idx == 2 -> { host.transcriberOpenSettings(); host.selectTone() }
                     idx - 3 in state.meetings.indices -> {
                         val m = state.meetings[idx - 3]
                         host.transcriberOpenDetail(m.uuid)

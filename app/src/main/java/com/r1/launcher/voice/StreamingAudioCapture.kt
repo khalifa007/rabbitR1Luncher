@@ -3,6 +3,9 @@ package com.r1.launcher.voice
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 import android.os.Handler
 import android.os.Looper
 
@@ -73,6 +76,21 @@ class StreamingAudioCapture {
             feeder = null
             return
         }
+        // Hardware echo cancellation + noise suppression + AGC, when the SoC
+        // supports them. Critical for barge-in (mic picks up the TTS through
+        // the speaker otherwise, and we'd transcribe the AI's own words).
+        // MT6765 reports support but quality varies; failures here are silent
+        // so the mic still works without effects.
+        val sessionId = rec.audioSessionId
+        val aec = if (AcousticEchoCanceler.isAvailable())
+            runCatching { AcousticEchoCanceler.create(sessionId)?.apply { enabled = true } }.getOrNull()
+        else null
+        val ns = if (NoiseSuppressor.isAvailable())
+            runCatching { NoiseSuppressor.create(sessionId)?.apply { enabled = true } }.getOrNull()
+        else null
+        val agc = if (AutomaticGainControl.isAvailable())
+            runCatching { AutomaticGainControl.create(sessionId)?.apply { enabled = true } }.getOrNull()
+        else null
         val maxBytes = sampleRate * 2 * maxSeconds
         var totalBytes = 0
         var peak = 0
@@ -103,6 +121,9 @@ class StreamingAudioCapture {
             val peakPct = (peak * 100 / 32767).coerceIn(0, 100)
             main.post { cb.onStopped(durMs, peakPct) }
         } finally {
+            runCatching { aec?.release() }
+            runCatching { ns?.release() }
+            runCatching { agc?.release() }
             runCatching { rec.stop() }
             runCatching { rec.release() }
             feeder = null

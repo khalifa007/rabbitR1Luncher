@@ -12,9 +12,11 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -34,8 +36,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.r1.launcher.R
 
@@ -151,9 +156,9 @@ fun MenuDot(
 ) {
     val bg = if (focused) themeColor else Color.Transparent
     val dotColor = if (focused) Color.Black else themeColor
+    // Pixel-art overflow: hard-cornered focus tile + 3 stacked square dots.
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
             .background(bg)
             .clickable(onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 6.dp),
@@ -167,9 +172,116 @@ fun MenuDot(
                 Box(
                     modifier = Modifier
                         .size(4.dp)
-                        .background(dotColor, CircleShape),
+                        .background(dotColor),
                 )
             }
         }
+    }
+}
+
+/**
+ * Press-and-hold mic pill for chat / terminal input rows. Press = onStart,
+ * release / cancel / pointer-leave = onStop — same contract as the side-
+ * button push-to-talk so the host handlers are reused as-is.
+ *
+ * awaitRelease's finally branch fires for both clean release and gesture
+ * cancellation, so onStop is guaranteed to run; without it a swipe-off mid
+ * record would leak the mic open until the next start.
+ */
+@Composable
+fun HoldToTalkPill(
+    recording: Boolean,
+    themeColor: Color,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+    modifier: Modifier = Modifier,
+    size: Dp = 32.dp,
+) {
+    val bg = if (recording) themeColor else Color.Transparent
+    val tint = if (recording) Color.Black else themeColor
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(bg)
+            .pulse(active = recording, peakScale = 1.10f)
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = {
+                        onStart()
+                        try {
+                            awaitRelease()
+                        } finally {
+                            onStop()
+                        }
+                    },
+                )
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Image(
+            painter = painterResource(R.drawable.ic_voice),
+            contentDescription = null,
+            colorFilter = ColorFilter.tint(tint),
+            modifier = Modifier.size(size * 0.55f),
+        )
+    }
+}
+
+/**
+ * Tap-to-open voice-page button used in chat input rows. Replaces the older
+ * press-and-hold idiom — a single tap launches the fullscreen voice panel
+ * (VoiceChatPanel), which then handles the whole hands-free conversation
+ * loop on its own. Same visual footprint as HoldToTalkPill so the input
+ * row geometry doesn't shift.
+ */
+@Composable
+fun VoiceLaunchPill(
+    themeColor: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    size: Dp = 28.dp,
+) {
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Image(
+            painter = painterResource(R.drawable.ic_voice),
+            contentDescription = null,
+            colorFilter = ColorFilter.tint(themeColor),
+            modifier = Modifier.size(size * 0.65f),
+        )
+    }
+}
+
+/**
+ * Compact send-arrow button used in chat input rows. Themed via [tint]; goes
+ * dim-gray when [enabled] is false so empty inputs read as un-tappable.
+ */
+@Composable
+fun SendIconButton(
+    tint: Color,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    size: Dp = 28.dp,
+) {
+    val effective = if (enabled) tint else Color(0xFF555555)
+    Box(
+        modifier = modifier
+            .size(size)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Image(
+            painter = painterResource(R.drawable.ic_send),
+            contentDescription = null,
+            colorFilter = ColorFilter.tint(effective),
+            modifier = Modifier.size(size * 0.70f),
+        )
     }
 }

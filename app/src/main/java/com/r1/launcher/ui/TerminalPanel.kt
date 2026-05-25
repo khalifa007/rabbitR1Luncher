@@ -57,6 +57,8 @@ fun TerminalPanel(
     onPaste: () -> Unit,
     onAppendInput: (String) -> Unit = {},
     getClipboardText: () -> String = { "" },
+    onMicStart: () -> Unit = {},
+    onMicStop: () -> Unit = {},
 ) {
     AnimatedVisibility(
         visible = state.panel == Panel.TERMINAL,
@@ -193,6 +195,15 @@ fun TerminalPanel(
                         fontFamily = ui,
                     )
                 }
+                Spacer(Modifier.width(4.dp))
+                HoldToTalkPill(
+                    recording = state.terminalRecording,
+                    themeColor = AppThemes.Terminal,
+                    onStart = onMicStart,
+                    onStop = onMicStop,
+                    size = 28.dp,
+                )
+                Spacer(Modifier.width(4.dp))
                 Box(
                     modifier = Modifier
                         .clickable { onSubmit() }

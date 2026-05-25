@@ -163,28 +163,36 @@ private fun UpdateIcon(rotating: Boolean, halfAlpha: Boolean) {
 private fun BatteryPill(pct: Float, charging: Boolean) {
     val scale = pct.coerceIn(0.08f, 1f)
     val tint = if (charging) Color(0xFF35D26F) else Color(0xFFFF6B00)
-    Box(
-        contentAlignment = Alignment.Center,
-        modifier = Modifier
-            .size(width = 26.dp, height = 12.dp)
-            .border(1.dp, tint, RoundedCornerShape(3.dp))
-            .padding(1.dp),
-    ) {
+    // Pixel-art battery: hard-cornered body + 2dp border + classic right-side
+    // spout terminal. Inner fill scaled by pct, no rounded clip.
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(width = 22.dp, height = 12.dp)
+                .border(2.dp, tint)
+                .padding(2.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight()
+                    .graphicsLayer {
+                        scaleX = scale
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0.5f)
+                    }
+                    .background(tint),
+            )
+            Text(
+                text = "${(pct * 100).toInt()}",
+                style = LocalR1Type.current.appCard.copy(fontSize = 8.sp, fontWeight = FontWeight.Bold),
+                color = if (pct > 0.5f) Color.Black else Color.White,
+            )
+        }
         Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight()
-                .graphicsLayer {
-                    scaleX = scale
-                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0.5f)
-                }
-                .clip(RoundedCornerShape(2.dp))
+                .size(width = 3.dp, height = 6.dp)
                 .background(tint),
-        )
-        Text(
-            text = "${(pct * 100).toInt()}",
-            style = LocalR1Type.current.appCard.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
-            color = if (pct > 0.5f) Color.Black else Color.White,
         )
     }
 }

@@ -43,6 +43,7 @@ fun ClipboardPastePopup(
     clipboardText: String,
     onPaste: (String) -> Unit,
     onDismiss: () -> Unit,
+    onClear: (() -> Unit)? = null,
 ) {
     if (visible) {
         Box(
@@ -79,6 +80,9 @@ fun ClipboardPastePopup(
                     onPaste = onPaste,
                     onDismiss = onDismiss,
                 )
+                if (onClear != null) {
+                    ActionRow(label = "clear input", themeColor = Color(0xFFE53935), onClick = onClear)
+                }
             }
         }
     }

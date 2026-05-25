@@ -53,6 +53,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.r1.launcher.LauncherState
@@ -82,6 +83,9 @@ fun HermesChatPanel(
     onOpenConfig: () -> Unit = {},
     getClipboardText: () -> String = { "" },
     onCopyMessage: (String) -> Unit = {},
+    onMicStart: () -> Unit = {},
+    onMicStop: () -> Unit = {},
+    onOpenVoice: () -> Unit = {},
 ) {
     AnimatedVisibility(
         visible = state.panel == Panel.HERMES_CHAT,
@@ -92,7 +96,6 @@ fun HermesChatPanel(
     ) {
         val type = LocalR1Type.current
         var menuOpen by remember { mutableStateOf(false) }
-        var inputText by remember { mutableStateOf("") }
         var showKeyboard by remember { mutableStateOf(false) }
         var showPaste by remember { mutableStateOf(false) }
         var pasteText by remember { mutableStateOf("") }
@@ -221,7 +224,7 @@ fun HermesChatPanel(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
                             .clip(RoundedCornerShape(12.dp))
                             .border(2.dp, AppThemes.Hermes, RoundedCornerShape(12.dp))
                             .background(Color.Black)
@@ -232,25 +235,32 @@ fun HermesChatPanel(
                                     showPaste = true
                                 },
                             )
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                            .padding(start = 12.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            text = if (inputText.isEmpty()) "type here…"
-                                else inputText + if (showKeyboard) "_" else "",
+                            text = if (state.hermesInputText.isEmpty()) "type here…"
+                                else state.hermesInputText + if (showKeyboard) "_" else "",
                             style = type.appCard,
-                            color = if (inputText.isEmpty()) Color.Gray else Color.White,
+                            color = if (state.hermesInputText.isEmpty()) Color.Gray else Color.White,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f),
                         )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = "send",
-                            style = type.appCard,
-                            color = AppThemes.Hermes,
-                            modifier = Modifier.clickable {
-                                if (inputText.isNotBlank()) {
-                                    onSend(inputText)
-                                    inputText = ""
+                        Spacer(Modifier.width(6.dp))
+                        VoiceLaunchPill(
+                            themeColor = AppThemes.Hermes,
+                            onClick = onOpenVoice,
+                            size = 28.dp,
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        SendIconButton(
+                            tint = AppThemes.Hermes,
+                            enabled = state.hermesInputText.isNotBlank(),
+                            onClick = {
+                                if (state.hermesInputText.isNotBlank()) {
+                                    onSend(state.hermesInputText)
+                                    state.hermesInputText = ""
                                     showKeyboard = false
                                 }
                             },
@@ -263,8 +273,8 @@ fun HermesChatPanel(
                         exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
                     ) {
                         RetroKeyboard(
-                            onKeyPress = { char -> inputText += char },
-                            onBackspace = { if (inputText.isNotEmpty()) inputText = inputText.dropLast(1) },
+                            onKeyPress = { char -> state.hermesInputText += char },
+                            onBackspace = { if (state.hermesInputText.isNotEmpty()) state.hermesInputText = state.hermesInputText.dropLast(1) },
                             onDismiss = { showKeyboard = false },
                         )
                     }
@@ -307,11 +317,14 @@ fun HermesChatPanel(
                 themeColor = AppThemes.Hermes,
                 clipboardText = pasteText,
                 onPaste = { text ->
-                    inputText = if (inputText.isBlank()) text
-                        else inputText.trimEnd() + " " + text
+                    state.hermesInputText = if (state.hermesInputText.isBlank()) text
+                        else state.hermesInputText.trimEnd() + " " + text
                     showPaste = false
                 },
                 onDismiss = { showPaste = false },
+                onClear = if (state.hermesInputText.isNotEmpty()) {
+                    { state.hermesInputText = ""; showPaste = false }
+                } else null,
             )
 
             MessageActionPopup(
@@ -521,10 +534,12 @@ private fun HermesStatusDot(status: String) {
         status.startsWith("error") -> Color(0xFFE53935)
         else -> Color(0xFF777777)
     }
+    // Pixel-art status block: hard square (no CircleShape) so it matches the
+    // rest of the retro idiom. Green=live, amber=connecting/streaming, red=error.
     Box(
         modifier = Modifier
             .size(8.dp)
-            .background(color, CircleShape),
+            .background(color),
     )
 }
 

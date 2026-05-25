@@ -3,6 +3,7 @@ package com.r1.launcher.ui
 import android.util.LruCache
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
@@ -19,6 +20,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalOverscrollConfiguration
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -104,9 +106,27 @@ fun AppsPanel(
         val listState = rememberLazyListState()
 
         LaunchedEffect(state.appsFocus, state.apps.size) {
-            if (state.apps.isNotEmpty()) {
-                listState.animateScrollToItem(
-                    state.appsFocus.coerceIn(0, state.apps.lastIndex),
+            if (state.apps.isEmpty()) return@LaunchedEffect
+            val target = state.appsFocus.coerceIn(0, state.apps.lastIndex)
+            val info = listState.layoutInfo
+            val viewportStart = info.viewportStartOffset
+            val viewportEnd = info.viewportEndOffset
+            val targetItem = info.visibleItemsInfo.firstOrNull { it.index == target }
+            if (targetItem == null) {
+                listState.animateScrollToItem(target)
+                return@LaunchedEffect
+            }
+            val delta: Float = when {
+                targetItem.offset + targetItem.size > viewportEnd ->
+                    (targetItem.offset + targetItem.size - viewportEnd).toFloat()
+                targetItem.offset < viewportStart ->
+                    (targetItem.offset - viewportStart).toFloat()
+                else -> 0f
+            }
+            if (kotlin.math.abs(delta) > 0.5f) {
+                listState.animateScrollBy(
+                    value = delta,
+                    animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
                 )
             }
         }
@@ -174,24 +194,24 @@ private fun AppCard(
         AppEntry.Hermes -> "_r1_hermes"
         AppEntry.Meetings -> "_r1_meetings"
     }
-    val isSettings = entry is AppEntry.Settings
-    val isOpenClaw = entry is AppEntry.OpenClaw
-    val isMessages = entry is AppEntry.Messages
-    val isTerminal = entry is AppEntry.Terminal
-    val isHermes = entry is AppEntry.Hermes
-    val isMeetings = entry is AppEntry.Meetings
-    val settingsPainter = if (isSettings) painterResource(R.drawable.ic_settings) else null
-    val openClawPainter = if (isOpenClaw) painterResource(R.drawable.ic_wifi_arc) else null
-    val messagesPainter = if (isMessages) painterResource(R.drawable.ic_messages) else null
-    val terminalPainter = if (isTerminal) painterResource(R.drawable.ic_terminal) else null
-    val hermesPainter = if (isHermes) painterResource(R.drawable.ic_hermes) else null
-    val meetingsPainter = if (isMeetings) painterResource(R.drawable.ic_meetings) else null
+    // Only the matching synthetic resource is resolved — previous code called
+    // painterResource() + stringResource() six times per card (one per
+    // synthetic), so a 20-card grid did 120 resource lookups per recomposition.
+    val syntheticPainter: Painter? = when (entry) {
+        is AppEntry.Real -> null
+        AppEntry.Settings -> painterResource(R.drawable.ic_settings)
+        AppEntry.OpenClaw -> painterResource(R.drawable.ic_wifi_arc)
+        AppEntry.Messages -> painterResource(R.drawable.ic_messages)
+        AppEntry.Terminal -> painterResource(R.drawable.ic_terminal)
+        AppEntry.Hermes -> painterResource(R.drawable.ic_hermes)
+        AppEntry.Meetings -> painterResource(R.drawable.ic_meetings)
+    }
 
     var iconPainter by remember(pkg) {
         val cached = iconCache.get(pkg)
         mutableStateOf<Painter?>(if (cached != null) BitmapPainter(cached) else null)
     }
-    val syntheticLabel = when (entry) {
+    val syntheticLabel: String? = when (entry) {
         is AppEntry.Real -> null
         AppEntry.Settings -> stringResource(R.string.app_label_settings)
         AppEntry.OpenClaw -> stringResource(R.string.app_label_openclaw)
@@ -228,12 +248,12 @@ private fun AppCard(
 
     val height by animateDpAsState(
         targetValue = if (focused) FOCUSED_HEIGHT else COLLAPSED_HEIGHT,
-        animationSpec = tween(durationMillis = 260, easing = LinearOutSlowInEasing),
+        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
         label = "cardHeight",
     )
     val focusGlow by animateFloatAsState(
         targetValue = if (focused) 1f else 0f,
-        animationSpec = tween(durationMillis = 260, easing = LinearOutSlowInEasing),
+        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
         label = "cardFocusGlow",
     )
 
@@ -301,7 +321,7 @@ private fun AppCard(
                 .fillMaxWidth()
                 .padding(start = 16.dp, end = 16.dp, top = 16.dp),
         ) {
-            val effectivePainter = settingsPainter ?: openClawPainter ?: messagesPainter ?: terminalPainter ?: hermesPainter ?: meetingsPainter ?: iconPainter
+            val effectivePainter = syntheticPainter ?: iconPainter
             Text(
                 text = label.replaceFirstChar { it.titlecase() },
                 color = Color.Black,
@@ -456,10 +476,17 @@ fun FolderTray(modifier: Modifier = Modifier) {
 private data class CarrotOsInfo(val version: String, val build: String)
 
 private fun carrotOsInfo(): CarrotOsInfo {
+    // Fallback chain: OS-side carrot props win (set via device.mk on the
+    // CarrotOS source tree); next the BuildConfig constants baked into the
+    // launcher APK; finally the lineage / AOSP build fields. This lets the
+    // tray show meaningful values even on system images that haven't been
+    // rebuilt with ro.carrot.* wired up.
     val version = systemProp("ro.carrot.version")
+        ?: com.r1.launcher.BuildConfig.CARROT_VERSION.takeIf { it.isNotBlank() }
         ?: systemProp("ro.lineage.version")
         ?: android.os.Build.VERSION.RELEASE
     val build = systemProp("ro.carrot.build.id")
+        ?: com.r1.launcher.BuildConfig.CARROT_BUILD_ID.takeIf { it.isNotBlank() }
         ?: systemProp("ro.lineage.build.version")
         ?: android.os.Build.ID
     return CarrotOsInfo(

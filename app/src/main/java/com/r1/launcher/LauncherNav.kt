@@ -41,6 +41,8 @@ interface LauncherHost {
     fun openClawRecordStart()
     fun openClawRecordStop()
     fun openClawSendText(text: String)
+    /** Toggle the OpenClaw hands-free conversation loop. */
+    fun toggleChatConversationMode(enable: Boolean)
     fun voiceToggleEnabled()
     fun voiceCycleVoiceId()
     /** Set the catalog voice to the exact id [id]. No-ops with a warning log
@@ -95,6 +97,11 @@ interface LauncherHost {
     fun openSmsThread(address: String, displayName: String)
     fun toggleWebServer(enable: Boolean)
     fun setWebTerminalEnabled(enable: Boolean)
+    /** Toggle whether screen recordings include the device microphone. */
+    fun setCaptureMicEnabled(enable: Boolean)
+    /** Toggle whether screen recordings include system/playback audio
+     *  (REMOTE_SUBMIX). */
+    fun setCapturePlaybackEnabled(enable: Boolean)
     /** Persist a new 4-digit web-panel passcode. Mirrors into LauncherState
      *  for the Settings UI and rotates [NotifPrefs.panelToken] so any already-
      *  authenticated browsers get bounced — passcode change is a logout. */
@@ -108,6 +115,8 @@ interface LauncherHost {
     fun hermesSendText(text: String)
     fun hermesRecordStart()
     fun hermesRecordStop()
+    /** Toggle the Hermes hands-free conversation loop. */
+    fun toggleHermesConversationMode(enable: Boolean)
     fun hermesScrollUp()
     fun hermesScrollDown()
     fun hermesClearHistory()
@@ -343,6 +352,13 @@ fun LauncherState.wheelUp(host: LauncherHost) {
         }
         Panel.WIFI_SHARE_EDIT -> { /* keyboard handles input */ }
         Panel.PANEL_PASSCODE -> { /* numeric keypad handles input */ }
+        Panel.REMOTE_PANEL -> {
+            if (remotePanelFocus <= 0) {
+                back(); host.backTone()
+            } else {
+                remotePanelFocus--; host.navTone()
+            }
+        }
         Panel.BRIGHTNESS -> {
             val prev = brightnessLevel
             brightnessLevel = (brightnessLevel - 16).coerceAtLeast(1)
@@ -376,6 +392,7 @@ fun LauncherState.wheelUp(host: LauncherHost) {
             else { hermesConnectionEditFocus--; host.navTone() }
         }
         Panel.OPENCLAW_CHAT -> { host.openClawScrollUp(); host.navTone() }
+        Panel.OPENCLAW_VOICE -> { /* voice page handles its own controls */ }
         Panel.OPENCLAW_CAMERA -> { host.openClawCameraMotorNudge(-15) }
         Panel.OPENCLAW_SETTINGS -> {
             if (openClawSettingsFocus <= 0) {
@@ -407,6 +424,7 @@ fun LauncherState.wheelUp(host: LauncherHost) {
         }
         Panel.TERMINAL -> { terminalScrollIndex++; host.navTone() }
         Panel.HERMES_CHAT -> { host.hermesScrollUp(); host.navTone() }
+        Panel.HERMES_VOICE -> { /* voice page handles its own controls */ }
         Panel.HERMES_CONFIG -> {
             val c = hermesConnections.size
             val canAdd = c < com.r1.launcher.hermes.HermesPrefs.MAX_CONNECTIONS
@@ -553,8 +571,8 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.NETWORK -> {
             val prev = networkFocus
-            // back, wifi, cellular, bluetooth (opens panel), share, remote, passcode, terminal, ntfy, wifi-scan
-            networkFocus = (networkFocus + 1).coerceAtMost(9)
+            // back, wifi, cellular, bluetooth, share, remote-panel (deeper), ntfy, wifi-scan
+            networkFocus = (networkFocus + 1).coerceAtMost(7)
             if (prev != networkFocus) host.navTone()
         }
         Panel.FACTORY_CONFIRM -> {
@@ -583,6 +601,12 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.WIFI_SHARE_EDIT -> { /* keyboard handles input */ }
         Panel.PANEL_PASSCODE -> { /* numeric keypad handles input */ }
+        Panel.REMOTE_PANEL -> {
+            val prev = remotePanelFocus
+            // back, server, passcode, mic, playback, terminal
+            remotePanelFocus = (remotePanelFocus + 1).coerceAtMost(5)
+            if (prev != remotePanelFocus) host.navTone()
+        }
         Panel.BRIGHTNESS -> {
             val prev = brightnessLevel
             brightnessLevel = (brightnessLevel + 16).coerceAtMost(255)
@@ -617,6 +641,7 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             if (prev != hermesConnectionEditFocus) host.navTone()
         }
         Panel.OPENCLAW_CHAT -> { host.openClawScrollDown(); host.navTone() }
+        Panel.OPENCLAW_VOICE -> { /* voice page handles its own controls */ }
         Panel.OPENCLAW_CAMERA -> { host.openClawCameraMotorNudge(+15) }
         Panel.OPENCLAW_SETTINGS -> {
             val prev = openClawSettingsFocus
@@ -660,6 +685,7 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             if (prev != terminalScrollIndex) host.navTone()
         }
         Panel.HERMES_CHAT -> { host.hermesScrollDown(); host.navTone() }
+        Panel.HERMES_VOICE -> { /* voice page handles its own controls */ }
         Panel.HERMES_CONFIG -> {
             val c = hermesConnections.size
             val canAdd = c < com.r1.launcher.hermes.HermesPrefs.MAX_CONNECTIONS
@@ -809,11 +835,17 @@ fun LauncherState.activate(host: LauncherHost) {
             2 -> { host.toggleCellular(!cellularOn); host.popTone() }
             3 -> { openBtScan(); host.startBtScan(); host.selectTone() }
             4 -> { openWifiShare(); host.selectTone() }
-            5 -> { host.toggleWebServer(!webServerEnabled); host.popTone() }
-            6 -> { openPanelPasscodeEditor(); host.selectTone() }
-            7 -> { host.setWebTerminalEnabled(!webTerminalEnabled); host.popTone() }
-            8 -> { openNtfyConfig(); host.selectTone() }
-            9 -> { host.startWifiScan(); openWifiScan(); host.selectTone() }
+            5 -> { openRemotePanel(); host.selectTone() }
+            6 -> { openNtfyConfig(); host.selectTone() }
+            7 -> { host.startWifiScan(); openWifiScan(); host.selectTone() }
+        }
+        Panel.REMOTE_PANEL -> when (remotePanelFocus) {
+            0 -> { back(); host.backTone() }
+            1 -> { host.toggleWebServer(!webServerEnabled); host.popTone() }
+            2 -> { openPanelPasscodeEditor(); host.selectTone() }
+            3 -> { host.setCaptureMicEnabled(!captureMicEnabled); host.popTone() }
+            4 -> { host.setCapturePlaybackEnabled(!capturePlaybackEnabled); host.popTone() }
+            5 -> { host.setWebTerminalEnabled(!webTerminalEnabled); host.popTone() }
         }
         Panel.WIFI_SHARE -> when (wifiShareFocus) {
             0 -> { back(); host.backTone() }
@@ -859,6 +891,7 @@ fun LauncherState.activate(host: LauncherHost) {
         Panel.HERMES_QR -> { /* camera scan auto-completes; activate is no-op */ }
         Panel.HERMES_CONNECTION_EDIT -> host.hermesConnectionEditRowActivate(hermesConnectionEditFocus)
         Panel.OPENCLAW_CHAT -> { host.openClawToggleRecord(); host.popTone() }
+        Panel.OPENCLAW_VOICE -> { /* voice page handles its own controls */ }
         Panel.OPENCLAW_CAMERA -> { /* touch-first capture/ask surface */ }
         Panel.OPENCLAW_SETTINGS -> {
             host.openClawSettingsRowActivate(openClawSettingsFocus)
@@ -891,6 +924,7 @@ fun LauncherState.activate(host: LauncherHost) {
             }
         }
         Panel.HERMES_CHAT -> { /* push-to-talk handled in side-button dispatcher; wheel press is no-op */ }
+        Panel.HERMES_VOICE -> { /* voice page handles its own controls */ }
         Panel.HERMES_CONFIG -> {
             host.hermesConfigRowActivate(hermesConfigFocus)
             host.selectTone()
@@ -955,6 +989,19 @@ fun LauncherState.activate(host: LauncherHost) {
 fun LauncherState.backPressed(host: LauncherHost) {
     if (panel == Panel.BT_SCAN) {
         host.stopBtScan(); back(); host.backTone()
+        return
+    }
+    if (panel == Panel.OPENCLAW_VOICE) {
+        // Leaving voice page: silence everything (mic + TTS) and return to
+        // the regular chat. Disable conversation mode so re-entering the
+        // chat doesn't immediately re-open the mic.
+        host.toggleChatConversationMode(false)
+        back(); host.backTone()
+        return
+    }
+    if (panel == Panel.HERMES_VOICE) {
+        host.toggleHermesConversationMode(false)
+        back(); host.backTone()
         return
     }
     if (panel == Panel.OPENCLAW_CHAT || panel == Panel.OPENCLAW_QR) {

@@ -284,10 +284,11 @@ fun OpenClawCameraPanel(
 
 @Composable
 private fun CameraStatusDot(color: Color) {
+    // Pixel-art status block (hard square) — matches retro idiom.
     Box(
         modifier = Modifier
             .size(10.dp)
-            .background(color, CircleShape),
+            .background(color),
     )
 }
 

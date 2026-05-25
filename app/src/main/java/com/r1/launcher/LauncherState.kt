@@ -20,7 +20,7 @@ import com.r1.launcher.openclaw.SessionEntry
 import com.r1.launcher.transcriber.MeetingIndexEntry
 import com.r1.launcher.transcriber.TranscriberDetailAction
 
-enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, SETTINGS_CREDENTIALS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, PANEL_PASSCODE, NTFY_CONFIG, BT_SCAN, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, HERMES_CHAT, HERMES_CONFIG, HERMES_QR, HERMES_CONNECTION_EDIT, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS, NOTIFICATIONS }
+enum class Panel { HOME, ONBOARDING, APPS, SETTINGS, SETTINGS_DISPLAY, SETTINGS_SOUND, SETTINGS_DEVICE, SETTINGS_ABOUT, SETTINGS_VOICE, SETTINGS_VOICE_TUNING, SETTINGS_VOICE_SUBSCRIPTION, SETTINGS_LANGUAGE, SETTINGS_CREDENTIALS, NETWORK, WIFI_SCAN, WIFI_PASSWORD, WIFI_SHARE, WIFI_SHARE_EDIT, REMOTE_PANEL, PANEL_PASSCODE, NTFY_CONFIG, BT_SCAN, BRIGHTNESS, VOLUME, UI_VOLUME, FACTORY_CONFIRM, OPENCLAW_QR, OPENCLAW_CHAT, OPENCLAW_VOICE, OPENCLAW_CAMERA, OPENCLAW_SETTINGS, OPENCLAW_SESSIONS, MESSAGES, MESSAGES_THREAD, TERMINAL, HERMES_CHAT, HERMES_VOICE, HERMES_CONFIG, HERMES_QR, HERMES_CONNECTION_EDIT, TRANSCRIBER_LIST, TRANSCRIBER_RECORDING, TRANSCRIBER_DETAIL, TRANSCRIBER_SETTINGS, NOTIFICATIONS }
 
 enum class WifiShareEditTarget { SSID, PASSWORD }
 
@@ -169,6 +169,14 @@ class LauncherState {
     var chatInputLevel by mutableIntStateOf(0)
     /** Running speech-to-text transcript while recording. Cleared on stop. */
     var chatPartialText by mutableStateOf("")
+    /** Draft text in the OpenClaw chat input row. Hoisted to state (not panel-
+     *  local) so committed voice transcripts can land here for the user to
+     *  edit/delete before hitting send, instead of auto-sending. */
+    var chatInputText by mutableStateOf("")
+    /** True while OpenClaw TTS playback is in-flight (any chunk). Mirrors
+     *  the private openClawSpeechPlaying flag in the activity so the voice
+     *  page can drive its orb color. */
+    var openClawSpeaking by mutableStateOf(false)
     /** Last QR-decode error to surface in the QR panel. Null = no error shown. */
     var qrError by mutableStateOf<String?>(null)
     /** True between "stop recording" and either transcript-back or error. */
@@ -277,6 +285,18 @@ class LauncherState {
     /** Epoch ms when the current recording started; 0 when idle. Companion ticks
      *  the elapsed counter against this. */
     var mediaRecordingStartedAt by mutableLongStateOf(0L)
+    /** Mirror of [com.r1.launcher.media.MediaCapturePrefs.micEnabled]. When false,
+     *  screen recordings skip the mic input. Defaults to true. */
+    var captureMicEnabled by mutableStateOf(true)
+    /** Mirror of [com.r1.launcher.media.MediaCapturePrefs.playbackEnabled]. When
+     *  false, screen recordings skip the REMOTE_SUBMIX (system audio) input.
+     *  Defaults to false — see [com.r1.launcher.media.MediaCapturePrefs] for
+     *  why enabling this mutes the device speakers on this MTK build. */
+    var capturePlaybackEnabled by mutableStateOf(false)
+
+    // --- remote panel settings (Panel.REMOTE_PANEL) ---
+    /** Row focus inside the remote-panel-settings page. 0=back. */
+    var remotePanelFocus by mutableIntStateOf(0)
 
     // --- terminal panel ---
     /** Current input buffer; submitted on wheel-press, edited via RetroKeyboard. */
@@ -323,6 +343,9 @@ class LauncherState {
     var hermesStreamingText by mutableStateOf("")
     /** Live STT transcript while recording. Cleared on commit. */
     var hermesPartialText by mutableStateOf("")
+    /** Draft text in the Hermes chat input row. Hoisted so committed voice
+     *  transcripts land here for the user to edit before sending. */
+    var hermesInputText by mutableStateOf("")
     /** "idle" | "live" | "streaming" | "error: <msg>". Drives header status dot. */
     var hermesStatus by mutableStateOf("idle")
     var hermesRecording by mutableStateOf(false)
@@ -623,6 +646,11 @@ class LauncherState {
         panel = Panel.PANEL_PASSCODE
     }
 
+    fun openRemotePanel() {
+        remotePanelFocus = 0
+        panel = Panel.REMOTE_PANEL
+    }
+
     fun openBrightness() {
         panel = Panel.BRIGHTNESS
     }
@@ -721,6 +749,13 @@ class LauncherState {
         panel = Panel.HERMES_CHAT
     }
 
+    /** ChatGPT-style fullscreen voice surface for OpenClaw — opens with
+     *  conversation mode pre-armed (activity handles the actual mic open). */
+    fun openOpenClawVoice() { panel = Panel.OPENCLAW_VOICE }
+
+    /** Same as above for Hermes. */
+    fun openHermesVoice() { panel = Panel.HERMES_VOICE }
+
     fun openHermesConfig(fromChat: Boolean = false) {
         hermesConfigFocus = 0
         hermesConfigCameFromChat = fromChat
@@ -793,7 +828,12 @@ class LauncherState {
             Panel.WIFI_PASSWORD -> Panel.WIFI_SCAN
             Panel.WIFI_SHARE -> Panel.NETWORK
             Panel.WIFI_SHARE_EDIT -> Panel.WIFI_SHARE
-            Panel.PANEL_PASSCODE -> Panel.NETWORK
+            // Passcode editor is only reachable from the new REMOTE_PANEL
+            // settings page; back unwinds to it. Older code used to enter the
+            // editor from Settings → Network — that row has since been moved
+            // into REMOTE_PANEL so this back path covers every entry point.
+            Panel.PANEL_PASSCODE -> Panel.REMOTE_PANEL
+            Panel.REMOTE_PANEL -> Panel.NETWORK
             Panel.NTFY_CONFIG -> Panel.NETWORK
             Panel.BT_SCAN -> Panel.NETWORK
             Panel.ONBOARDING -> Panel.ONBOARDING
@@ -801,12 +841,14 @@ class LauncherState {
             Panel.APPS -> Panel.HOME
             Panel.OPENCLAW_QR -> Panel.APPS
             Panel.OPENCLAW_CHAT -> Panel.APPS
+            Panel.OPENCLAW_VOICE -> Panel.OPENCLAW_CHAT
             Panel.OPENCLAW_CAMERA -> Panel.OPENCLAW_CHAT
             Panel.OPENCLAW_SETTINGS, Panel.OPENCLAW_SESSIONS -> Panel.OPENCLAW_CHAT
             Panel.MESSAGES -> Panel.APPS
             Panel.MESSAGES_THREAD -> Panel.MESSAGES
             Panel.TERMINAL -> Panel.APPS
             Panel.HERMES_CHAT -> Panel.APPS
+            Panel.HERMES_VOICE -> Panel.HERMES_CHAT
             Panel.HERMES_CONFIG -> if (hermesConfigCameFromChat) Panel.HERMES_CHAT else Panel.APPS
             Panel.HERMES_QR -> Panel.HERMES_CONFIG
             Panel.HERMES_CONNECTION_EDIT -> Panel.HERMES_CONFIG

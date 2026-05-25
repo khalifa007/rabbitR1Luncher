@@ -12,6 +12,23 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Signature-level: required for AudioRecord with AudioSource.REMOTE_SUBMIX
+         so the screen-recorder can capture system/playback audio alongside the
+         mic. Auto-granted because the app is platform-signed. Without it
+         REMOTE_SUBMIX returns ERROR_INVALID_OPERATION and the audio path falls
+         back to mic-only (still recorded, but no in-app sounds). -->
+    <uses-permission android:name="android.permission.CAPTURE_AUDIO_OUTPUT"
+        tools:ignore="ProtectedPermissions" />
+    <!-- Signature-level: lets a platform-signed app create a MediaProjection
+         without going through the user-consent system dialog. Required to
+         use AudioPlaybackCaptureConfiguration (the modern, non-redirecting
+         playback-capture API) for screen recordings — REMOTE_SUBMIX, the
+         legacy alternative, dims device speakers on this MTK build. -->
+    <uses-permission android:name="android.permission.MANAGE_MEDIA_PROJECTION"
+        tools:ignore="ProtectedPermissions" />
+    <!-- Android 14 requires MediaProjection sessions to be hosted inside a
+         foreground service with this specific foregroundServiceType. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_BASIC_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_SMS" />
@@ -104,6 +121,16 @@
         <service
             android:name=".transcriber.TranscriberRecordingService"
             android:foregroundServiceType="microphone"
+            android:exported="false" />
+
+        <!-- Hosts a MediaProjection so screen recordings can use
+             AudioPlaybackCaptureConfiguration (parallel capture, no speaker
+             dim) instead of the legacy REMOTE_SUBMIX path. Android 14
+             requires media-projection sessions to live inside a foreground
+             service of this type. -->
+        <service
+            android:name=".media.MediaProjectionService"
+            android:foregroundServiceType="mediaProjection"
             android:exported="false" />
     </application>
 </manifest>

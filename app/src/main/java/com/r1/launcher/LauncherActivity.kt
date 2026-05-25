@@ -83,6 +83,19 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         private const val REQ_NOTIF_PERM = 4805
         private const val REQ_AUDIO_PERM_TRANSCRIBER = 4806
         private const val REQ_BT_SCAN_PERM = 4807
+        /** Grace window after TTS starts speaking during which partial-
+         *  transcript-driven cancel is suppressed. Echo of the first TTS
+         *  frames bleeds through the speaker → mic loop before AEC has
+         *  adapted to the reference signal — without this grace ElevenLabs
+         *  transcribes the AI's own opening words as if they were the user
+         *  interrupting and we cancel our own playback. */
+        private const val BARGE_IN_GRACE_MS = 1200L
+        /** Min trimmed partial-transcript length to count as user speech for
+         *  barge-in. Filters single/double-word echo bleed (e.g. AEC residue
+         *  often produces "the", "i'm so", "hello"). Real interruptions tend
+         *  to be 2-3+ words. Tuning floor — raise if false cancels persist,
+         *  lower if real barge-in feels sluggish. */
+        private const val BARGE_IN_MIN_CHARS = 10
     }
 
     override fun attachBaseContext(newBase: Context) {
@@ -198,6 +211,23 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     /** Which sink to deliver the STT transcript to. */
     private enum class VoiceSink { CHAT, TERMINAL, HERMES_CHAT }
     private var voiceSink: VoiceSink? = null
+    /** True when the active capture was triggered by a power-user gesture
+     *  (side button hold / wheel-press toggle): committed transcript auto-
+     *  sends straight to the chat. False = on-screen mic pill: transcript
+     *  lands in the input draft so the user can edit / delete / send. */
+    private var voiceAutoSend: Boolean = false
+    /** Wall-clock ms when the current voice session's mic actually opened.
+     *  Kept for diagnostics; barge-in itself is anchored to TTS-start time
+     *  via [voiceSpeakingStartedAtMs] (see that field for why mic-open isn't
+     *  a useful anchor in conversation mode). */
+    private var voiceMicOpenedAtMs: Long = 0L
+    /** Wall-clock ms when TTS playback most recently started. Barge-in uses
+     *  this as the grace anchor: AEC needs time to adapt to the TTS reference
+     *  signal, and the first ~1s of speaker output bleeds through the mic
+     *  before it locks on. Anchoring grace to mic-open instead (the prior
+     *  approach) failed in conversation mode because the mic re-opens BEFORE
+     *  TTS starts — the grace would expire just as the AI began speaking. */
+    private var voiceSpeakingStartedAtMs: Long = 0L
 
     // --- meetings (transcriber) ---
     private val transcriberPrefs by lazy { TranscriberPrefs.get(this) }
@@ -549,31 +579,37 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 )
             }
         }
-        runCatching {
-            val afd = assets.openFd("moving.mp3")
-            movingSoundId = soundPool?.load(afd, 1) ?: 0
-            afd.close()
-        }
-        runCatching {
-            val afd = assets.openFd("UIClick-Very_short_wooden_UI-Elevenlabs.mp3")
-            uiClickSoundId = soundPool?.load(afd, 1) ?: 0
-            afd.close()
-        }
-        runCatching {
-            val afd = assets.openFd("UIClick-very_subtle_button_p-Elevenlabs.mp3")
-            selectSoundId = soundPool?.load(afd, 1) ?: 0
-            afd.close()
-        }
-        runCatching {
-            val afd = assets.openFd("record.mp3")
-            recordStartSoundId = soundPool?.load(afd, 1) ?: 0
-            afd.close()
-        }
-        runCatching {
-            val afd = assets.openFd("release-record.mp3")
-            recordStopSoundId = soundPool?.load(afd, 1) ?: 0
-            afd.close()
-        }
+        // MTK MP3 decoder init (`c2.mtk.mp3.decoder allocate`) on the UI thread
+        // causes a ~150-frame Choreographer skip on cold start. Push it off-main
+        // — the IDs are only read by tone helpers, so a missed first-second click
+        // is acceptable.
+        Thread {
+            runCatching {
+                val afd = assets.openFd("moving.mp3")
+                movingSoundId = soundPool?.load(afd, 1) ?: 0
+                afd.close()
+            }
+            runCatching {
+                val afd = assets.openFd("UIClick-Very_short_wooden_UI-Elevenlabs.mp3")
+                uiClickSoundId = soundPool?.load(afd, 1) ?: 0
+                afd.close()
+            }
+            runCatching {
+                val afd = assets.openFd("UIClick-very_subtle_button_p-Elevenlabs.mp3")
+                selectSoundId = soundPool?.load(afd, 1) ?: 0
+                afd.close()
+            }
+            runCatching {
+                val afd = assets.openFd("record.mp3")
+                recordStartSoundId = soundPool?.load(afd, 1) ?: 0
+                afd.close()
+            }
+            runCatching {
+                val afd = assets.openFd("release-record.mp3")
+                recordStopSoundId = soundPool?.load(afd, 1) ?: 0
+                afd.close()
+            }
+        }.start()
 
         // OTA: silent boot check (no toast on "up to date"), wired through carroot
         // for the post-install reboot. The Settings → "check for updates" row
@@ -613,6 +649,11 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         // can read what to type on their phone. Loaded once at start; updated
         // in-place by [panelPasscodeSave].
         state.panelPasscode = notifPrefs.panelPasscode
+        // Screen-recording audio toggles — mirror prefs into state so the
+        // Remote Panel settings page renders the right checkmarks on first
+        // open. setCapture*Enabled writes back through here for live updates.
+        state.captureMicEnabled = com.r1.launcher.media.MediaCapturePrefs.micEnabled(this)
+        state.capturePlaybackEnabled = com.r1.launcher.media.MediaCapturePrefs.playbackEnabled(this)
         runCatching {
             val persisted = com.r1.launcher.notifications.NotificationStore.all(this)
             state.notifications.clear()
@@ -666,20 +707,30 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     private fun loadApps() {
-        val main = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        val found = packageManager.queryIntentActivities(main, 0)
-            .filter { it.activityInfo.packageName != packageName && it.activityInfo.packageName != "com.android.settings" }
-            .sortedBy { it.loadLabel(packageManager).toString().lowercase(Locale.getDefault()) }
-        state.apps.clear()
-        found.forEach { state.apps.add(AppEntry.Real(it)) }
-        state.apps.add(AppEntry.Messages)
-        state.apps.add(AppEntry.OpenClaw)
-        state.apps.add(AppEntry.Terminal)
-        state.apps.add(AppEntry.Hermes)
-        state.apps.add(AppEntry.Meetings)
-        state.apps.add(AppEntry.Settings)
-        state.appsLoaded = true
-        if (state.appsFocus >= state.apps.size) state.appsFocus = 0
+        // Off-main: queryIntentActivities + per-app loadLabel binder IPC is
+        // the bulk of onCreate / onResume / package-change work. Snapshot
+        // packageManager into a local so the worker thread doesn't capture
+        // anything that needs the main looper.
+        val pm = packageManager
+        val ownPkg = packageName
+        Thread {
+            val main = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            val found = pm.queryIntentActivities(main, 0)
+                .filter { it.activityInfo.packageName != ownPkg && it.activityInfo.packageName != "com.android.settings" }
+                .sortedBy { it.loadLabel(pm).toString().lowercase(Locale.getDefault()) }
+            ui.post {
+                state.apps.clear()
+                found.forEach { state.apps.add(AppEntry.Real(it)) }
+                state.apps.add(AppEntry.Messages)
+                state.apps.add(AppEntry.OpenClaw)
+                state.apps.add(AppEntry.Terminal)
+                state.apps.add(AppEntry.Hermes)
+                state.apps.add(AppEntry.Meetings)
+                state.apps.add(AppEntry.Settings)
+                state.appsLoaded = true
+                if (state.appsFocus >= state.apps.size) state.appsFocus = 0
+            }
+        }.start()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -1091,7 +1142,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 if (openClawSession !== session) return@post
                 applyOpenClawHistory(msgs)
                 state.chatScrollIndex = 0
+                val willSpeak = state.voiceEnabled && openClawSpeakNextAssistant &&
+                    (state.panel == Panel.OPENCLAW_CHAT || state.panel == Panel.OPENCLAW_VOICE)
                 speakLatestAssistantIfNeeded()
+                // No TTS path = nothing to wait for. Resume the loop now so
+                // conversation mode still works when voice readback is off.
+                if (!willSpeak) maybeResumeChatConversation()
             }
         }
         session.onChatDelta = { runId, text ->
@@ -1193,7 +1249,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         // appearing in chatMessages.
         state.chatStreamingText = ""
 
-        if (newAssistantArrived && state.panel != Panel.OPENCLAW_CHAT) {
+        if (newAssistantArrived && state.panel != Panel.OPENCLAW_CHAT && state.panel != Panel.OPENCLAW_VOICE) {
             notify(
                 source = "openclaw",
                 title = "openclaw",
@@ -1208,7 +1264,8 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         // we now auto-speak whenever the user's enabled it globally and the
         // chat panel is the active surface (avoid speaking while scanning QR
         // or buried in settings).
-        if (!state.voiceEnabled || state.panel != Panel.OPENCLAW_CHAT || !openClawSpeakNextAssistant) return
+        if (!state.voiceEnabled || !openClawSpeakNextAssistant) return
+        if (state.panel != Panel.OPENCLAW_CHAT && state.panel != Panel.OPENCLAW_VOICE) return
         val msg = state.chatMessages.lastOrNull { it.role == "assistant" && it.text.isNotBlank() } ?: return
         val key = "${msg.timestamp}:${msg.text.hashCode()}"
         if (key == openClawLastSpokenKey) return
@@ -1277,7 +1334,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         }
         openClawSpeechIssuedSeq = 0
         openClawSpeechNextToPlay = 1
-        openClawSpeechPlaying = false
+        openClawSpeechPlaying = false; state.openClawSpeaking = false
         openClawStreamingSpokenOffset = 0
         openClawStreamingTtsActive = false
     }
@@ -1380,7 +1437,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             android.util.Log.d("StreamingTts", "skip: active=$openClawStreamingTtsActive arm=$openClawSpeakNextAssistant")
             return
         }
-        if (state.panel != Panel.OPENCLAW_CHAT || !state.voiceEnabled) {
+        if ((state.panel != Panel.OPENCLAW_CHAT && state.panel != Panel.OPENCLAW_VOICE) || !state.voiceEnabled) {
             android.util.Log.d("StreamingTts", "skip: panel=${state.panel} voiceEnabled=${state.voiceEnabled}")
             return
         }
@@ -1416,7 +1473,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
      *  streaming TTS already claimed this run (otherwise the post-stream
      *  one-shot will speak the full message). */
     private fun flushStreamingTtsTail() {
-        if (state.panel != Panel.OPENCLAW_CHAT || !state.voiceEnabled) return
+        if ((state.panel != Panel.OPENCLAW_CHAT && state.panel != Panel.OPENCLAW_VOICE) || !state.voiceEnabled) return
         if (!openClawStreamingTtsActive) return  // streaming never started for this run
         if (voicePrefs.elevenlabsKey.isNullOrBlank()) return
         val full = state.chatStreamingText
@@ -1512,27 +1569,39 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     runCatching { file.delete() }
                     if (openClawSpeechCurrentFile === file) openClawSpeechCurrentFile = null
                     if (turnId != openClawStreamingTtsTurnId) {
-                        openClawSpeechPlaying = false
+                        openClawSpeechPlaying = false; state.openClawSpeaking = false
                         return@setOnCompletionListener
                     }
-                    openClawSpeechPlaying = false
+                    openClawSpeechPlaying = false; state.openClawSpeaking = false
                     drainStreamingSpeechQueue()
+                    // After this chunk plays, if the queue is empty AND the
+                    // assistant isn't still streaming more text, the reply is
+                    // done speaking — kick the conversation loop. If chunks
+                    // are still arriving, drain* will keep playing and we'll
+                    // re-check on each chunk completion.
+                    if (!openClawSpeechPlaying && openClawSpeechSlots.isEmpty() && !state.chatBusy) {
+                        maybeResumeChatConversation()
+                    }
                 }
                 setOnErrorListener { mp, _, _ ->
                     runCatching { mp.release() }
                     if (openClawSpeechPlayer === mp) openClawSpeechPlayer = null
                     runCatching { file.delete() }
                     if (openClawSpeechCurrentFile === file) openClawSpeechCurrentFile = null
-                    openClawSpeechPlaying = false
+                    openClawSpeechPlaying = false; state.openClawSpeaking = false
                     if (turnId == openClawStreamingTtsTurnId) drainStreamingSpeechQueue()
+                    if (!openClawSpeechPlaying && openClawSpeechSlots.isEmpty() && !state.chatBusy) {
+                        maybeResumeChatConversation()
+                    }
                     true
                 }
                 prepare()
                 start()
             }
-            openClawSpeechPlaying = true
+            openClawSpeechPlaying = true; state.openClawSpeaking = true
+            voiceSpeakingStartedAtMs = System.currentTimeMillis()
         }.onFailure {
-            openClawSpeechPlaying = false
+            openClawSpeechPlaying = false; state.openClawSpeaking = false
             runCatching { file.delete() }
             if (openClawSpeechCurrentFile === file) openClawSpeechCurrentFile = null
         }
@@ -1563,11 +1632,13 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 setOnCompletionListener {
                     runCatching { it.release() }
                     if (openClawSpeechPlayer === it) openClawSpeechPlayer = null
+                    maybeResumeChatConversation()
                 }
                 setOnErrorListener { mp, _, _ ->
                     runCatching { mp.release() }
                     if (openClawSpeechPlayer === mp) openClawSpeechPlayer = null
                     toastFail("voice playback failed")
+                    maybeResumeChatConversation()
                     true
                 }
                 prepare()
@@ -2247,6 +2318,13 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     override fun mediaStartVideo(): Result<Long> {
+        // RECORD_AUDIO is needed by AudioCaptureSession (mic leg). Pre-grant
+        // via `adb shell pm grant com.r1.launcher android.permission.RECORD_AUDIO`
+        // — see CLAUDE.md. If missing, ensureAudioPerm fires the runtime
+        // dialog and we fail this attempt; the user retries after granting.
+        if (!ensureAudioPerm()) {
+            return Result.failure(SecurityException("record_audio_not_granted"))
+        }
         val r = com.r1.launcher.media.MediaCaptureManager.startVideoRecording()
         r.onSuccess { startedAt ->
             ui.post {
@@ -2454,7 +2532,10 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             val os: OutputStream = s.getOutputStream()
             os.write((cmd + "\n").toByteArray())
             os.flush()
-            Thread.sleep(500)
+            // shutdownOutput signals EOF so carroot's `nc -L … sh` reads the
+            // command and runs it; the prior Thread.sleep(500) was a half-second
+            // main-thread hold from every UI-thread caller (OTAUpdater, isHotspotUp).
+            s.shutdownOutput()
         }
         true
     } catch (_: Exception) {
@@ -2578,6 +2659,18 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         toast(if (enable) "remote terminal: on (root over LAN)" else "remote terminal: off")
     }
 
+    override fun setCaptureMicEnabled(enable: Boolean) {
+        com.r1.launcher.media.MediaCapturePrefs.setMicEnabled(this, enable)
+        state.captureMicEnabled = enable
+        toast(if (enable) "mic in recordings: on" else "mic in recordings: off")
+    }
+
+    override fun setCapturePlaybackEnabled(enable: Boolean) {
+        com.r1.launcher.media.MediaCapturePrefs.setPlaybackEnabled(this, enable)
+        state.capturePlaybackEnabled = enable
+        toast(if (enable) "system audio in recordings: on" else "system audio in recordings: off")
+    }
+
     /**
      * Open an ElevenLabs Realtime STT session and start streaming mic PCM
      * into it. Single shared client across the three voice-input panels —
@@ -2630,7 +2723,15 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 state.hermesInputLevel = 0
             }
         }
-        playRecordStartTone()
+        // Skip the record-start beep when the voice page is driving the loop
+        // — it plays every iteration, leaks into the just-opened mic, and
+        // ElevenLabs transcribes the beep tail as garbage that trips false
+        // barge-in. The voice page (OPENCLAW_VOICE / HERMES_VOICE) is the
+        // only surface that re-opens the mic in a loop, so panel identity
+        // is the right discriminator.
+        val voicePage = (sink == VoiceSink.CHAT && state.panel == Panel.OPENCLAW_VOICE) ||
+            (sink == VoiceSink.HERMES_CHAT && state.panel == Panel.HERMES_VOICE)
+        if (!voicePage) playRecordStartTone()
         // SCO is a no-op when no BT headset is connected; when one is paired
         // the 200ms delay below gives SCO time to establish before AudioRecord opens.
         audioManager?.startBluetoothSco()
@@ -2639,6 +2740,27 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             apiKey = key,
             onPartial = { text ->
                 ui.post {
+                    // Barge-in defense-in-depth: half-duplex forwarding in
+                    // onPcm should prevent any TTS-echo partials from
+                    // reaching the STT in the first place, but if something
+                    // slips through (e.g. AEC residue picked up after
+                    // forwarding resumed too early), these gates suppress
+                    // false cancels. Gates: char threshold filters short
+                    // echo fragments, speak-start grace gives AEC time to
+                    // adapt to the reference signal, panel check confines
+                    // barge-in to the voice page (the chat panel doesn't
+                    // run the loop and shouldn't react to partials).
+                    val trimmedLen = text.trim().length
+                    val sinceSpeak = System.currentTimeMillis() - voiceSpeakingStartedAtMs
+                    if (trimmedLen >= BARGE_IN_MIN_CHARS && sinceSpeak >= BARGE_IN_GRACE_MS) {
+                        when (sink) {
+                            VoiceSink.CHAT ->
+                                if (state.openClawSpeaking && state.panel == Panel.OPENCLAW_VOICE) cancelOpenClawSpeech()
+                            VoiceSink.HERMES_CHAT ->
+                                if (state.hermesSpeaking && state.panel == Panel.HERMES_VOICE) cancelHermesSpeech()
+                            VoiceSink.TERMINAL -> {}
+                        }
+                    }
                     when (sink) {
                         VoiceSink.CHAT -> state.chatPartialText = text
                         VoiceSink.TERMINAL -> state.terminalPartial = text
@@ -2667,8 +2789,34 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         // user may have released before the delay fired (very-short tap).
         ui.postDelayed({
             if (voiceCapture !== cap) return@postDelayed
+            voiceMicOpenedAtMs = System.currentTimeMillis()
             cap.start(object : com.r1.launcher.voice.StreamingAudioCapture.Callback {
                 override fun onPcm(chunk: ByteArray) {
+                    // Half-duplex forwarding gate: while THIS sink's AI is
+                    // speaking, mic frames are NOT forwarded to ElevenLabs
+                    // STT. Echo through the speaker→mic loop would otherwise
+                    // produce partial transcripts of the AI's own voice that
+                    // look like a real user interruption and cancel our own
+                    // playback (the "AI talks a little bit then stops" bug).
+                    //
+                    // Scoped per-sink so a stale speaking flag from a
+                    // different chat surface (e.g. OpenClaw TTS that didn't
+                    // clean up properly) can't silently mute a fresh Hermes
+                    // session. Mic stays open the whole time so onLevel
+                    // still fires for the orb's mic-level ring — only the
+                    // STT pipe is muted. When TTS finishes, the speaking
+                    // flag flips false and forwarding resumes naturally on
+                    // the next chunk.
+                    //
+                    // Tradeoff: voice-driven barge-in is disabled in this
+                    // mode. To interrupt, use the end-call gesture (back
+                    // pill / end button) which cancels everything.
+                    val speakerActive = when (sink) {
+                        VoiceSink.CHAT -> state.openClawSpeaking
+                        VoiceSink.HERMES_CHAT -> state.hermesSpeaking
+                        VoiceSink.TERMINAL -> false
+                    }
+                    if (speakerActive) return
                     voiceSession?.sendPcm(chunk)
                 }
                 override fun onLevel(levelPct: Int) {
@@ -2734,14 +2882,41 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             null -> {}
         }
         voiceSink = null
+        voiceAutoSend = false
     }
 
     private fun handleCommittedTranscript(sink: VoiceSink, text: String) {
+        // Server-side VAD commit means the capture is done — the user may
+        // not have pressed stop. Close the mic explicitly so the next
+        // startVoiceCapture (resume in conversation mode) isn't blocked by
+        // the `voiceCapture != null` early-return guard.
+        runCatching { voiceCapture?.close() }
+        voiceCapture = null
         val clean = text.trim()
         when (sink) {
             VoiceSink.CHAT -> {
                 state.chatPartialText = ""
-                if (clean.isNotEmpty()) openClawSendText(clean)
+                val onVoicePage = state.panel == Panel.OPENCLAW_VOICE
+                if (clean.isNotEmpty()) {
+                    // Voice page overrides the per-trigger flag: even a
+                    // pill-started capture auto-sends because there's no
+                    // user-driven send step in the hands-free loop.
+                    if (voiceAutoSend || onVoicePage) {
+                        openClawSendText(clean)
+                        // Loop forward to the next user turn. The TTS-
+                        // completion callback also calls this, so both paths
+                        // converge on a fresh mic open.
+                        if (onVoicePage) maybeResumeChatConversation()
+                    } else {
+                        state.chatInputText = if (state.chatInputText.isBlank()) clean
+                            else state.chatInputText.trimEnd() + " " + clean
+                    }
+                } else if (onVoicePage) {
+                    // Silent / unintelligible capture on the voice page —
+                    // don't break the loop; re-open the mic so the user can
+                    // try again.
+                    maybeResumeChatConversation()
+                }
             }
             VoiceSink.TERMINAL -> {
                 state.terminalPartial = ""
@@ -2752,11 +2927,23 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             }
             VoiceSink.HERMES_CHAT -> {
                 state.hermesPartialText = ""
-                if (clean.isNotEmpty()) hermesSendText(clean)
+                val onVoicePage = state.panel == Panel.HERMES_VOICE
+                if (clean.isNotEmpty()) {
+                    if (voiceAutoSend || onVoicePage) {
+                        hermesSendText(clean)
+                        if (onVoicePage) maybeResumeHermesConversation()
+                    } else {
+                        state.hermesInputText = if (state.hermesInputText.isBlank()) clean
+                            else state.hermesInputText.trimEnd() + " " + clean
+                    }
+                } else if (onVoicePage) {
+                    maybeResumeHermesConversation()
+                }
             }
         }
         voiceSession = null
         voiceSink = null
+        voiceAutoSend = false
     }
 
     override fun terminalRecordStart() = startVoiceCapture(VoiceSink.TERMINAL)
@@ -2837,19 +3024,70 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     override fun openClawToggleRecord() {
-        if (state.chatRecording) openClawRecordStop() else openClawRecordStart()
+        if (state.chatRecording) openClawRecordStop() else openClawRecordStartAutoSend()
     }
 
     override fun openClawRecordStart() {
+        openClawRecordStartImpl(autoSend = false)
+    }
+
+    /** Power-user entry: side button hold / wheel-press toggle — committed
+     *  transcript bypasses the input draft and sends straight to chat. */
+    private fun openClawRecordStartAutoSend() {
+        openClawRecordStartImpl(autoSend = true)
+    }
+
+    private fun openClawRecordStartImpl(autoSend: Boolean) {
         // Don't even open the mic if there's no live OpenClaw session — the
         // committed transcript would have nowhere to send. (Original Whisper
         // flow checked the same thing.)
         openClawSession ?: return
         if (state.chatStatus.startsWith("error") || state.chatStatus == "idle") return
+        voiceAutoSend = autoSend
         startVoiceCapture(VoiceSink.CHAT)
     }
 
     override fun openClawRecordStop() = stopVoiceCapture()
+
+    /** Called by LauncherRoot when the user enters/exits the OpenClaw voice
+     *  page. enable=true kicks the hands-free loop (mic open → VAD commit →
+     *  send → TTS → mic re-open). enable=false hard-cancels everything so
+     *  no in-flight transcript is sent after the user backs out. */
+    override fun toggleChatConversationMode(enable: Boolean) {
+        if (enable) {
+            openClawRecordStartAutoSend()
+        } else {
+            // Hard-cancel — stopVoiceCapture uses finish() and waits for
+            // committed_transcript, which is the wrong shape for "end now".
+            cancelVoiceCapture()
+            cancelOpenClawSpeech()
+        }
+    }
+
+    /** Called from the chat TTS completion listeners and from handleCommitted-
+     *  Transcript. Re-opens the mic for the next user turn — but only when:
+     *   - the voice page is still active
+     *   - no capture is in flight already (idempotent)
+     *   - the AI's turn is FINISHED (not still processing, not still speaking)
+     *
+     *  The busy/speaking gate is essential. Without it, the loop reopens the
+     *  mic ~250 ms after the user's commit lands, well before the AI has
+     *  even started responding. ElevenLabs' VAD then chews through several
+     *  empty 1.5 s silence-windows in a row, each closing the session and
+     *  forcing a fresh open, racing the AI's actual reply. By the time TTS
+     *  is ready to play, the loop has churned past it and may have armed/
+     *  cancelled TTS several times. */
+    private fun maybeResumeChatConversation() {
+        if (state.panel != Panel.OPENCLAW_VOICE) return
+        if (voiceCapture != null) return
+        if (state.chatBusy || state.openClawSpeaking) return
+        ui.postDelayed({
+            if (state.panel != Panel.OPENCLAW_VOICE) return@postDelayed
+            if (voiceCapture != null) return@postDelayed
+            if (state.chatBusy || state.openClawSpeaking) return@postDelayed
+            openClawRecordStartAutoSend()
+        }, 250L)
+    }
 
     override fun openClawSendText(text: String) {
         val session = openClawSession ?: return
@@ -2866,7 +3104,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             // Arm the auto-speak gate when the user has voice enabled and is
             // sitting in the chat panel; streaming TTS will start mid-reply
             // as sentence boundaries arrive in chatStreamingText.
-            if (state.voiceEnabled && state.panel == Panel.OPENCLAW_CHAT) {
+            if (state.voiceEnabled && (state.panel == Panel.OPENCLAW_CHAT || state.panel == Panel.OPENCLAW_VOICE)) {
                 // cancelOpenClawSpeech() bumps turnId, drops slots, stops any
                 // prior playback, and resets spokenOffset — so a fresh turn
                 // starts clean even if the prior reply was still speaking.
@@ -2939,7 +3177,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         // Arm TTS auto-readback so the next committed assistant message reads aloud
         // (matches the OpenClaw chat pattern). Cancel any prior playback so back-to-back
         // turns don't stack audio.
-        if (state.voiceEnabled && state.panel == Panel.HERMES_CHAT) {
+        if (state.voiceEnabled && (state.panel == Panel.HERMES_CHAT || state.panel == Panel.HERMES_VOICE)) {
             cancelHermesSpeech()
             hermesSpeakNextAssistant = true
         }
@@ -2962,10 +3200,22 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     // existing `running` entry in place so the timeline shows
                     // one row per tool call. Events without an id fall back
                     // to append-only (rare; only seen on malformed payloads).
+                    //
+                    // The gateway only includes `label` + `emoji` on the
+                    // `running` frame; the `completed` frame carries just
+                    // {tool, toolCallId, status}. Carry both forward from the
+                    // prior entry so the UI keeps the command text visible
+                    // after the call finishes.
                     val list = state.hermesToolEvents
                     val idx = if (ev.toolCallId.isNotEmpty())
                         list.indexOfFirst { it.toolCallId == ev.toolCallId } else -1
-                    if (idx >= 0) list[idx] = ev else list.add(ev)
+                    if (idx >= 0) {
+                        val prev = list[idx]
+                        list[idx] = ev.copy(
+                            label = ev.label.ifBlank { prev.label },
+                            emoji = ev.emoji.ifBlank { prev.emoji },
+                        )
+                    } else list.add(ev)
                 }
             },
             onDone = { full ->
@@ -2999,8 +3249,14 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                         // reply was too short to hit a sentence boundary
                         // before onDone — flushHermesStreamingTtsTail is a
                         // no-op when streaming wasn't active).
+                        val willSpeak = state.voiceEnabled && hermesSpeakNextAssistant &&
+                            (state.panel == Panel.HERMES_CHAT || state.panel == Panel.HERMES_VOICE)
                         if (!streamingHandledTts) speakLatestHermesAssistantIfNeeded()
-                        if (state.panel != Panel.HERMES_CHAT) {
+                        // No TTS path = no completion listener to resume the
+                        // conversation loop. Trigger it now so hands-free
+                        // works even with voice readback disabled.
+                        if (!willSpeak) maybeResumeHermesConversation()
+                        if (state.panel != Panel.HERMES_CHAT && state.panel != Panel.HERMES_VOICE) {
                             notify(
                                 source = "hermes",
                                 title = "hermes",
@@ -3030,6 +3286,10 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     trimHermesMessages(history)
                     com.r1.launcher.hermes.HermesHistoryStore.save(this, capturedId, history.toList())
                     state.hermesScrollIndex = 0
+                    // Error path — TTS won't fire so its completion listener
+                    // won't trigger the loop. Resume manually so the user
+                    // isn't stuck on a frozen voice page.
+                    maybeResumeHermesConversation()
                 }
             },
         )
@@ -3041,14 +3301,49 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     override fun hermesRecordStart() {
+        hermesRecordStartImpl(autoSend = false)
+    }
+
+    /** Power-user entry: side button hold — committed transcript bypasses the
+     *  input draft and sends straight to Hermes. */
+    private fun hermesRecordStartAutoSend() {
+        hermesRecordStartImpl(autoSend = true)
+    }
+
+    private fun hermesRecordStartImpl(autoSend: Boolean) {
         if (!hermesPrefs.hasConfig()) {
             toastFail("hermes: configure server url first")
             return
         }
+        voiceAutoSend = autoSend
         startVoiceCapture(VoiceSink.HERMES_CHAT)
     }
 
     override fun hermesRecordStop() = stopVoiceCapture()
+
+    /** Hermes mirror of toggleChatConversationMode — see that doc. */
+    override fun toggleHermesConversationMode(enable: Boolean) {
+        if (enable) {
+            hermesRecordStartAutoSend()
+        } else {
+            cancelVoiceCapture()
+            cancelHermesSpeech()
+        }
+    }
+
+    /** Hermes mirror of maybeResumeChatConversation — see that doc for why
+     *  busy/speaking gates are required. */
+    private fun maybeResumeHermesConversation() {
+        if (state.panel != Panel.HERMES_VOICE) return
+        if (voiceCapture != null) return
+        if (state.hermesBusy || state.hermesSpeaking) return
+        ui.postDelayed({
+            if (state.panel != Panel.HERMES_VOICE) return@postDelayed
+            if (voiceCapture != null) return@postDelayed
+            if (state.hermesBusy || state.hermesSpeaking) return@postDelayed
+            hermesRecordStartAutoSend()
+        }, 250L)
+    }
 
     override fun hermesScrollUp() {
         state.hermesScrollIndex++
@@ -3302,7 +3597,8 @@ override fun hermesPasteServerUrlFromClipboard() {
     }
 
     private fun speakLatestHermesAssistantIfNeeded() {
-        if (!state.voiceEnabled || state.panel != Panel.HERMES_CHAT || !hermesSpeakNextAssistant) return
+        if (!state.voiceEnabled || !hermesSpeakNextAssistant) return
+        if (state.panel != Panel.HERMES_CHAT && state.panel != Panel.HERMES_VOICE) return
         val msg = state.hermesActiveHistory()?.lastOrNull { it.role == "assistant" && it.text.isNotBlank() } ?: return
         val key = "${msg.timestamp}:${msg.text.hashCode()}"
         if (key == hermesLastSpokenKey) return
@@ -3342,7 +3638,7 @@ override fun hermesPasteServerUrlFromClipboard() {
      *  while the SSE stream is still mid-flight. */
     private fun maybeEmitHermesStreamingTtsChunk() {
         if (!hermesStreamingTtsActive && !hermesSpeakNextAssistant) return
-        if (state.panel != Panel.HERMES_CHAT || !state.voiceEnabled) return
+        if ((state.panel != Panel.HERMES_CHAT && state.panel != Panel.HERMES_VOICE) || !state.voiceEnabled) return
         if (voicePrefs.elevenlabsKey.isNullOrBlank()) return
         val full = state.hermesStreamingText
         if (full.length <= hermesStreamingSpokenOffset) return
@@ -3365,7 +3661,7 @@ override fun hermesPasteServerUrlFromClipboard() {
      *  text directly so the flush still works after onDone resets
      *  [state.hermesStreamingText] = "". */
     private fun flushHermesStreamingTtsTail(fullText: String) {
-        if (state.panel != Panel.HERMES_CHAT || !state.voiceEnabled) return
+        if ((state.panel != Panel.HERMES_CHAT && state.panel != Panel.HERMES_VOICE) || !state.voiceEnabled) return
         if (!hermesStreamingTtsActive) return
         if (voicePrefs.elevenlabsKey.isNullOrBlank()) return
         if (fullText.length <= hermesStreamingSpokenOffset) return
@@ -3458,6 +3754,7 @@ override fun hermesPasteServerUrlFromClipboard() {
                     drainHermesStreamingSpeechQueue()
                     if (!hermesSpeechPlaying && hermesSpeechSlots.isEmpty()) {
                         state.hermesSpeaking = false
+                        if (!state.hermesBusy) maybeResumeHermesConversation()
                     }
                 }
                 setOnErrorListener { mp, _, _ ->
@@ -3469,6 +3766,7 @@ override fun hermesPasteServerUrlFromClipboard() {
                     if (turnId == hermesStreamingTtsTurnId) drainHermesStreamingSpeechQueue()
                     if (!hermesSpeechPlaying && hermesSpeechSlots.isEmpty()) {
                         state.hermesSpeaking = false
+                        if (!state.hermesBusy) maybeResumeHermesConversation()
                     }
                     true
                 }
@@ -3477,6 +3775,7 @@ override fun hermesPasteServerUrlFromClipboard() {
             }
             hermesSpeechPlaying = true
             state.hermesSpeaking = true
+            voiceSpeakingStartedAtMs = System.currentTimeMillis()
         }.onFailure {
             hermesSpeechPlaying = false
             runCatching { file.delete() }
@@ -3506,6 +3805,7 @@ override fun hermesPasteServerUrlFromClipboard() {
                     hermesSpeechCurrentFile = null
                 }
                 state.hermesSpeaking = false
+                maybeResumeHermesConversation()
             }
             mp.setOnErrorListener { player, _, _ ->
                 runCatching { player.release() }
@@ -3518,6 +3818,7 @@ override fun hermesPasteServerUrlFromClipboard() {
             hermesSpeechCurrentFile = file
             mp.start()
             state.hermesSpeaking = true
+            voiceSpeakingStartedAtMs = System.currentTimeMillis()
         }.onFailure {
             runCatching { mp.release() }
             hermesSpeechPlayer = null
@@ -4448,7 +4749,7 @@ override fun hermesPasteServerUrlFromClipboard() {
             KeyEvent.ACTION_DOWN -> {
                 if (event.repeatCount == 0) {
                     openClawPttKeyCode = event.keyCode
-                    openClawRecordStart()
+                    openClawRecordStartAutoSend()
                 }
                 return true
             }
@@ -4471,7 +4772,7 @@ override fun hermesPasteServerUrlFromClipboard() {
             KeyEvent.ACTION_DOWN -> {
                 if (event.repeatCount == 0) {
                     hermesPttKeyCode = event.keyCode
-                    hermesRecordStart()
+                    hermesRecordStartAutoSend()
                 }
                 return true
             }

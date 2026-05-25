@@ -266,16 +266,12 @@ private fun HeaderBackPill(
     modifier: Modifier = Modifier,
 ) {
     val type = LocalR1Type.current
+    // Borderless back pill — relies on themed text against the topbar gradient.
+    // Focus state still flips to a solid orange tile so wheel navigation reads.
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
-            .clip(RoundedCornerShape(6.dp))
             .background(if (focused) FOCUS_HIGHLIGHT else Color.Transparent)
-            .border(
-                width = if (focused) 0.dp else 1.dp,
-                color = if (focused) Color.Transparent else themeColor.copy(alpha = 0.7f),
-                shape = RoundedCornerShape(6.dp),
-            )
             .clickable { onClick() }
             .padding(horizontal = 8.dp, vertical = 2.dp),
     ) {
@@ -293,9 +289,9 @@ private fun HeaderBackPill(
 private fun HeaderIconButton(iconRes: Int, focused: Boolean, themeColor: Color, onClick: () -> Unit) {
     val bg = if (focused) FOCUS_HIGHLIGHT else Color.Transparent
     val tint = if (focused) Color.Black else themeColor
+    // Hard-cornered focus highlight to match the rest of the pixel idiom.
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
             .background(bg)
             .clickable { onClick() }
             .padding(horizontal = 8.dp, vertical = 4.dp)
@@ -316,9 +312,9 @@ private fun HeaderTextButton(label: String, focused: Boolean, themeColor: Color,
     val type = LocalR1Type.current
     val bg = if (focused) FOCUS_HIGHLIGHT else Color.Transparent
     val color = if (focused) Color.Black else themeColor
+    // Hard-cornered focus highlight.
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
             .background(bg)
             .clickable { onClick() }
             .padding(horizontal = 8.dp, vertical = 4.dp)
@@ -336,9 +332,9 @@ private fun HeaderTextButton(label: String, focused: Boolean, themeColor: Color,
 }
 
 /**
- * Section divider inside a settings list. Uppercase 12sp themed label with the
- * same indent/padding as the surrounding rows. Non-focusable; used to group
- * adjacent [SettingsRow]s by purpose.
+ * Section divider inside a settings list. Uppercase themed label with the same
+ * indent as the surrounding rows. Non-focusable; used to group adjacent
+ * [SettingsRow]s by purpose.
  */
 @Composable
 fun SectionHeader(
@@ -350,12 +346,12 @@ fun SectionHeader(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(top = 14.dp, bottom = 2.dp, start = 12.dp, end = 12.dp),
+            .padding(top = 4.dp, bottom = 0.dp, start = 12.dp, end = 12.dp),
     ) {
         Text(
             text = label.uppercase(),
             color = themeColor,
-            fontSize = 12.sp,
+            fontSize = 18.sp,
             fontFamily = type.appCard.fontFamily,
             fontWeight = FontWeight.Bold,
         )

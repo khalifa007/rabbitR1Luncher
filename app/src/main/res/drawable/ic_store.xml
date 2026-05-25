@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Pixel-art shopping bag with handles. tint="@color/fg" preserved.
+  12x12 logical grid, each pixel = 2x2 viewport units.
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
@@ -7,5 +11,11 @@
     android:tint="@color/fg">
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M7,4C6.45,4 6,4.45 6,5V7H4.5C3.67,7 3.05,7.67 3.18,8.48L4.67,19.15C4.8,20.19 5.67,21 6.74,21H17.26C18.33,21 19.2,20.19 19.33,19.15L20.82,8.48C20.95,7.67 20.33,7 19.5,7H18V5C18,4.45 17.55,4 17,4H7M8,6H16V7H8V6M8,10C8.55,10 9,10.45 9,11C9,13.06 10.66,14 12,14C13.34,14 15,13.06 15,11C15,10.45 15.45,10 16,10C16.55,10 17,10.45 17,11C17,14.02 14.5,16 12,16C9.5,16 7,14.02 7,11C7,10.45 7.45,10 8,10Z" />
+        android:pathData="M6,0 h4 v2 h-4 z
+                          M14,0 h4 v2 h-4 z
+                          M4,2 h6 v2 h-6 z
+                          M14,2 h6 v2 h-6 z
+                          M4,4 h2 v4 h-2 z
+                          M18,4 h2 v4 h-2 z
+                          M2,8 h20 v14 h-20 z" />
 </vector>

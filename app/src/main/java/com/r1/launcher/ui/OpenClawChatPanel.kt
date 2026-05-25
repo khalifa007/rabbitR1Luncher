@@ -48,9 +48,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.r1.launcher.LauncherState
@@ -83,6 +86,9 @@ fun OpenClawChatPanel(
     onCompactContext: () -> Unit = {},
     onClearContext: () -> Unit = {},
     getClipboardText: () -> String = { "" },
+    onMicStart: () -> Unit = {},
+    onMicStop: () -> Unit = {},
+    onOpenVoice: () -> Unit = {},
 ) {
     AnimatedVisibility(
         visible = state.panel == Panel.OPENCLAW_CHAT,
@@ -94,7 +100,6 @@ fun OpenClawChatPanel(
         val colors = LocalR1Colors.current
         val type = LocalR1Type.current
         var menuOpen by remember { mutableStateOf(false) }
-        var inputText by remember { mutableStateOf("") }
         var showKeyboard by remember { mutableStateOf(false) }
         var showPaste by remember { mutableStateOf(false) }
         var pasteText by remember { mutableStateOf("") }
@@ -207,7 +212,7 @@ fun OpenClawChatPanel(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
                             .clip(RoundedCornerShape(12.dp))
                             .border(2.dp, Color(0xFFFF4500), RoundedCornerShape(12.dp))
                             .background(Color.Black)
@@ -218,28 +223,35 @@ fun OpenClawChatPanel(
                                     showPaste = true
                                 },
                             )
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                            .padding(start = 12.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         val openClawHint = stringResource(R.string.openclaw_input_hint)
                         Text(
-                            text = if (inputText.isEmpty()) openClawHint else inputText + if (showKeyboard) "_" else "",
+                            text = if (state.chatInputText.isEmpty()) openClawHint else state.chatInputText + if (showKeyboard) "_" else "",
                             style = type.appCard,
-                            color = if (inputText.isEmpty()) Color.Gray else Color.White,
+                            color = if (state.chatInputText.isEmpty()) Color.Gray else Color.White,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
                         )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = stringResource(R.string.common_send),
-                            style = type.appCard,
-                            color = Color(0xFFFF4500),
-                            modifier = Modifier.clickable {
-                                if (inputText.isNotBlank()) {
-                                    onSend(inputText)
-                                    inputText = ""
+                        Spacer(Modifier.width(6.dp))
+                        VoiceLaunchPill(
+                            themeColor = Color(0xFFFF4500),
+                            onClick = onOpenVoice,
+                            size = 28.dp,
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        SendIconButton(
+                            tint = Color(0xFFFF4500),
+                            enabled = state.chatInputText.isNotBlank(),
+                            onClick = {
+                                if (state.chatInputText.isNotBlank()) {
+                                    onSend(state.chatInputText)
+                                    state.chatInputText = ""
                                     showKeyboard = false
                                 }
-                            }
+                            },
                         )
                     }
                     
@@ -249,8 +261,8 @@ fun OpenClawChatPanel(
                         exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
                     ) {
                         RetroKeyboard(
-                            onKeyPress = { char -> inputText += char },
-                            onBackspace = { if (inputText.isNotEmpty()) inputText = inputText.dropLast(1) },
+                            onKeyPress = { char -> state.chatInputText += char },
+                            onBackspace = { if (state.chatInputText.isNotEmpty()) state.chatInputText = state.chatInputText.dropLast(1) },
                             onDismiss = { showKeyboard = false }
                         )
                     }
@@ -318,11 +330,14 @@ fun OpenClawChatPanel(
                 themeColor = Color(0xFFFF4500),
                 clipboardText = pasteText,
                 onPaste = { text ->
-                    inputText = if (inputText.isBlank()) text
-                        else inputText.trimEnd() + " " + text
+                    state.chatInputText = if (state.chatInputText.isBlank()) text
+                        else state.chatInputText.trimEnd() + " " + text
                     showPaste = false
                 },
                 onDismiss = { showPaste = false },
+                onClear = if (state.chatInputText.isNotEmpty()) {
+                    { state.chatInputText = ""; showPaste = false }
+                } else null,
             )
         }
     }
@@ -336,10 +351,12 @@ private fun StatusDot(status: String) {
         status.startsWith("error") -> Color(0xFFE53935)
         else -> Color(0xFF777777)
     }
+    // Pixel-art status block: hard square (no CircleShape) to match the
+    // retro idiom. Green=live, amber=connecting, red=error.
     Box(
         modifier = Modifier
             .size(8.dp)
-            .background(color, CircleShape),
+            .background(color),
     )
 }
 

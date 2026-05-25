@@ -18,69 +18,82 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.r1.launcher.LauncherState
 import com.r1.launcher.Panel
 import com.r1.launcher.R
 
+/**
+ * Dedicated settings page for the embedded HTTP/WS web panel and its related
+ * capture behavior. Sits one level below NETWORK so the parent stays focused
+ * on radios and the user finds everything web-companion in one place.
+ *
+ * Row layout (focus indices):
+ *   0  header (back)
+ *   1  server on/off          — toggleWebServer
+ *   2  passcode: XXXX         — opens PANEL_PASSCODE numeric keypad
+ *   3  include mic            — setCaptureMicEnabled
+ *   4  include playback audio — setCapturePlaybackEnabled
+ *   5  remote terminal        — setWebTerminalEnabled
+ *
+ * Don't reorder without bumping the focus map in [com.r1.launcher.LauncherNav]
+ * (REMOTE_PANEL activate) and [com.r1.launcher.ui.LauncherRoot] (the
+ * RemotePanelSettings onRowClick dispatcher) together — they must stay in sync.
+ */
 @Composable
-fun NetworkPanel(
+fun RemotePanelSettings(
     state: LauncherState,
     onRowClick: (Int) -> Unit,
 ) {
     AnimatedVisibility(
-        visible = state.panel == Panel.NETWORK,
+        visible = state.panel == Panel.REMOTE_PANEL,
         enter = fadeIn(tween(ANIM_OPEN_MS)) +
             slideInVertically(tween(ANIM_OPEN_MS)) { it },
         exit = fadeOut(tween(ANIM_CLOSE_MS)) +
             slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
     ) {
         val items = listOf(
-            // Placeholder for header — item idx 0 is rendered as the page
-            // header below, not a row. Keep it in the list so focus indices
-            // stay stable with existing nav code (0=back, 1..=rows).
             SettingsItem.Standard("__header__"),
-            SettingsItem.Toggle(stringResource(R.string.network_row_wifi), state.wifiEnabled, subtitle = if (state.wifiEnabled) state.wifiConnectedSsid else ""),
-            SettingsItem.Toggle(stringResource(R.string.network_row_cellular), state.cellularOn),
             SettingsItem.Toggle(
-                stringResource(R.string.network_row_bluetooth),
-                state.btOn,
-                subtitle = if (state.btOn) "tap to manage devices" else "",
-            ),
-            SettingsItem.Toggle(
-                stringResource(R.string.network_row_share),
-                state.wifiShareEnabled,
-                subtitle = if (state.wifiShareEnabled) stringResource(R.string.network_share_clients, state.wifiShareConnectedClients.size) else "",
-            ),
-            // Remote panel + passcode + remote terminal moved into a dedicated
-            // REMOTE_PANEL settings page in v3.30 — this row is now just a
-            // deep link. Subtitle previews the live URL so users can read it
-            // without descending into the page.
-            SettingsItem.Standard(
-                stringResource(R.string.network_row_remote),
+                "server",
+                state.webServerEnabled,
                 subtitle = if (state.webServerEnabled) {
-                    "on  http://${state.webServerIp.ifEmpty { "?" }}:${state.webServerPort}"
+                    "http://${state.webServerIp.ifEmpty { "?" }}:${state.webServerPort}"
                 } else "off",
             ),
-            // ntfy.sh — outbound long-poll subscriber. Subtitle shows live
-            // status when on, the topic when off but configured.
+            SettingsItem.Standard(
+                "passcode: ${state.panelPasscode}",
+                subtitle = "tap to change",
+            ),
             SettingsItem.Toggle(
-                "ntfy.sh",
-                state.ntfySubscriberEnabled,
+                "record mic",
+                state.captureMicEnabled,
+                subtitle = if (state.captureMicEnabled)
+                    "your voice in screen recordings"
+                else "skip mic — silent for the user",
+            ),
+            SettingsItem.Toggle(
+                "record system audio",
+                state.capturePlaybackEnabled,
+                subtitle = if (state.capturePlaybackEnabled)
+                    "WARNING: mutes device speakers while recording"
+                else "off — speakers work normally",
+            ),
+            SettingsItem.Toggle(
+                "remote terminal",
+                state.webTerminalEnabled,
                 subtitle = when {
-                    state.ntfySubscriberEnabled -> state.ntfyStatus
-                    state.ntfyTopic.isNotBlank() -> "topic …${state.ntfyTopic.takeLast(10)}"
-                    else -> "set a topic"
+                    !state.webTerminalEnabled -> "off"
+                    !state.webServerEnabled -> "needs server on"
+                    else -> "ROOT SHELL OVER LAN"
                 },
             ),
-            SettingsItem.Standard(stringResource(R.string.network_row_scan)),
         )
 
         val listState = rememberLazyListState()
-        LaunchedEffect(state.networkFocus) {
+        LaunchedEffect(state.remotePanelFocus) {
             listState.animateScrollToItem(
-                state.networkFocus.coerceIn(0, items.lastIndex)
+                state.remotePanelFocus.coerceIn(0, items.lastIndex)
             )
         }
 
@@ -100,15 +113,15 @@ fun NetworkPanel(
                     if (idx == 0) {
                         AppPageHeader(
                             titleIconRes = R.drawable.ic_network,
-                            title = "network",
-                            backFocused = state.networkFocus == 0,
+                            title = "remote panel",
+                            backFocused = state.remotePanelFocus == 0,
                             onBack = { onRowClick(0) },
                             themeColor = AppThemes.Settings,
                         )
                     } else {
                         SettingsRow(
                             label = item.label,
-                            focused = idx == state.networkFocus,
+                            focused = idx == state.remotePanelFocus,
                             toggleChecked = (item as? SettingsItem.Toggle)?.checked,
                             subtitle = (item as? SettingsItem.Toggle)?.subtitle
                                 ?: (item as? SettingsItem.Standard)?.subtitle

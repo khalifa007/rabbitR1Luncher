@@ -269,11 +269,12 @@ fun SettingsVoicePanel(
 
 @Composable
 private fun StatusDot(color: Color) {
+    // Pixel-art status block (hard square) — matches retro idiom.
     Box(
         modifier = Modifier
             .height(8.dp)
             .width(8.dp)
-            .background(color, CircleShape),
+            .background(color),
     )
 }
 

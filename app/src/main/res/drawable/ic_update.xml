@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Pixel-art update icon: downward arrow into tray base.
+  12x12 logical grid, each pixel = 2x2 viewport units.
+  Orange tint preserved.
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="16dp"
     android:height="16dp"
@@ -7,5 +12,10 @@
     android:tint="#FFFF6A00">
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M12,4V1L8,5l4,4V6c3.31,0 6,2.69 6,6c0,1.01 -0.25,1.97 -0.7,2.8l1.46,1.46C19.54,15.03 20,13.57 20,12C20,7.58 16.42,4 12,4zM12,18c-3.31,0 -6,-2.69 -6,-6c0,-1.01 0.25,-1.97 0.7,-2.8L5.24,7.74C4.46,8.97 4,10.43 4,12c0,4.42 3.58,8 8,8v3l4,-4l-4,-4V18z" />
+        android:pathData="M10,0 h4 v10 h-4 z
+                          M4,10 h16 v2 h-16 z
+                          M6,12 h12 v2 h-12 z
+                          M8,14 h8 v2 h-8 z
+                          M10,16 h4 v2 h-4 z
+                          M2,20 h20 v4 h-20 z" />
 </vector>

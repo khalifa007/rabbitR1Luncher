@@ -1,16 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Pixel-art 3x3 dots grid (apps drawer / "more" affordance). Each dot is
+  a hard 4x4 square in the 20-unit viewport (was a 1.4 radius circle).
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="20dp"
     android:height="20dp"
     android:viewportWidth="20"
     android:viewportHeight="20">
-    <path android:fillColor="#FFFFFFFF" android:pathData="M3 3m-1.4 0a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0 -2.8 0" />
-    <path android:fillColor="#FFFFFFFF" android:pathData="M10 3m-1.4 0a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0 -2.8 0" />
-    <path android:fillColor="#FFFFFFFF" android:pathData="M17 3m-1.4 0a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0 -2.8 0" />
-    <path android:fillColor="#FFFFFFFF" android:pathData="M3 10m-1.4 0a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0 -2.8 0" />
-    <path android:fillColor="#FFFFFFFF" android:pathData="M10 10m-1.4 0a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0 -2.8 0" />
-    <path android:fillColor="#FFFFFFFF" android:pathData="M17 10m-1.4 0a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0 -2.8 0" />
-    <path android:fillColor="#FFFFFFFF" android:pathData="M3 17m-1.4 0a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0 -2.8 0" />
-    <path android:fillColor="#FFFFFFFF" android:pathData="M10 17m-1.4 0a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0 -2.8 0" />
-    <path android:fillColor="#FFFFFFFF" android:pathData="M17 17m-1.4 0a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0 -2.8 0" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M1,1 h4 v4 h-4 z
+                          M8,1 h4 v4 h-4 z
+                          M15,1 h4 v4 h-4 z
+                          M1,8 h4 v4 h-4 z
+                          M8,8 h4 v4 h-4 z
+                          M15,8 h4 v4 h-4 z
+                          M1,15 h4 v4 h-4 z
+                          M8,15 h4 v4 h-4 z
+                          M15,15 h4 v4 h-4 z" />
 </vector>

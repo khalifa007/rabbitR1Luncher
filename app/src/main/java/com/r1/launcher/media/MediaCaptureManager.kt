@@ -26,10 +26,12 @@ object MediaCaptureManager {
     const val VIDEO_BIT_RATE = 4_000_000
     const val LOW_STORAGE_FREE_BYTES = 100L * 1024 * 1024
 
+    private lateinit var appCtx: Context
     private lateinit var rootDir: File
     private lateinit var imagesDir: File
     private lateinit var videosDir: File
     private lateinit var thumbsDir: File
+    private lateinit var tmpAudioDir: File
 
     private var initialized = false
     private val fnameDateFmt = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
@@ -39,14 +41,32 @@ object MediaCaptureManager {
     @Volatile private var recordingPid: Int = -1
     @Volatile private var recordingStartedAt: Long = 0L
     @Volatile private var recordingTmpPath: String = ""
+    @Volatile private var recordingAudioPath: String = ""
+    @Volatile private var audioSession: AudioCaptureSession? = null
+    /** True if the current recording owns a [MediaProjectionGate] acquire
+     *  that must be released on stop. False when playback was off or the
+     *  acquire failed (and we fell back to REMOTE_SUBMIX, which doesn't
+     *  need release). */
+    @Volatile private var recordingHasProjection: Boolean = false
 
     @Synchronized
     fun init(ctx: Context) {
         if (initialized) return
+        appCtx = ctx.applicationContext
+        MediaCapturePrefs.migrate(appCtx)
         rootDir = File(ctx.filesDir, "captures")
         imagesDir = File(rootDir, "images").apply { mkdirs() }
         videosDir = File(rootDir, "videos").apply { mkdirs() }
         thumbsDir = File(videosDir, ".thumbs").apply { mkdirs() }
+        // Audio MP4s (and the staged silent video MP4 during stop) are
+        // written by code running inside this process — must live in an
+        // app-writable dir, not /data/local/tmp/ (shell-owned, not writable
+        // as u0_a*). Sweep only files matching our r1cap-* naming so any
+        // future neighbor file in this dir survives.
+        tmpAudioDir = File(rootDir, ".tmp-audio").apply {
+            mkdirs()
+            listFiles { f -> f.name.startsWith("r1cap-") }?.forEach { it.delete() }
+        }
         runCatching {
             sendCarroot("rm -f /data/local/tmp/r1cap-*")
         }
@@ -213,6 +233,13 @@ object MediaCaptureManager {
 
     class LowStorageException(val freeBytes: Long) : RuntimeException("low_storage")
 
+    // @Synchronized closes a TOCTOU race on `recordingPid` — both this and
+    // [stopVideoRecording] read-then-mutate the same fields, and the method
+    // is reachable from both the rpcWorker single-thread executor (web RPC)
+    // and the UI thread (any future on-device button). Two callers slipping
+    // through the `recordingPid > 0` guard concurrently would spawn two
+    // screenrecord processes and orphan an AudioCaptureSession.
+    @Synchronized
     fun startVideoRecording(): Result<Long> {
         if (!initialized) return Result.failure(IllegalStateException("not_initialized"))
         if (recordingPid > 0) return Result.failure(IllegalStateException("already_recording"))
@@ -224,14 +251,35 @@ object MediaCaptureManager {
 
         // screenrecord aborts with "INVALID_LAYER_STACK" when the display
         // surface is OFF. Force a wake before starting. KEYCODE_WAKEUP alone
-        // is not enough on this build — display surface stays OFF; a touch
-        // event reliably flips mState to ON. Sleep 200ms for SurfaceFlinger
+        // is not enough on this build — display surface stays OFF until
+        // SurfaceFlinger receives a touch event. Sleep 200ms after for SF
         // to settle before screenrecord queries the display.
-        sendCarroot("input keyevent KEYCODE_WAKEUP; input touchscreen tap 240 240")
-        Thread.sleep(200)
+        //
+        // **Only fire the wake when the screen is actually off.** When the
+        // screen is on (normal case — user kicked off the recording from
+        // the on-device UI, or from the web SPA with the launcher already
+        // visible), a center-screen tap is delivered to whatever row the
+        // launcher panel has focused. Activating the wrong row mid-record
+        // has caused real-world bugs: a "server" row tap stops the web
+        // server → kills the WS → SPA shows "offline + reconnecting" the
+        // moment the user hits record.
+        //
+        // For the screen-off case we use `input swipe` with a 200 ms hold at
+        // the same point instead of `tap`. A swipe with duration > tap
+        // timeout (~100 ms) and < long-press timeout (~500 ms) is still a
+        // real touch event for SurfaceFlinger but isn't recognized as a
+        // click by the Compose View tree, so no row gets activated. (Tap
+        // at a corner coordinate doesn't reach the touch area on this MTK
+        // build — display surface stays OFF and screenrecord aborts.)
+        val pm = appCtx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        if (!pm.isInteractive) {
+            sendCarroot("input keyevent KEYCODE_WAKEUP; input touchscreen swipe 240 240 240 240 200")
+            Thread.sleep(200)
+        }
 
-        val tmpPath = "/data/local/tmp/r1cap-${System.nanoTime()}.mp4"
-        val logPath = "/data/local/tmp/r1cap-${System.nanoTime()}.screenrecord.log"
+        val nano = System.nanoTime()
+        val tmpPath = "/data/local/tmp/r1cap-$nano.mp4"
+        val logPath = "/data/local/tmp/r1cap-$nano.screenrecord.log"
         // nohup (not setsid): toybox setsid forks before exec, so `echo $!`
         // returns the PID of the dying setsid wrapper, not screenrecord —
         // then our kill -2 in stopVideoRecording is a no-op and the mp4
@@ -241,9 +289,9 @@ object MediaCaptureManager {
         // exits. Both are required.
         //
         // No --audio-source flag: CarrotOS ships screenrecord v1.3 which
-        // predates the Android 12+ audio support. Video is silent. Audio
-        // could be added via a parallel AudioRecord + MediaMuxer pass on
-        // stop, but that's a follow-up.
+        // predates the Android 12+ audio support. Audio is captured in
+        // parallel by AudioCaptureSession (mic + REMOTE_SUBMIX, mixed
+        // in-app) and muxed in on stop via AvMuxer.
         //
         // Note on static UIs: screenrecord encodes a new frame only when
         // SurfaceFlinger reports a buffer update. Recording the R1's clock
@@ -257,41 +305,131 @@ object MediaCaptureManager {
             return Result.failure(RuntimeException("recording_start_failed"))
         }
 
+        // Audio session — gated on user prefs. If both mic and playback are
+        // off, skip the session entirely and let stopVideoRecording emit a
+        // silent video (still useful for screen-only captures).
+        val micWanted = MediaCapturePrefs.micEnabled(appCtx)
+        val playbackWanted = MediaCapturePrefs.playbackEnabled(appCtx)
+
+        // When playback capture is wanted, try to acquire a MediaProjection
+        // via the foreground service. The projection is what lets us use
+        // AudioPlaybackCaptureConfiguration (parallel, no speaker dim)
+        // instead of REMOTE_SUBMIX (redirects, dims speakers on MTK).
+        // Acquire is best-effort: if it fails (reflection breaks, FGS denied)
+        // the session falls back to REMOTE_SUBMIX automatically. We track
+        // whether we own a projection so stopVideoRecording knows to release.
+        val projection: android.media.projection.MediaProjection? =
+            if (playbackWanted) MediaProjectionGate.acquire(appCtx) else null
+        if (playbackWanted && projection == null) {
+            Log.w(TAG, "startVideoRecording: projection acquire failed — falling back to REMOTE_SUBMIX (speakers may dim)")
+        }
+
+        val (audioOk, audioPath, sessionRef) = if (micWanted || playbackWanted) {
+            val audioFile = File(tmpAudioDir, "r1cap-$nano.m4a")
+            val session = AudioCaptureSession(audioFile, micWanted, playbackWanted, projection)
+            val ok = runCatching { session.start() }.getOrDefault(false)
+            if (!ok) {
+                Log.w(TAG, "startVideoRecording: audio session start failed — video will be silent")
+                audioFile.delete()
+                if (projection != null) MediaProjectionGate.release(appCtx)
+                Triple(false, "", null)
+            } else {
+                Triple(true, audioFile.absolutePath, session)
+            }
+        } else {
+            Log.i(TAG, "startVideoRecording: both mic and playback off — recording silent video")
+            Triple(false, "", null)
+        }
+
         recordingPid = pid
         recordingTmpPath = tmpPath
+        recordingAudioPath = audioPath
+        audioSession = sessionRef
+        recordingHasProjection = (projection != null && sessionRef != null)
         recordingStartedAt = System.currentTimeMillis()
-        Log.i(TAG, "startVideoRecording: pid=$pid tmp=$tmpPath")
+        Log.i(TAG, "startVideoRecording: pid=$pid tmp=$tmpPath audio=$audioOk mic=$micWanted playback=$playbackWanted projection=${projection != null}")
         return Result.success(recordingStartedAt)
     }
 
+    @Synchronized
     fun stopVideoRecording(): Result<CaptureItem> {
         if (!initialized) return Result.failure(IllegalStateException("not_initialized"))
         val pid = recordingPid
         val tmpPath = recordingTmpPath
+        val audioPath = recordingAudioPath
+        val session = audioSession
         val startedAt = recordingStartedAt
         if (pid <= 0) return Result.failure(IllegalStateException("not_recording"))
 
         sendCarroot("kill -2 $pid")
+        // Stop audio in parallel with the screenrecord shutdown wait. Audio
+        // session.stop() blocks up to 7s in the worst case (5s for the
+        // worker to drain, +2s for the externally-stop fallback when the
+        // worker is wedged on AudioRecord.read), so the outer join must be
+        // at least that long — otherwise this returns while the inner
+        // thread is still finalizing the muxer, and a chained start could
+        // race two AudioCaptureSession workers on the mic.
+        val audioStopThread = if (session != null) {
+            Thread { runCatching { session.stop() } }.apply { isDaemon = true; start() }
+        } else null
         Thread.sleep(500)
         val stillAlive = sendCarroot("kill -0 $pid 2>/dev/null && echo ALIVE || echo DEAD").contains("ALIVE")
         if (stillAlive) {
             Thread.sleep(500)
             sendCarroot("kill -9 $pid")
         }
+        runCatching { audioStopThread?.join(8000) }
 
         val durationMs = System.currentTimeMillis() - startedAt
         val fname = nextFilename("video", "mp4")
         val destFile = File(videosDir, fname)
+
+        // Stage 1: pull silent video out of /data/local/tmp/ into a temp under
+        // our app dir so we can run MediaExtractor on it.
+        val stagedVideo = File(tmpAudioDir, "r1cap-video-${System.nanoTime()}.mp4")
         val cpOut = sendCarroot(
-            "cp $tmpPath ${destFile.absolutePath} && chmod 644 ${destFile.absolutePath} && echo OK"
+            "cp $tmpPath ${stagedVideo.absolutePath} && chmod 644 ${stagedVideo.absolutePath} && echo OK"
         )
         sendCarroot("rm -f $tmpPath")
 
         recordingPid = -1
         recordingTmpPath = ""
+        recordingAudioPath = ""
+        audioSession = null
         recordingStartedAt = 0L
+        // Release the MediaProjection foreground service AFTER the audio
+        // session has been stopped — releasing it earlier would yank the
+        // AudioPlaybackCapture source mid-read and corrupt the trailing
+        // frames in the AAC stream.
+        if (recordingHasProjection) {
+            recordingHasProjection = false
+            MediaProjectionGate.release(appCtx)
+        }
 
-        if (!cpOut.contains("OK") || !destFile.exists() || destFile.length() < 1024) {
+        if (!cpOut.contains("OK") || !stagedVideo.exists() || stagedVideo.length() < 1024) {
+            stagedVideo.delete()
+            if (audioPath.isNotEmpty()) File(audioPath).delete()
+            return Result.failure(RuntimeException("recording_lost"))
+        }
+
+        // Stage 2: mux audio + video into final destFile. If muxing fails for
+        // any reason, fall back to the silent video so the user still gets
+        // their recording instead of an error.
+        val audioFile = if (audioPath.isNotEmpty()) File(audioPath) else File("")
+        val muxed = AvMuxer.mux(stagedVideo, audioFile, destFile)
+        if (!muxed) {
+            Log.w(TAG, "stopVideoRecording: mux failed, falling back to silent video")
+            destFile.delete()
+            if (!stagedVideo.renameTo(destFile)) {
+                stagedVideo.copyTo(destFile, overwrite = true)
+                stagedVideo.delete()
+            }
+        } else {
+            stagedVideo.delete()
+        }
+        if (audioFile.exists()) audioFile.delete()
+
+        if (!destFile.exists() || destFile.length() < 1024) {
             destFile.delete()
             return Result.failure(RuntimeException("recording_lost"))
         }
@@ -299,7 +437,7 @@ object MediaCaptureManager {
         generateThumb(destFile)
         enforceRetention()
 
-        Log.i(TAG, "stopVideoRecording: $fname ${destFile.length()}B ${durationMs}ms")
+        Log.i(TAG, "stopVideoRecording: $fname ${destFile.length()}B ${durationMs}ms muxed=$muxed")
         return Result.success(toItem(destFile).copy(durationMs = durationMs))
     }
 
