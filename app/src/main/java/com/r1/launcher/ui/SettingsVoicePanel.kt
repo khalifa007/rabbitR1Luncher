@@ -59,6 +59,7 @@ import com.r1.launcher.voice.VoicePrefs
  *   4  custom voice id  (status pill; on click opens RetroKeyboard overlay)
  *   5  test voice       (synthesize a short sample with current settings)
  *   6  tuning           (opens SETTINGS_VOICE_TUNING)
+ *   7  talk shortcut    (cycles off → hermes → openclaw; clock-screen long-press talk target)
  */
 @Composable
 fun SettingsVoicePanel(
@@ -110,6 +111,11 @@ fun SettingsVoicePanel(
         // does the actual fetch + full info display.
         val subStatus = "view balance & plan"
         val subOk = false
+        val talkLabel = when (state.talkShortcut) {
+            VoicePrefs.TALK_HERMES -> "hermes"
+            VoicePrefs.TALK_OPENCLAW -> "openclaw"
+            else -> "off"
+        }
         val items = listOf(
             SettingsItem.Standard("__header__"),
             SettingsItem.Toggle(toggleLabel, state.voiceEnabled),
@@ -118,6 +124,7 @@ fun SettingsVoicePanel(
             SettingsItem.Standard(stringResource(R.string.voice_row_custom_id)),
             SettingsItem.Standard(testLabel),
             SettingsItem.Standard(stringResource(R.string.voice_row_tuning)),
+            SettingsItem.Standard("talk shortcut: $talkLabel"),
         )
 
         val listState = rememberLazyListState()
@@ -148,7 +155,7 @@ fun SettingsVoicePanel(
                         )
                     } else {
                         // New idx mapping after key migration:
-                        //   1=toggle, 2=subscription, 3=picker, 4=custom-id, 5=test, 6=tuning
+                        //   1=toggle, 2=subscription, 3=picker, 4=custom-id, 5=test, 6=tuning, 7=talk-shortcut
                         val (subtitle, subtitleOk) = when (idx) {
                             2 -> subStatus to subOk
                             4 -> customStatus to state.voiceCustomId.isNotBlank()

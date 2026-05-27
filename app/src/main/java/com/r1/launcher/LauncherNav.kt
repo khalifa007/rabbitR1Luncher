@@ -52,6 +52,8 @@ interface LauncherHost {
     fun voiceClearKey()
     fun voicePasteKeyFromClipboard()
     fun voiceSettingsRowActivate(idx: Int)
+    /** Cycle the clock-screen long-press talk target: off → hermes → openclaw. */
+    fun voiceCycleTalkShortcut()
     /** Custom voice id (cloned / professional / shared). Save validates non-blank. */
     fun voiceSaveCustomVoiceId(id: String)
     fun voiceClearCustomVoiceId()
@@ -588,9 +590,9 @@ fun LauncherState.wheelDown(host: LauncherHost) {
         }
         Panel.SETTINGS_VOICE -> {
             val prev = voiceFocus
-            // back, on/off, subscription, voice picker, custom-id, test, tuning
-            // (elevenlabs key + clear key moved to Settings → Credentials)
-            voiceFocus = (voiceFocus + 1).coerceAtMost(6)
+            // back, on/off, subscription, voice picker, custom-id, test, tuning,
+            // talk shortcut  (elevenlabs key + clear key moved to Settings → Credentials)
+            voiceFocus = (voiceFocus + 1).coerceAtMost(7)
             if (prev != voiceFocus) host.navTone()
         }
         Panel.SETTINGS_VOICE_TUNING -> {

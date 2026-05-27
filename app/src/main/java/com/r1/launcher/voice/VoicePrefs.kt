@@ -50,6 +50,13 @@ class VoicePrefs private constructor(ctx: Context) {
         get() = plain.getBoolean(KEY_ENABLED, false)
         set(value) = plain.edit { putBoolean(KEY_ENABLED, value) }
 
+    /** Which AI a long-press on the clock screen talks to. One of [TALK_NONE]
+     *  / [TALK_HERMES] / [TALK_OPENCLAW]. [TALK_NONE] keeps the legacy
+     *  long-press-opens-power-dialog behavior. Set via Settings → Voice. */
+    var talkShortcut: String
+        get() = plain.getString(KEY_TALK_SHORTCUT, TALK_NONE) ?: TALK_NONE
+        set(value) = plain.edit { putString(KEY_TALK_SHORTCUT, value) }
+
     /** ElevenLabs voice ID for TTS readback. Defaults to Rachel (free-tier-friendly). */
     var voiceId: String
         get() = plain.getString(KEY_VOICE_ID, DEFAULT_VOICE_ID) ?: DEFAULT_VOICE_ID
@@ -128,7 +135,7 @@ class VoicePrefs private constructor(ctx: Context) {
             remove(KEY_VOICE_ID); remove(KEY_ENABLED); remove(KEY_CUSTOM_VOICE_ID)
             remove(KEY_MODEL)
             remove(KEY_STABILITY); remove(KEY_SIMILARITY); remove(KEY_STYLE)
-            remove(KEY_SPEED); remove(KEY_SPEAKER_BOOST)
+            remove(KEY_SPEED); remove(KEY_SPEAKER_BOOST); remove(KEY_TALK_SHORTCUT)
         }
     }
 
@@ -171,6 +178,15 @@ class VoicePrefs private constructor(ctx: Context) {
         private const val KEY_STYLE = "voice.style"
         private const val KEY_SPEED = "voice.speed"
         private const val KEY_SPEAKER_BOOST = "voice.speaker_boost"
+        private const val KEY_TALK_SHORTCUT = "talk.shortcut"
+
+        // Clock-screen long-press talk target.
+        const val TALK_NONE = "none"
+        const val TALK_HERMES = "hermes"
+        const val TALK_OPENCLAW = "openclaw"
+
+        /** Cycle order for the Settings → Voice "talk shortcut" row. */
+        val TALK_SHORTCUTS: List<String> = listOf(TALK_NONE, TALK_HERMES, TALK_OPENCLAW)
 
         @Volatile private var instance: VoicePrefs? = null
         fun get(ctx: Context): VoicePrefs =

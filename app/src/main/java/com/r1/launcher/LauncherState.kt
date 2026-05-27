@@ -199,6 +199,10 @@ class LauncherState {
     var hasVoiceKey by mutableStateOf(false)
     var voiceKeyTail by mutableStateOf("")
     var voiceFocus by mutableIntStateOf(0)
+    /** Clock-screen long-press talk target: "none" | "hermes" | "openclaw".
+     *  Hydrated from VoicePrefs; mirrors the Settings → Voice row label and is
+     *  read by the HOME long-press dispatch. */
+    var talkShortcut by mutableStateOf(com.r1.launcher.voice.VoicePrefs.TALK_NONE)
     /** Optional user-supplied voice id (cloned, professional, shared) overriding
      *  the catalog [voiceId] for synthesis. Empty string = unset. */
     var voiceCustomId by mutableStateOf("")

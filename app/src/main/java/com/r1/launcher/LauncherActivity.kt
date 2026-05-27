@@ -277,6 +277,11 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private var lastPauseMs: Long = 0L
     private var lastResumeMs: Long = 0L
     private var openClawPttKeyCode: Int = KeyEvent.KEYCODE_UNKNOWN
+    // Set when the clock-screen talk shortcut opens the OpenClaw chat: the
+    // socket connects asynchronously, so recording can't start until the
+    // session is Live. Flushed in openClawStartSession()'s onState handler;
+    // cleared on release / error so a late connect never records after the fact.
+    private var pendingChatVoiceArm: Boolean = false
 
     // Side button (BUTTON_1) press detection: distinguishes short-tap, double-tap,
     // and long-press. Tuned values:
@@ -629,6 +634,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.voiceEnabled = voicePrefs.enabled
         state.voiceId = voicePrefs.voiceId
         state.voiceCustomId = voicePrefs.customVoiceId.orEmpty()
+        state.talkShortcut = voicePrefs.talkShortcut
         state.voiceModel = voicePrefs.model
         state.voiceStability = voicePrefs.stability
         state.voiceSimilarity = voicePrefs.similarity
@@ -1124,9 +1130,25 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                         state.sessionsLoading = true
                         openClawSession?.listSessions()
                     }
+                    // Clock-screen talk shortcut armed the mic before the socket
+                    // was up — fire it now that we're Live, but only if the side
+                    // button is still held (PttKeyCode set) and we're still in
+                    // the chat. Guards a late reconnect from opening the mic after
+                    // the user already let go or navigated away.
+                    if (pendingChatVoiceArm &&
+                        openClawPttKeyCode != KeyEvent.KEYCODE_UNKNOWN &&
+                        state.panel == Panel.OPENCLAW_CHAT) {
+                        pendingChatVoiceArm = false
+                        openClawRecordStart()
+                    }
                 }
                 if (st is GatewaySession.State.Switching) {
                     state.selectedSessionKey = st.sessionKey
+                }
+                // Connect failed (auth or transport) — drop any pending
+                // clock-screen talk-shortcut arm so it doesn't fire later.
+                if (st is GatewaySession.State.Error || st is GatewaySession.State.AuthExpired) {
+                    pendingChatVoiceArm = false
                 }
                 // Only structured AuthExpired (emitted on connect-time auth
                 // failures with known token codes) wipes pairing. Generic
@@ -1659,6 +1681,9 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.chatStreamingText = ""
         state.chatPendingRunIds.clear()
         openClawSpeakNextAssistant = false
+        // Drop any pending clock-screen talk-shortcut arm — the session it was
+        // waiting on is gone.
+        pendingChatVoiceArm = false
     }
 
     private fun seedSettingsLevels() {
@@ -3010,7 +3035,55 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         startVoiceCapture(VoiceSink.CHAT)
     }
 
-    override fun openClawRecordStop() = stopVoiceCapture()
+    override fun openClawRecordStop() {
+        // Releasing the side button cancels a still-pending arm so a late
+        // socket connect (talk shortcut) doesn't start recording after the fact.
+        pendingChatVoiceArm = false
+        stopVoiceCapture()
+    }
+
+    /**
+     * Clock-screen talk shortcut entry: jump straight into the chosen AI chat
+     * and fire that panel's existing push-to-talk. Navigation happens here on
+     * the long-press DOWN-repeat, so by the time the side button is released
+     * the panel is the chat panel and the existing PTT routing in
+     * [dispatchKeyEvent] (handleOpenClawPttKey / handleHermesPttKey) stops the
+     * recording and auto-sends — we just pre-set the panel's PTT key code so it
+     * recognizes the release. Hermes records instantly; OpenClaw arms once its
+     * socket goes Live (see [pendingChatVoiceArm]). Unconfigured targets drop
+     * into their setup screen (QR / config) instead of failing silently.
+     */
+    private fun homeTalkStart(target: String, keyCode: Int) {
+        when (target) {
+            com.r1.launcher.voice.VoicePrefs.TALK_HERMES -> {
+                hydrateHermesStateFromPrefs()
+                if (hermesPrefs.hasConfig()) {
+                    state.openHermesChat()
+                    hermesPttKeyCode = keyCode
+                    hermesRecordStart()
+                } else {
+                    state.openHermesConfig(fromChat = false)
+                }
+            }
+            com.r1.launcher.voice.VoicePrefs.TALK_OPENCLAW -> {
+                if (openClawPrefs.hasPairing()) {
+                    // Capture liveness BEFORE (re)starting. A reused warm session
+                    // is genuinely live and can record right away. A fresh start
+                    // leaves chatStatus stale (it isn't reset on close and the
+                    // connect updates it async), so never record immediately on a
+                    // fresh session — arm and let onState Live fire once the
+                    // socket is actually up.
+                    val reusedLive = openClawSession != null && state.chatStatus == "live"
+                    openClawStartSession()
+                    state.openOpenClawChat()
+                    openClawPttKeyCode = keyCode
+                    if (reusedLive) openClawRecordStart() else pendingChatVoiceArm = true
+                } else {
+                    state.openOpenClawQr()
+                }
+            }
+        }
+    }
 
     override fun openClawSendText(text: String) {
         val session = openClawSession ?: return
@@ -4238,6 +4311,7 @@ override fun hermesPasteServerUrlFromClipboard() {
         //   4  custom voice id (handled inline by the panel's keyboard overlay)
         //   5  test voice
         //   6  tuning (opens SETTINGS_VOICE_TUNING)
+        //   7  talk shortcut (cycle off → hermes → openclaw)
         when (idx) {
             0 -> { state.back(); backTone() }
             1 -> voiceToggleEnabled()
@@ -4252,7 +4326,26 @@ override fun hermesPasteServerUrlFromClipboard() {
             // 4 handled by the panel's keyboard overlay
             5 -> voiceTestSynthesize()
             6 -> { state.openSettingsVoiceTuning(); selectTone() }
+            7 -> voiceCycleTalkShortcut()
         }
+    }
+
+    /** Cycle the clock-screen long-press talk target: off → hermes → openclaw.
+     *  Persists to VoicePrefs and updates the state mirror so the Settings →
+     *  Voice row label refreshes. The HOME long-press reads [state.talkShortcut]. */
+    override fun voiceCycleTalkShortcut() {
+        val order = com.r1.launcher.voice.VoicePrefs.TALK_SHORTCUTS
+        val cur = order.indexOf(state.talkShortcut).coerceAtLeast(0)
+        val next = order[(cur + 1) % order.size]
+        state.talkShortcut = next
+        voicePrefs.talkShortcut = next
+        val label = when (next) {
+            com.r1.launcher.voice.VoicePrefs.TALK_HERMES -> "hermes"
+            com.r1.launcher.voice.VoicePrefs.TALK_OPENCLAW -> "openclaw"
+            else -> "off"
+        }
+        toast("talk shortcut: $label")
+        popTone()
     }
 
     override fun voiceSaveCustomVoiceId(id: String) {
@@ -4952,7 +5045,17 @@ override fun hermesPasteServerUrlFromClipboard() {
                         pendingSideSingle = null
                         sideLastShortUpMs = 0L
                         if (state.panel == Panel.HOME) {
-                            PowerService.openPowerDialog()
+                            // Clock-screen talk shortcut: jump into the chosen AI
+                            // chat and fire its push-to-talk. Release is handled by
+                            // that panel's existing PTT routing (see homeTalkStart).
+                            // When unset, keep the legacy power-dialog behavior.
+                            when (state.talkShortcut) {
+                                com.r1.launcher.voice.VoicePrefs.TALK_HERMES ->
+                                    homeTalkStart(com.r1.launcher.voice.VoicePrefs.TALK_HERMES, code)
+                                com.r1.launcher.voice.VoicePrefs.TALK_OPENCLAW ->
+                                    homeTalkStart(com.r1.launcher.voice.VoicePrefs.TALK_OPENCLAW, code)
+                                else -> PowerService.openPowerDialog()
+                            }
                         } else if (state.panel == Panel.TERMINAL) {
                             // Push-to-talk dictation. Stop fires on the matching UP
                             // (handled below in the sideLongFired branch).
