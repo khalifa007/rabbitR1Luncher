@@ -13,8 +13,8 @@ android {
         applicationId = "com.r1.launcher"
         minSdk = 23
         targetSdk = 33
-        versionCode = 13
-        versionName = "1.1.8"
+        versionCode = 14
+        versionName = "1.1.9"
 
         // CarrotOS identity baked into the APK as a fallback for the About tray
         // when the OS image hasn't wired ro.carrot.* into device.mk. Empty by
