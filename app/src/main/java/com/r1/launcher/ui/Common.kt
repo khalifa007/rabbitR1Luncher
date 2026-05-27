@@ -229,36 +229,6 @@ fun HoldToTalkPill(
 }
 
 /**
- * Tap-to-open voice-page button used in chat input rows. Replaces the older
- * press-and-hold idiom — a single tap launches the fullscreen voice panel
- * (VoiceChatPanel), which then handles the whole hands-free conversation
- * loop on its own. Same visual footprint as HoldToTalkPill so the input
- * row geometry doesn't shift.
- */
-@Composable
-fun VoiceLaunchPill(
-    themeColor: Color,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    size: Dp = 28.dp,
-) {
-    Box(
-        modifier = modifier
-            .size(size)
-            .clip(CircleShape)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Image(
-            painter = painterResource(R.drawable.ic_voice),
-            contentDescription = null,
-            colorFilter = ColorFilter.tint(themeColor),
-            modifier = Modifier.size(size * 0.65f),
-        )
-    }
-}
-
-/**
  * Compact send-arrow button used in chat input rows. Themed via [tint]; goes
  * dim-gray when [enabled] is false so empty inputs read as un-tappable.
  */

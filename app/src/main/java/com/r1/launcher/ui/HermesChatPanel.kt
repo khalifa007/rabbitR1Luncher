@@ -85,7 +85,6 @@ fun HermesChatPanel(
     onCopyMessage: (String) -> Unit = {},
     onMicStart: () -> Unit = {},
     onMicStop: () -> Unit = {},
-    onOpenVoice: () -> Unit = {},
 ) {
     AnimatedVisibility(
         visible = state.panel == Panel.HERMES_CHAT,
@@ -248,9 +247,11 @@ fun HermesChatPanel(
                             modifier = Modifier.weight(1f),
                         )
                         Spacer(Modifier.width(6.dp))
-                        VoiceLaunchPill(
+                        HoldToTalkPill(
+                            recording = state.hermesRecording,
                             themeColor = AppThemes.Hermes,
-                            onClick = onOpenVoice,
+                            onStart = onMicStart,
+                            onStop = onMicStop,
                             size = 28.dp,
                         )
                         Spacer(Modifier.width(4.dp))

@@ -402,29 +402,6 @@ fun LauncherRoot(
             getClipboardText = { host.getClipboardText() },
             onMicStart = { host.openClawRecordStart() },
             onMicStop = { host.openClawRecordStop() },
-            onOpenVoice = {
-                state.openOpenClawVoice()
-                host.toggleChatConversationMode(true)
-                host.selectTone()
-            },
-        )
-
-        VoiceChatPanel(
-            state = state,
-            visible = state.panel == Panel.OPENCLAW_VOICE,
-            themeColor = Color(0xFFFF4500),
-            serviceLabel = "openclaw",
-            recording = state.chatRecording,
-            transcribing = state.chatTranscribing,
-            busy = state.chatBusy,
-            speaking = state.openClawSpeaking,
-            partialText = state.chatPartialText,
-            micLevel = state.chatInputLevel,
-            onEnd = {
-                host.toggleChatConversationMode(false)
-                state.back()
-                host.backTone()
-            },
         )
 
         OpenClawCameraPanel(
@@ -509,29 +486,6 @@ fun LauncherRoot(
             onCopyMessage = { text -> host.copyToClipboard(text, "hermes-message"); host.popTone() },
             onMicStart = { host.hermesRecordStart() },
             onMicStop = { host.hermesRecordStop() },
-            onOpenVoice = {
-                state.openHermesVoice()
-                host.toggleHermesConversationMode(true)
-                host.selectTone()
-            },
-        )
-
-        VoiceChatPanel(
-            state = state,
-            visible = state.panel == Panel.HERMES_VOICE,
-            themeColor = AppThemes.Hermes,
-            serviceLabel = "hermes",
-            recording = state.hermesRecording,
-            transcribing = state.hermesTranscribing,
-            busy = state.hermesBusy,
-            speaking = state.hermesSpeaking,
-            partialText = state.hermesPartialText,
-            micLevel = state.hermesInputLevel,
-            onEnd = {
-                host.toggleHermesConversationMode(false)
-                state.back()
-                host.backTone()
-            },
         )
 
         HermesConfigPanel(

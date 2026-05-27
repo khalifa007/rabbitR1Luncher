@@ -41,8 +41,6 @@ interface LauncherHost {
     fun openClawRecordStart()
     fun openClawRecordStop()
     fun openClawSendText(text: String)
-    /** Toggle the OpenClaw hands-free conversation loop. */
-    fun toggleChatConversationMode(enable: Boolean)
     fun voiceToggleEnabled()
     fun voiceCycleVoiceId()
     /** Set the catalog voice to the exact id [id]. No-ops with a warning log
@@ -115,8 +113,6 @@ interface LauncherHost {
     fun hermesSendText(text: String)
     fun hermesRecordStart()
     fun hermesRecordStop()
-    /** Toggle the Hermes hands-free conversation loop. */
-    fun toggleHermesConversationMode(enable: Boolean)
     fun hermesScrollUp()
     fun hermesScrollDown()
     fun hermesClearHistory()
@@ -417,7 +413,6 @@ fun LauncherState.wheelUp(host: LauncherHost) {
             else { hermesConnectionEditFocus--; host.navTone() }
         }
         Panel.OPENCLAW_CHAT -> { host.openClawScrollUp(); host.navTone() }
-        Panel.OPENCLAW_VOICE -> { /* voice page handles its own controls */ }
         Panel.OPENCLAW_CAMERA -> { host.openClawCameraMotorNudge(-15) }
         Panel.OPENCLAW_SETTINGS -> {
             if (openClawSettingsFocus <= 0) {
@@ -449,7 +444,6 @@ fun LauncherState.wheelUp(host: LauncherHost) {
         }
         Panel.TERMINAL -> { terminalScrollIndex++; host.navTone() }
         Panel.HERMES_CHAT -> { host.hermesScrollUp(); host.navTone() }
-        Panel.HERMES_VOICE -> { /* voice page handles its own controls */ }
         Panel.HERMES_CONFIG -> {
             val c = hermesConnections.size
             val canAdd = c < com.r1.launcher.hermes.HermesPrefs.MAX_CONNECTIONS
@@ -690,7 +684,6 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             if (prev != hermesConnectionEditFocus) host.navTone()
         }
         Panel.OPENCLAW_CHAT -> { host.openClawScrollDown(); host.navTone() }
-        Panel.OPENCLAW_VOICE -> { /* voice page handles its own controls */ }
         Panel.OPENCLAW_CAMERA -> { host.openClawCameraMotorNudge(+15) }
         Panel.OPENCLAW_SETTINGS -> {
             val prev = openClawSettingsFocus
@@ -734,7 +727,6 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             if (prev != terminalScrollIndex) host.navTone()
         }
         Panel.HERMES_CHAT -> { host.hermesScrollDown(); host.navTone() }
-        Panel.HERMES_VOICE -> { /* voice page handles its own controls */ }
         Panel.HERMES_CONFIG -> {
             val c = hermesConnections.size
             val canAdd = c < com.r1.launcher.hermes.HermesPrefs.MAX_CONNECTIONS
@@ -961,7 +953,6 @@ fun LauncherState.activate(host: LauncherHost) {
         Panel.HERMES_QR -> { /* camera scan auto-completes; activate is no-op */ }
         Panel.HERMES_CONNECTION_EDIT -> host.hermesConnectionEditRowActivate(hermesConnectionEditFocus)
         Panel.OPENCLAW_CHAT -> { host.openClawToggleRecord(); host.popTone() }
-        Panel.OPENCLAW_VOICE -> { /* voice page handles its own controls */ }
         Panel.OPENCLAW_CAMERA -> { /* touch-first capture/ask surface */ }
         Panel.OPENCLAW_SETTINGS -> {
             host.openClawSettingsRowActivate(openClawSettingsFocus)
@@ -994,7 +985,6 @@ fun LauncherState.activate(host: LauncherHost) {
             }
         }
         Panel.HERMES_CHAT -> { /* push-to-talk handled in side-button dispatcher; wheel press is no-op */ }
-        Panel.HERMES_VOICE -> { /* voice page handles its own controls */ }
         Panel.HERMES_CONFIG -> {
             host.hermesConfigRowActivate(hermesConfigFocus)
             host.selectTone()
@@ -1100,19 +1090,6 @@ fun LauncherState.activate(host: LauncherHost) {
 fun LauncherState.backPressed(host: LauncherHost) {
     if (panel == Panel.BT_SCAN) {
         host.stopBtScan(); back(); host.backTone()
-        return
-    }
-    if (panel == Panel.OPENCLAW_VOICE) {
-        // Leaving voice page: silence everything (mic + TTS) and return to
-        // the regular chat. Disable conversation mode so re-entering the
-        // chat doesn't immediately re-open the mic.
-        host.toggleChatConversationMode(false)
-        back(); host.backTone()
-        return
-    }
-    if (panel == Panel.HERMES_VOICE) {
-        host.toggleHermesConversationMode(false)
-        back(); host.backTone()
         return
     }
     if (panel == Panel.OPENCLAW_CHAT || panel == Panel.OPENCLAW_QR) {

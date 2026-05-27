@@ -88,7 +88,6 @@ fun OpenClawChatPanel(
     getClipboardText: () -> String = { "" },
     onMicStart: () -> Unit = {},
     onMicStop: () -> Unit = {},
-    onOpenVoice: () -> Unit = {},
 ) {
     AnimatedVisibility(
         visible = state.panel == Panel.OPENCLAW_CHAT,
@@ -236,9 +235,11 @@ fun OpenClawChatPanel(
                             modifier = Modifier.weight(1f)
                         )
                         Spacer(Modifier.width(6.dp))
-                        VoiceLaunchPill(
+                        HoldToTalkPill(
+                            recording = state.chatRecording,
                             themeColor = Color(0xFFFF4500),
-                            onClick = onOpenVoice,
+                            onStart = onMicStart,
+                            onStop = onMicStop,
                             size = 28.dp,
                         )
                         Spacer(Modifier.width(4.dp))
