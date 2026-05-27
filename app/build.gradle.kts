@@ -16,6 +16,12 @@ android {
         versionCode = 13
         versionName = "1.1.8"
 
+        // CarrotOS identity baked into the APK as a fallback for the About tray
+        // when the OS image hasn't wired ro.carrot.* into device.mk. Empty by
+        // default so carrotOsInfo() falls through to ro.lineage.* / Build fields.
+        buildConfigField("String", "CARROT_VERSION", "\"\"")
+        buildConfigField("String", "CARROT_BUILD_ID", "\"\"")
+
         // R1 is single-ABI (arm64-v8a). Restricting filter avoids accidentally
         // pulling in armeabi-v7a / x86_64 / x86 from any future native deps.
         ndk {
@@ -73,6 +79,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {
