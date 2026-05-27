@@ -22,6 +22,7 @@ gradle/wrapper/gradle-wrapper.jar
 Start-Carroot.bat
 process_image.py
 carroot.rc
+r1.sh
 
 .bootstrap/
 *.zip

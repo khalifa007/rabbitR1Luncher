@@ -26,6 +26,16 @@ adb shell 'am force-stop com.r1.launcher; am start -n com.r1.launcher/.LauncherA
 
 - **`versionCode` in `app/build.gradle.kts` is pinned to `1000` locally for debug, but the file is `git update-index --skip-worktree`**, so `git status`/commits ignore the local value. HEAD tracks the real release version (`versionCode=5` / `versionName="1.1.0"` at time of writing). `adb install -r` at the same `versionCode` is allowed — you don't need to bump per install. The `/system/app/R1Launcher/` baked into CarrotOS is the floor; if it ever passes `1000`, re-pin higher. `INSTALL_FAILED_VERSION_DOWNGRADE` = system image was rebuilt with a higher number, raise the local pin. To cut a release: `git update-index --no-skip-worktree app/build.gradle.kts`, edit to the real release version, commit, `git tag vX.Y.Z && git push --tags` (CI fires on tags, not main pushes), then re-pin and re-skip.
 - **`am start` won't replace a foreground launcher process.** "Activity not started, intent has been delivered..." means old code is still in memory. Force-stop via carroot first.
+- **`buildConfig` must stay enabled.** `gradle.properties` sets `android.defaults.buildfeatures.buildconfig=false` globally, but `AppsPanel.kt`'s `carrotOsInfo()` reads `BuildConfig.CARROT_VERSION` / `CARROT_BUILD_ID`. The app module therefore keeps `buildFeatures { buildConfig = true }` + two `buildConfigField("String", ...)` declarations in `defaultConfig` (empty strings by default — they fall through to `ro.lineage.*` / `Build` at runtime). Removing either breaks the build with a misleading "K expected" type error, not "unresolved reference".
+
+### Building on macOS (this dev host)
+
+The CarrotOS *image* is built on a Linux box (`/home/khalifa/lineage`); the *launcher APK* is built here on macOS. This host differs from the Linux flow above:
+
+- **No `java` on PATH and no `bootstrap.sh` in the tree.** Use Android Studio's bundled JDK: `/Applications/Android Studio.app/Contents/jbr/Contents/Home` (Java 21 — runs AGP 8.7.2 / Gradle 8.9 / Kotlin 2.0.21 fine even though the project targets Java 17 bytecode). Export it as `JAVA_HOME`.
+- **Regenerate the wrapper jar from the cached Gradle 8.9.** A distribution is already unpacked at `~/.gradle/wrapper/dists/gradle-8.9-bin/.../gradle-8.9/bin/gradle`; run that binary once with `gradle wrapper --gradle-version 8.9 --distribution-type bin` to recreate `gradle/wrapper/gradle-wrapper.jar` (gitignored), after which `./gradlew` works given `JAVA_HOME`.
+- **`platform.keystore` (required for signing, gitignored) is recoverable from `/Users/khalifa/Desktop/r1.zip`** — entry `rabbitR1Luncher/platform.keystore`, PKCS12, store/key pass `android`, alias `platform`, SHA-256 `c8a2e9bc…192ab8`. Drop it at the repo root before building. (The zip also holds older prebuilt `app-debug.apk` / `app-release.apk` under `app/build/outputs/`.)
+- **`r1.sh`** (repo root, gitignored host helper) wraps all of the above: `./r1.sh` = build + `install -r` + restart; also `build` / `install` / `logcat`. Auto-detects the JDK.
 
 ## Pinned versions — do not drift without testing
 
