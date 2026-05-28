@@ -2,6 +2,7 @@ package com.r1.launcher.openclaw
 
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import java.util.UUID
@@ -98,7 +99,10 @@ private fun imageSourceFromTranscriptFields(obj: JsonObject): String? {
     val paths = obj["MediaPaths"] as? JsonArray ?: obj["mediaUrls"] as? JsonArray
     if (paths != null) {
         for (el in paths) {
-            val value = el.jsonPrimitive.contentOrNull?.trim().orEmpty()
+            // Use the safe cast — `el.jsonPrimitive` THROWS on a non-primitive
+            // element, and since parseHistoryMessage is wrapped in a try/catch
+            // upstream, one odd element would otherwise drop the ENTIRE history.
+            val value = (el as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
             if (value.isNotBlank() && IMAGE_REF.containsMatchIn(" $value")) {
                 return value.removePrefix("MEDIA:").removePrefix("@")
             }

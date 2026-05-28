@@ -1,4 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <base-config cleartextTrafficPermitted="true" />
+    <!-- Default: require TLS for every OUTBOUND connection. This stops the
+         cloud APIs (ElevenLabs, OpenAI, Anthropic, Gemini, ntfy.sh, GitHub OTA)
+         and any user-supplied internet backend (Hermes/OpenClaw bearer tokens,
+         chat content) from being sent in cleartext / MITM-downgraded.
+
+         NOTE: this policy governs the app's outbound *client* sockets only. The
+         embedded web companion server (inbound NanoHTTPD on :8080) is NOT
+         affected and still serves plain http to the phone on the LAN. -->
+    <base-config cleartextTrafficPermitted="false" />
+
+    <!-- Loopback exceptions: the Hermes Agent running in Termux on-device
+         (http://127.0.0.1:PORT), the carroot helper, and the emulator host
+         bridge (10.0.2.2) for the dev test loop. A backend reached over a LAN
+         IP via http/ws (e.g. a self-hosted gateway on another box) must use TLS
+         or be added here as an explicit <domain> entry. -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <domain includeSubdomains="true">10.0.2.2</domain>
+    </domain-config>
 </network-security-config>

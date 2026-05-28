@@ -547,9 +547,9 @@ class LauncherState {
 
     // --- credentials panel (global API keys) ---
     /** Focus index in SETTINGS_CREDENTIALS. Row layout matches the panel:
-     *  0=back, 1=anthropic, 2=elevenlabs, 3=hermes, 4=ntfy topic,
-     *  5=webhook token (view+regenerate). Single keyboard overlay opened
-     *  per-row via [credentialsEditField] / [credentialsEditInput]. */
+     *  0=back, 1=elevenlabs, 2=hermes, 3=ntfy topic, 4=webhook token
+     *  (view+regenerate), 5=control secret (view+regenerate). Single keyboard
+     *  overlay opened per-row via [credentialsEditField] / [credentialsEditInput]. */
     var credentialsFocus by mutableIntStateOf(0)
     /** When non-empty, the credentials keyboard overlay is open for this
      *  field. Values: "anthropic" | "elevenlabs" | "hermes" | "ntfy_topic". */
@@ -563,6 +563,11 @@ class LauncherState {
     /** Webhook bearer token — read-only on this surface; regenerate button
      *  triggers [LauncherHost.regenerateWebhookToken]. */
     var webhookTokenDisplay by mutableStateOf("")
+    /** Per-device control secret required on the SET_ELEVENLABS_KEY /
+     *  SET_HERMES_CONFIG / TOGGLE_WEB_SERVER adb broadcasts. Shown in full
+     *  (it's short) so the user can copy it into their adb snippets; tap the
+     *  row to regenerate. */
+    var controlSecretDisplay by mutableStateOf("")
 
     // --- ntfy.sh subscriber ---
     /** Focus index in NTFY_CONFIG. Row layout:

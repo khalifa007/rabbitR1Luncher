@@ -125,19 +125,21 @@ class ElevenLabsRealtimeClient private constructor(
 
     private inner class Listener : WebSocketListener() {
         override fun onMessage(webSocket: WebSocket, text: String) {
-            // Log every frame for now — root-causing why committed_transcript
-            // doesn't fire on release. Trim long fields so logcat doesn't choke.
-            val trunc = if (text.length > 400) text.substring(0, 400) + "…(${text.length})" else text
-            Log.d(TAG, "frame: $trunc")
+            // Frames contain the user's transcript — only dump them in debug
+            // builds. In release, log nothing here (content is privacy-sensitive).
+            if (com.r1.launcher.BuildConfig.DEBUG) {
+                val trunc = if (text.length > 400) text.substring(0, 400) + "…(${text.length})" else text
+                Log.d(TAG, "frame: $trunc")
+            }
             runCatching {
                 val o = JSONObject(text)
                 val mt = o.optString("message_type").ifEmpty { o.optString("type") }
                 when (mt) {
                     "partial_transcript" -> {
                         if (committed) {
-                            // Late partial after commit — drop. Logged at verbose
-                            // so it doesn't spam logcat during normal traffic.
-                            Log.v(TAG, "partial after commit, dropping: '${o.optString("text")}'")
+                            // Late partial after commit — drop. Don't log the
+                            // text (privacy); just note the drop at verbose.
+                            Log.v(TAG, "partial after commit, dropping")
                         } else {
                             val t = o.optString("text")
                             main.post { onPartial(t) }
@@ -148,7 +150,7 @@ class ElevenLabsRealtimeClient private constructor(
                     "final_transcript",
                     "transcript_completed" -> {
                         val t = o.optString("text")
-                        Log.i(TAG, "committed: '$t'")
+                        Log.i(TAG, "committed (${t.length} chars)")
                         committed = true
                         main.post { onCommitted(t) }
                     }

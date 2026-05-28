@@ -36,6 +36,10 @@ object SmsCache {
     private var loaded = false
     private val mem = mutableListOf<Entry>()
 
+    private val ioExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "sms-cache-io").apply { isDaemon = true }
+    }
+
     private fun file(ctx: Context): File = File(ctx.filesDir, FILE_NAME)
 
     @Synchronized
@@ -68,9 +72,20 @@ object SmsCache {
     }
 
     private fun save(ctx: Context) {
-        runCatching {
-            val raw = json.encodeToString(CacheRoot(mem.toList()))
-            file(ctx).writeText(raw)
+        // Snapshot under the monitor, write on the IO thread (atomic temp+rename)
+        // so capturing an SMS never blocks the receiver on a full-file rewrite
+        // and a power-loss mid-write can't truncate the cache.
+        val raw = json.encodeToString(CacheRoot(mem.toList()))
+        val f = file(ctx)
+        ioExecutor.execute {
+            runCatching {
+                val tmp = File(f.parentFile, "${f.name}.tmp")
+                tmp.writeText(raw)
+                if (!tmp.renameTo(f)) {
+                    f.writeText(raw)
+                    tmp.delete()
+                }
+            }
         }
     }
 }

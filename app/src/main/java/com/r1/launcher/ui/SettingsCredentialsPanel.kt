@@ -53,11 +53,11 @@ import com.r1.launcher.R
  *
  * Row layout (kept in lockstep with [com.r1.launcher.LauncherActivity.credentialsRowActivate]):
  *   0  < back
- *   1  anthropic    (status + masked tail; click → keyboard)
- *   2  elevenlabs   (status + masked tail; click → keyboard)
- *   3  hermes       (status + masked tail; click → keyboard)
- *   4  ntfy topic   (status + plain text; click → keyboard)
- *   5  webhook      (read-only display + click = regenerate, no keyboard)
+ *   1  elevenlabs       (status + masked tail; click → keyboard)
+ *   2  hermes           (status + masked tail; click → keyboard)
+ *   3  ntfy topic       (status + plain text; click → keyboard)
+ *   4  webhook          (read-only display + click = regenerate, no keyboard)
+ *   5  control secret   (read-only display + click = regenerate, no keyboard)
  */
 @Composable
 fun SettingsCredentialsPanel(
@@ -83,6 +83,8 @@ fun SettingsCredentialsPanel(
                 state.ntfyTopic.takeLast(12)),
             CredentialsItem("webhook token", "tap to regenerate", true,
                 state.webhookTokenDisplay),
+            CredentialsItem("control secret", "adb broadcast key — tap to regenerate", true,
+                state.controlSecretDisplay),
         )
 
         val listState = rememberLazyListState()

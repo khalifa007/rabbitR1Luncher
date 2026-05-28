@@ -93,8 +93,31 @@ class SmtpSender(private val prefs: TranscriberPrefs) {
         ))
     }
 
+    /**
+     * Register JavaMail's JAF content handlers programmatically. The APK's
+     * packaging step strips `META-INF/mailcap.default` (it's a duplicate
+     * between android-mail and android-activation), and R8 in release builds
+     * can further obscure resource-based handler discovery — so `DataHandler`
+     * would fail with "no object DCH for MIME type" when building a multipart
+     * message, breaking attachment send ONLY in the minified release build.
+     * Wiring the handlers by class name makes it work regardless of which
+     * META-INF resources survive. Idempotent; cheap to call per send.
+     */
+    private fun ensureMailcap() {
+        runCatching {
+            val mc = javax.activation.MailcapCommandMap()
+            mc.addMailcap("text/plain;; x-java-content-handler=com.sun.mail.handlers.text_plain")
+            mc.addMailcap("text/html;; x-java-content-handler=com.sun.mail.handlers.text_html")
+            mc.addMailcap("text/xml;; x-java-content-handler=com.sun.mail.handlers.text_xml")
+            mc.addMailcap("multipart/*;; x-java-content-handler=com.sun.mail.handlers.multipart_mixed")
+            mc.addMailcap("message/rfc822;; x-java-content-handler=com.sun.mail.handlers.message_rfc822")
+            javax.activation.CommandMap.setDefaultCommandMap(mc)
+        }
+    }
+
     /** Generic SMTP send for arbitrary attachments. */
     fun sendGeneric(payload: EmailPayload): Result {
+        ensureMailcap()
         val user = prefs.smtpUser ?: return Result.Failure("SMTP user not configured")
         val pass = prefs.smtpPassword ?: return Result.Failure("SMTP password not configured")
         val host = prefs.smtpHost
@@ -107,7 +130,12 @@ class SmtpSender(private val prefs: TranscriberPrefs) {
             put("mail.smtp.auth", "true")
             put("mail.smtp.starttls.enable", "true")
             put("mail.smtp.starttls.required", "true")
-            put("mail.smtp.ssl.trust", host)
+            // NOTE: deliberately NOT setting `mail.smtp.ssl.trust = host`. That
+            // disabled CA validation for the SMTP host, so a MITM presenting any
+            // cert for smtp.gmail.com could intercept the app password during
+            // STARTTLS. Standard providers (Gmail/Outlook/etc.) chain to a
+            // public CA and validate normally. A self-hosted server with a
+            // self-signed cert must install a CA-valid cert.
             // Without these, a flaky link blocks the send executor forever.
             put("mail.smtp.connectiontimeout", "15000")
             put("mail.smtp.timeout", "60000")

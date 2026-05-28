@@ -15,11 +15,18 @@ data class GatewaySetupCode(
 
 private val json = Json { ignoreUnknownKeys = true }
 
-fun decodeGatewaySetupCode(rawInput: String): GatewaySetupCode? {
+/** Cap on the `setupCode` self-reference unwrap. A crafted QR nesting
+ *  `{"setupCode":"<base64 of {\"setupCode\":...}>"}` would otherwise recurse
+ *  per layer; a StackOverflowError can land anywhere (incl. outside the
+ *  try/catch) on untrusted input. 4 is far beyond any legitimate payload. */
+private const val MAX_SETUP_DEPTH = 4
+
+fun decodeGatewaySetupCode(rawInput: String, depth: Int = 0): GatewaySetupCode? {
+    if (depth > MAX_SETUP_DEPTH) return null
     val trimmed = rawInput.trim()
     if (trimmed.isEmpty()) return null
 
-    parseSetupJson(trimmed)?.let { return it }
+    parseSetupJson(trimmed, depth)?.let { return it }
 
     val padded = trimmed
         .replace('-', '+')
@@ -31,17 +38,17 @@ fun decodeGatewaySetupCode(rawInput: String): GatewaySetupCode? {
 
     return try {
         val decoded = String(Base64.getDecoder().decode(padded), Charsets.UTF_8)
-        parseSetupJson(decoded)
+        parseSetupJson(decoded, depth)
     } catch (_: Throwable) {
         null
     }
 }
 
-private fun parseSetupJson(text: String): GatewaySetupCode? {
+private fun parseSetupJson(text: String, depth: Int): GatewaySetupCode? {
     return try {
         val obj = json.parseToJsonElement(text) as? JsonObject ?: return null
         val inner = (obj["setupCode"]?.jsonPrimitive?.contentOrNull)
-            ?.let { decodeGatewaySetupCode(it) }
+            ?.let { decodeGatewaySetupCode(it, depth + 1) }
         if (inner != null) return inner
         val url = obj["url"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return null
         GatewaySetupCode(

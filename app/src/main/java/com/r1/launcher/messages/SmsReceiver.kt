@@ -45,18 +45,32 @@ class SmsReceiver : BroadcastReceiver() {
         if (byAddr.isEmpty()) return
         if (ts == 0L) ts = System.currentTimeMillis()
 
-        for ((addr, sb) in byAddr) {
-            val entry = SmsCache.Entry(
-                address = addr.ifBlank { "unknown" },
-                body = sb.toString(),
-                timestampMs = ts,
-                read = false,
-            )
-            SmsCache.append(ctx, entry)
-            Log.i(TAG, "captured SMS from ${entry.address} (${entry.body.length} chars)")
-        }
-
-        // Notify any running launcher instance so the panel refreshes live.
-        ctx.sendBroadcast(Intent(ACTION_NEW_SMS_LOCAL).setPackage(ctx.packageName))
+        // Persist + broadcast off the main thread — onReceive runs on the app's
+        // main looper with a ~10s timeout, and SmsCache.append does file I/O
+        // (read on first call, write each time). goAsync() keeps the broadcast
+        // alive while a worker thread does the disk work.
+        val pending = goAsync()
+        val appCtx = ctx.applicationContext
+        val tsFinal = ts
+        Thread {
+            try {
+                for ((addr, sb) in byAddr) {
+                    val entry = SmsCache.Entry(
+                        address = addr.ifBlank { "unknown" },
+                        body = sb.toString(),
+                        timestampMs = tsFinal,
+                        read = false,
+                    )
+                    SmsCache.append(appCtx, entry)
+                    // Don't log the sender address — it's privacy-sensitive
+                    // metadata any READ_LOGS holder could harvest. Length only.
+                    Log.i(TAG, "captured SMS (${entry.body.length} chars)")
+                }
+                // Notify any running launcher instance so the panel refreshes live.
+                appCtx.sendBroadcast(Intent(ACTION_NEW_SMS_LOCAL).setPackage(appCtx.packageName))
+            } finally {
+                pending.finish()
+            }
+        }.start()
     }
 }

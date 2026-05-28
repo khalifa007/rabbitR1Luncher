@@ -85,6 +85,14 @@ class GatewaySession(
     /** Current reconnect backoff delay in ms. Reset on successful connect. */
     @Volatile private var reconnectDelayMs = 2_000L
     private val MAX_RECONNECT_DELAY_MS = 16_000L
+    /** Bumped on every connect() and on stop(). A Listener captures the value
+     *  at open; once it no longer matches, that socket is superseded and its
+     *  late onClosed/onFailure must NOT null `socket` or schedule a reconnect —
+     *  otherwise a stale callback orphans a newer live socket or resurrects a
+     *  stopped session. */
+    private val generation = java.util.concurrent.atomic.AtomicInteger(0)
+    /** Pending reconnect coroutine, cancelled by stop(). */
+    @Volatile private var reconnectJob: Job? = null
 
     var onState: (State) -> Unit = {}
     /** Streaming `delta` events — text accumulates server-side; latest text is sent each tick. */
@@ -97,10 +105,21 @@ class GatewaySession(
     /** Server-snapshot main session key, fired once per `connect` after handshake. */
     var onMainSessionKey: (String) -> Unit = {}
 
+    /** Explicit (re)start from the UI. This is the ONLY place that clears
+     *  [userStopped] — the internal reconnect path must not, or a reconnect
+     *  scheduled just before stop() would erase the user's intent and
+     *  resurrect the session. */
     fun start() {
         if (socket != null) return
+        reconnectJob?.cancel()
         isClosed.set(false)
         userStopped.set(false)
+        connect()
+    }
+
+    /** Open a fresh socket under a new generation. Does NOT touch userStopped
+     *  (see [start]). Used by both [start] and the reconnect path. */
+    private fun connect() {
         val url = prefs.gatewayUrl ?: run {
             onState(State.Error("no gateway url"))
             return
@@ -110,12 +129,17 @@ class GatewaySession(
             return
         }
         onState(State.Connecting)
+        val gen = generation.incrementAndGet()
         val req = Request.Builder().url(wsUrl).build()
-        socket = client.newWebSocket(req, Listener())
+        socket = client.newWebSocket(req, Listener(gen))
     }
 
     fun stop() {
         userStopped.set(true)
+        reconnectJob?.cancel()
+        // Invalidate the current socket's callbacks so its imminent onClosed
+        // (from the close below) can't schedule a reconnect.
+        generation.incrementAndGet()
         if (isClosed.compareAndSet(false, true)) failPending("session stopped")
         runCatching { socket?.close(1000, "panel closed") }
         socket = null
@@ -129,14 +153,16 @@ class GatewaySession(
     /** Schedule a reconnect unless the user explicitly stopped the session. */
     private fun scheduleReconnect() {
         if (userStopped.get()) return
+        reconnectJob?.cancel()
         val delayMs = reconnectDelayMs
         reconnectDelayMs = (reconnectDelayMs * 2).coerceAtMost(MAX_RECONNECT_DELAY_MS)
         android.util.Log.i("OpenClaw", "reconnecting in ${delayMs}ms")
-        scope.launch {
+        reconnectJob = scope.launch {
             delay(delayMs)
-            if (!userStopped.get()) {
-                socket = null
-                start()
+            // Re-check after the backoff. Don't reset userStopped here.
+            if (!userStopped.get() && socket == null) {
+                isClosed.set(false)
+                connect()
             }
         }
     }
@@ -445,7 +471,11 @@ class GatewaySession(
         }
     }
 
-    private inner class Listener : WebSocketListener() {
+    private inner class Listener(private val gen: Int) : WebSocketListener() {
+        /** True only while this socket is still the current one. A superseded
+         *  socket (newer connect, or stop()) must not mutate shared state. */
+        private fun current(): Boolean = gen == generation.get()
+
         override fun onOpen(webSocket: WebSocket, response: Response) {
             // Don't send connect yet — gateway sends `connect.challenge` event
             // with a server-issued nonce that must be echoed back. handleFrame
@@ -453,6 +483,7 @@ class GatewaySession(
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
+            if (!current()) return
             scope.launch { handleFrame(text) }
         }
 
@@ -461,6 +492,7 @@ class GatewaySession(
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            if (!current()) return // stale socket — don't touch `socket`/reconnect
             socket = null
             if (isClosed.compareAndSet(false, true)) failPending("ws closed: $reason")
             if (!userStopped.get()) {
@@ -472,6 +504,7 @@ class GatewaySession(
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            if (!current()) return // stale socket — don't touch `socket`/reconnect
             socket = null
             if (isClosed.compareAndSet(false, true)) {
                 failPending("ws failure: ${t.message ?: t.javaClass.simpleName}")

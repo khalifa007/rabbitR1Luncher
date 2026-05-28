@@ -21,6 +21,14 @@ object NotificationStore {
     private val mem = mutableListOf<Notification>()
     private var nextId: Long = 1L
 
+    /** Single-thread writer so disk persistence never blocks the caller (a
+     *  burst of ntfy / POST /api/notify messages used to rewrite the whole
+     *  file on the main thread). The in-memory list is authoritative for
+     *  reads; the executor just mirrors it to disk in order. */
+    private val ioExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "notif-store-io").apply { isDaemon = true }
+    }
+
     private fun file(ctx: Context): File = File(ctx.filesDir, FILE_NAME)
 
     @Synchronized
@@ -107,12 +115,24 @@ object NotificationStore {
     }
 
     private fun save(ctx: Context) {
-        runCatching {
-            val raw = json.encodeToString(
-                kotlinx.serialization.builtins.ListSerializer(Notification.serializer()),
-                mem.toList(),
-            )
-            file(ctx).writeText(raw)
+        // Snapshot under the monitor (callers are @Synchronized), then write on
+        // the IO thread so a notification burst doesn't rewrite the whole file
+        // on the main thread. Atomic temp+rename so a kill mid-write can't
+        // truncate the existing log.
+        val raw = json.encodeToString(
+            kotlinx.serialization.builtins.ListSerializer(Notification.serializer()),
+            mem.toList(),
+        )
+        val f = file(ctx)
+        ioExecutor.execute {
+            runCatching {
+                val tmp = File(f.parentFile, "${f.name}.tmp")
+                tmp.writeText(raw)
+                if (!tmp.renameTo(f)) {
+                    f.writeText(raw)
+                    tmp.delete()
+                }
+            }
         }
     }
 }

@@ -266,6 +266,9 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 ui.removeCallbacks(transcriberPollRunnable)
                 ui.post(transcriberPollRunnable)
             }
+            // Now that the binder is available we can tell a genuinely-live
+            // recording apart from a stale one and fail the stale ones.
+            reconcileStaleMeetings()
         }
         override fun onServiceDisconnected(name: android.content.ComponentName?) {
             transcriberBinder = null
@@ -335,11 +338,15 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     // adb-installable ElevenLabs key receiver:
-    //   adb shell "am broadcast -a com.r1.launcher.SET_ELEVENLABS_KEY --es key sk_..."
+    //   adb shell "am broadcast -a com.r1.launcher.SET_ELEVENLABS_KEY \
+    //     --es secret <controlSecret> --es key sk_..."
     // Lets the user inject the API key without typing it on a 480x480 round
-    // screen. Receiver is exported so adb (uid 2000) can reach it.
+    // screen. Receiver is exported so adb (uid 2000) can reach it, but gated on
+    // the per-device control secret (Settings → Credentials) so it isn't open
+    // to every installed app — see controlSecretOk().
     private val voiceKeyRx = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent?) {
+            if (!controlSecretOk(i)) return
             val k = i?.getStringExtra("key")?.trim().orEmpty()
             when {
                 k.isEmpty() -> toastFail("--es key missing")
@@ -355,11 +362,14 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
 
     // adb-installable Hermes URL + bearer receiver:
     //   adb shell "am broadcast -a com.r1.launcher.SET_HERMES_CONFIG \
-    //     --es url 'https://hermes.example/v1' --es key 'sk-r1-...'"
-    // Both extras optional — pass one or both. The bearer token is 70 chars
-    // and pasting it via the round-screen RetroKeyboard is impractical.
+    //     --es secret <controlSecret> --es url 'https://hermes.example/v1' --es key 'sk-r1-...'"
+    // url/key optional (pass one or both); secret required (see controlSecretOk).
+    // The bearer token is 70 chars and pasting it via the round-screen
+    // RetroKeyboard is impractical — without the secret gate, though, any app
+    // could repoint Hermes at an attacker and exfiltrate the user's chats.
     private val hermesConfigRx = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent?) {
+            if (!controlSecretOk(i)) return
             val url = i?.getStringExtra("url")?.trim().orEmpty()
             val key = i?.getStringExtra("key")?.trim().orEmpty()
             if (url.isEmpty() && key.isEmpty()) {
@@ -390,9 +400,13 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     // adb-callable web-server toggle:
-    //   adb shell "am broadcast -a com.r1.launcher.TOGGLE_WEB_SERVER --ez on true"
+    //   adb shell "am broadcast -a com.r1.launcher.TOGGLE_WEB_SERVER \
+    //     --es secret <controlSecret> --ez on true"
+    // Secret-gated (controlSecretOk) — otherwise any app could silently expose
+    // the LAN web companion (and, if remote-terminal is on, a root shell).
     private val webToggleRx = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent?) {
+            if (!controlSecretOk(i)) return
             val on = i?.getBooleanExtra("on", !state.webServerEnabled) ?: !state.webServerEnabled
             android.util.Log.i("LauncherActivity", "webToggleRx fired on=$on")
             toggleWebServer(on)
@@ -1242,6 +1256,27 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                 // one-line replies, code-blocks, lists with no terminator.
                 flushStreamingTtsTail()
                 openClawSession?.refreshHistory()
+                // refreshHistory() is best-effort over the network. If it fails
+                // (timeout / socket hiccup), applyOpenClawHistory never runs and
+                // the streaming preview bubble stays frozen on screen forever.
+                // After a grace period, if the same streaming text is still
+                // showing, promote it into a persisted bubble and clear the
+                // preview. A late history refresh replaces the whole list, so
+                // this can't duplicate.
+                val stuckText = state.chatStreamingText
+                if (stuckText.isNotBlank()) {
+                    ui.postDelayed({
+                        if (openClawSession === session && state.chatStreamingText == stuckText) {
+                            state.chatMessages.add(
+                                com.r1.launcher.openclaw.ChatMessage(role = "assistant", text = stuckText),
+                            )
+                            while (state.chatMessages.size > state.chatMessagesMax) {
+                                state.chatMessages.removeAt(0)
+                            }
+                            state.chatStreamingText = ""
+                        }
+                    }, 6000L)
+                }
             }
         }
         session.onMainSessionKey = { key ->
@@ -1715,6 +1750,10 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         state.chatInputLevel = 0
         state.chatPartialText = ""
         state.chatStreamingText = ""
+        // Reset liveness — the send/record guards read chatStatus, and a stale
+        // "live" left here would let a send/PTT fire against the torn-down
+        // session (IllegalStateException("not connected") + an opened mic).
+        state.chatStatus = "idle"
         state.chatPendingRunIds.clear()
         openClawSpeakNextAssistant = false
         // Drop any pending clock-screen talk-shortcut arm — the session it was
@@ -2427,7 +2466,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         val r = Runnable {
             if (state.mediaRecording) {
                 android.util.Log.w("LauncherActivity", "recording watchdog fired — forcing stop")
-                mediaStopVideo()
+                // mediaStopVideo() blocks for up to ~9s (sleeps + 8s join +
+                // remux). The watchdog fires on the main looper, so offload the
+                // stop to a background thread — running it inline here would ANR
+                // the launcher exactly when a long recording auto-stops. The
+                // method already marshals its state writes back via ui.post.
+                Thread { runCatching { mediaStopVideo() } }.start()
             }
         }
         recordingWatchdog = r
@@ -2875,6 +2919,25 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         voiceCapture = null
         voiceSession?.finish()
         // voiceSession nulled inside handleCommittedTranscript or onError.
+        // Watchdog: finish() waits for the server's committed_transcript frame
+        // (the only thing that nulls voiceSession on the happy path). If the
+        // network drops right after the commit write, that frame never lands
+        // and the WebSocket leaks open (25s pings keep it alive) until the next
+        // capture overwrites the field. Force-close it after a grace period if
+        // it's still the same instance, and clear any stuck "transcribing" UI.
+        val pendingSession = voiceSession
+        if (pendingSession != null) {
+            ui.postDelayed({
+                if (voiceSession === pendingSession) {
+                    android.util.Log.w("LauncherActivity", "STT commit timeout — force-closing session")
+                    runCatching { pendingSession.cancel() }
+                    voiceSession = null
+                    state.chatTranscribing = false
+                    state.hermesTranscribing = false
+                    state.terminalTranscribing = false
+                }
+            }, 5000L)
+        }
         when (voiceSink) {
             VoiceSink.CHAT -> {
                 state.chatRecording = false
@@ -4702,12 +4765,17 @@ override fun hermesPasteServerUrlFromClipboard() {
     }
 
     override fun openClawCameraCaptured(jpegBytes: ByteArray) {
-        state.openClawCameraJpegBase64 = android.util.Base64.encodeToString(
-            jpegBytes,
-            android.util.Base64.NO_WRAP,
-        )
-        state.openClawCameraError = null
-        popTone()
+        // Invoked from the camera2 ImageReader callback on a background
+        // HandlerThread. Encode off-main (CPU work), but marshal the Compose
+        // state writes onto the main thread — mutableStateOf writes aren't
+        // thread-safe and an off-main write can drop the recomposition (the
+        // captured image fails to appear) or corrupt snapshot state.
+        val b64 = android.util.Base64.encodeToString(jpegBytes, android.util.Base64.NO_WRAP)
+        ui.post {
+            state.openClawCameraJpegBase64 = b64
+            state.openClawCameraError = null
+            popTone()
+        }
     }
 
     override fun openClawCameraRetake() {
@@ -5285,6 +5353,31 @@ override fun hermesPasteServerUrlFromClipboard() {
         ui.post { state.showToast(msg, ToastKind.FAIL) }
     }
 
+    /**
+     * Gate for the three exported control broadcasts. The receivers stay
+     * exported (so `adb shell am broadcast` still works), but the caller must
+     * pass `--es secret <NotifPrefs.controlSecret>`. Without it, ANY installed
+     * app could set the user's keys, repoint Hermes, or switch on the LAN web
+     * server. The secret is shown read-only in Settings → Credentials. We toast
+     * on a wrong/missing secret so the legit user knows to add it; constant-time
+     * compare so a co-resident app can't byte-probe it (and there's no timing
+     * channel over a fire-and-forget broadcast anyway).
+     */
+    private fun controlSecretOk(i: Intent?): Boolean {
+        val provided = i?.getStringExtra("secret").orEmpty()
+        val ok = provided.isNotEmpty() &&
+            constantTimeEquals(provided, notifPrefs.controlSecret)
+        if (!ok) toastFail("control secret required (settings → creds)")
+        return ok
+    }
+
+    /** Length-independent constant-time string compare for secrets. */
+    private fun constantTimeEquals(a: String, b: String): Boolean =
+        java.security.MessageDigest.isEqual(
+            a.toByteArray(Charsets.UTF_8),
+            b.toByteArray(Charsets.UTF_8),
+        )
+
     // ============================================================
     // Meetings (transcriber) — host implementations
     // ============================================================
@@ -5325,9 +5418,44 @@ override fun hermesPasteServerUrlFromClipboard() {
 
     override fun transcriberOpen() {
         refreshTranscriberPrefsCache()
+        reconcileStaleMeetings()
         reloadMeetings()
         bindTranscriberService()
         state.openTranscriberList()
+    }
+
+    /**
+     * Mark any meeting still flagged RECORDING that isn't the currently-live
+     * recording as FAILED. A process kill mid-record (low-mem / force-stop /
+     * crash) otherwise leaves the meeting stuck at "recording…" forever with a
+     * moov-less, unplayable m4a and no path to play/retry/delete cleanly. This
+     * is the reconciler the TranscriberRecordingService doc-comment promised but
+     * was never implemented. Runs off-main (file I/O); refreshes the list when
+     * it changed anything.
+     */
+    private fun reconcileStaleMeetings() {
+        transcriberExecutor.execute {
+            runCatching {
+                val livePath = transcriberBinder?.takeIf { it.isRecording }?.activePath
+                var changed = false
+                meetingStore.listMeetings()
+                    .filter { it.status == MeetingStatus.RECORDING }
+                    .forEach { entry ->
+                        val m = meetingStore.loadMeeting(entry.uuid) ?: return@forEach
+                        // Skip the genuinely-live recording (recovery from a
+                        // low-mem kill where the FGS survived but the activity
+                        // didn't).
+                        if (livePath != null && m.audioPath == livePath) return@forEach
+                        m.status = MeetingStatus.FAILED
+                        m.errorMessage = "recording interrupted"
+                        meetingStore.save(m)
+                        changed = true
+                    }
+                if (changed) ui.post {
+                    if (state.panel == Panel.TRANSCRIBER_LIST) reloadMeetings()
+                }
+            }
+        }
     }
 
     override fun transcriberStartRecording() {
@@ -5394,28 +5522,38 @@ override fun hermesPasteServerUrlFromClipboard() {
             return
         }
         val elapsed = binder.elapsedMs
-        startService(TranscriberRecordingService.stopIntent(this))
         ui.removeCallbacks(transcriberPollRunnable)
         state.recordingActive = false
         state.recordingElapsedMs = 0L
         state.recordingPeak = 0
         playRecordStopTone()
-
-        if (meeting == null) return
-        // MediaRecorder.stop() finalizes the moov atom; give it ~500ms then
-        // kick off the upload. The FGS's onDestroy/STOP path is synchronous
-        // but the file system flush isn't guaranteed instant.
-        ui.postDelayed({
-            meeting.durationMs = elapsed
-            meeting.status = MeetingStatus.QUEUED
-            meetingStore.save(meeting)
-            reloadMeetings()
-            kickTranscription(meeting)
-        }, 500L)
         transcriberCurrentMeeting = null
         // Drop the user back onto the list panel so the new entry is visible.
         if (state.panel == Panel.TRANSCRIBER_RECORDING) {
             state.openTranscriberList()
+        }
+
+        if (meeting == null) {
+            // No meeting to upload — just tear the FGS down.
+            startService(TranscriberRecordingService.stopIntent(this))
+            return
+        }
+        transcriberExecutor.execute {
+            // Finalize the MP4 synchronously through the bound service so the
+            // moov atom is guaranteed written before we upload. The old code
+            // fired startService(stopIntent) then waited a fixed 500ms, but that
+            // delivery is an IPC round-trip whose latency can exceed 500ms on a
+            // loaded device — losing the race and uploading a truncated file
+            // that Scribe rejects (meeting wrongly marked FAILED).
+            runCatching { binder.finalizeRecording() }
+            // FGS teardown — recorder is already released, so this just drops
+            // the notification + stops the service. Marshalled to main.
+            ui.post { startService(TranscriberRecordingService.stopIntent(this)) }
+            meeting.durationMs = elapsed
+            meeting.status = MeetingStatus.QUEUED
+            meetingStore.save(meeting)
+            ui.post { reloadMeetings() }
+            kickTranscription(meeting)
         }
     }
 
@@ -5513,6 +5651,10 @@ override fun hermesPasteServerUrlFromClipboard() {
                     .build(),
             )
             setDataSource(audio.absolutePath)
+            // Async prepare — a meeting m4a can be tens of MB; a synchronous
+            // prepare() here would block the main thread (ANR) at the moment the
+            // user taps play. start() fires from onPrepared instead.
+            setOnPreparedListener { it.start() }
             setOnCompletionListener {
                 state.detailPlaying = false
                 runCatching { it.release() }
@@ -5524,8 +5666,7 @@ override fun hermesPasteServerUrlFromClipboard() {
                 if (transcriberPlayer === mp) transcriberPlayer = null
                 true
             }
-            prepare()
-            start()
+            prepareAsync()
         }
         state.detailPlaying = true
     }
@@ -5842,6 +5983,9 @@ override fun hermesPasteServerUrlFromClipboard() {
         state.hermesKeyTail = if (hk.isNotBlank()) hk.takeLast(4) else ""
         // Webhook token — always visible (gen-on-read), no "set" gate.
         state.webhookTokenDisplay = notifPrefs.webhookToken.takeLast(8)
+        // Control secret — shown in full (8 chars) so it can be copied into adb
+        // commands for the SET_*/TOGGLE_* broadcasts.
+        state.controlSecretDisplay = notifPrefs.controlSecret
     }
 
     /** Short blocking carroot helper for the small probes above. Distinct
@@ -5862,7 +6006,7 @@ override fun hermesPasteServerUrlFromClipboard() {
 
     override fun credentialsRowActivate(idx: Int) {
         // Row layout (kept in sync with SettingsCredentialsPanel):
-        //   1=elevenlabs, 2=hermes, 3=ntfy_topic, 4=webhook (regenerate)
+        //   1=elevenlabs, 2=hermes, 3=ntfy_topic, 4=webhook (regen), 5=control secret (regen)
         when (idx) {
             1 -> { state.credentialsEditField = "elevenlabs"; state.credentialsEditInput = "" }
             2 -> { state.credentialsEditField = "hermes"; state.credentialsEditInput = "" }
@@ -5874,6 +6018,12 @@ override fun hermesPasteServerUrlFromClipboard() {
                 // Webhook token — regenerate in place, no keyboard.
                 regenerateWebhookToken()
                 toast("new webhook token: …${state.webhookTokenDisplay}")
+            }
+            5 -> {
+                // Control secret — regenerate in place. Any open adb snippets
+                // must switch to the new value.
+                state.controlSecretDisplay = notifPrefs.regenerateControlSecret()
+                toast("new control secret: ${state.controlSecretDisplay}")
             }
         }
     }

@@ -795,7 +795,7 @@ fun LauncherState.wheelDown(host: LauncherHost) {
             if (prev != notificationsFocus) host.navTone()
         }
         Panel.SETTINGS_CREDENTIALS -> {
-            // back, anthropic, elevenlabs, hermes, ntfy topic, webhook token
+            // back, elevenlabs, hermes, ntfy topic, webhook token, control secret
             val prev = credentialsFocus
             credentialsFocus = (credentialsFocus + 1).coerceAtMost(5)
             if (prev != credentialsFocus) host.navTone()

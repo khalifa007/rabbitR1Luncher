@@ -202,11 +202,20 @@ class R1WebServer(
         val queryToken = session.parameters["t"]?.firstOrNull()
             ?: session.parameters["token"]?.firstOrNull()
         val provided = headerToken ?: queryToken
-        if (provided.isNullOrBlank() || provided != expected) {
+        if (provided.isNullOrBlank() || !secretEquals(provided, expected)) {
             return errorResponse(Response.Status.UNAUTHORIZED, "bad panel token")
         }
         return null
     }
+
+    /** Constant-time secret comparison. Plain `==`/`!=` short-circuits on the
+     *  first differing byte, which on a quiet LAN is a timing oracle against
+     *  the passcode / panel token / webhook token. */
+    private fun secretEquals(a: String, b: String): Boolean =
+        java.security.MessageDigest.isEqual(
+            a.toByteArray(Charsets.UTF_8),
+            b.toByteArray(Charsets.UTF_8),
+        )
 
     /** Exchange a 4-digit passcode for the long panel token.
      *
@@ -252,7 +261,7 @@ class R1WebServer(
         val prefs = com.r1.launcher.notifications.NotifPrefs.get(ctx)
         val expected = prefs.panelPasscode
 
-        if (passcode.length == 4 && passcode == expected) {
+        if (passcode.length == 4 && secretEquals(passcode, expected)) {
             // Successful login — clear state so retry counter doesn't bleed
             // into the next session.
             authAttempts.remove(ip)
@@ -323,7 +332,7 @@ class R1WebServer(
         } else null
         val queryToken = session.parameters["token"]?.firstOrNull()
         val provided = headerToken ?: queryToken
-        if (provided.isNullOrBlank() || provided != expected) {
+        if (provided.isNullOrBlank() || !secretEquals(provided, expected)) {
             return errorResponse(Response.Status.UNAUTHORIZED, "bad token")
         }
 
@@ -443,6 +452,13 @@ class R1WebServer(
             return newFixedLengthResponse(Response.Status.OK, "image/svg+xml", svg)
         }
 
+        // `rest` is an untrusted, percent-decoded URL segment. Reject any path
+        // that could escape the captures dir before touching the filesystem —
+        // otherwise `..%2f..%2fsms-cache.json` reads arbitrary app-private files
+        // (this route is served BEFORE the panel-token check in serveHttp).
+        if (rest.contains("..") || rest.startsWith("/") || rest.startsWith("\\")) {
+            return notFound()
+        }
         val captures = java.io.File(ctx.filesDir, "captures")
         val file: java.io.File = if (rest.startsWith(".thumbs/")) {
             java.io.File(captures, "videos/$rest")
@@ -455,6 +471,10 @@ class R1WebServer(
                 else -> img
             }
         }
+        // Belt-and-suspenders: confirm the resolved file is still inside the
+        // captures tree (catches symlinks and any decoding we missed above).
+        val capRoot = captures.canonicalFile.path + java.io.File.separator
+        if (!file.canonicalFile.path.startsWith(capRoot)) return notFound()
         if (!file.exists() || !file.isFile) return notFound()
 
         val mime = guessMime(file.name)
@@ -479,7 +499,7 @@ class R1WebServer(
         val expected = com.r1.launcher.notifications.NotifPrefs.get(ctx).panelToken
         val provided = handshake.parameters["t"]?.firstOrNull()
             ?: handshake.parameters["token"]?.firstOrNull()
-        val authed = !provided.isNullOrBlank() && provided == expected
+        val authed = !provided.isNullOrBlank() && secretEquals(provided, expected)
         if (!authed) {
             Log.w(TAG, "ws open $uri REJECTED — bad/missing panel token")
             return RejectedSocket(handshake)
@@ -522,7 +542,9 @@ class R1WebServer(
         }
 
         override fun onMessage(message: WebSocketFrame) {
-            Log.i(TAG, "onMessage opcode=${message.opCode} text=${message.textPayload?.take(80)}")
+            // Never log the payload — inbound RPC frames carry secrets
+            // (voice.set_key, credentials.*, auth). Log only opcode + length.
+            Log.i(TAG, "onMessage opcode=${message.opCode} len=${message.textPayload?.length ?: 0}")
             val text = message.textPayload ?: return
             val req = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull()
                 ?: return sendError("", "bad_json", "could not parse")

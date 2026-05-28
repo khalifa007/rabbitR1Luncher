@@ -118,21 +118,68 @@ class NotifPrefs private constructor(ctx: Context) {
 
     /** Human-friendly 4-digit passcode the user types on their phone to unlock
      *  the embedded web panel. Exchanged for [panelToken] via POST /api/auth.
-     *  Default "0000" — the user is expected to change it from Settings. The
-     *  4-digit keyspace is only safe behind the per-IP rate limiter in
+     *  On a fresh device this is *generated at random* on first read and
+     *  persisted — never the well-known "0000", which any LAN peer would guess
+     *  on the first try. The user reads/changes it from Settings → Network.
+     *  The 4-digit keyspace is only safe behind the per-IP rate limiter in
      *  R1WebServer; do not skip that. */
     var panelPasscode: String
         @Synchronized
-        get() = secure.getString(KEY_PANEL_PASSCODE, null)?.takeIf { isValidPasscode(it) }
-            ?: DEFAULT_PASSCODE
+        get() {
+            val stored = secure.getString(KEY_PANEL_PASSCODE, null)?.takeIf { isValidPasscode(it) }
+            if (stored != null) return stored
+            val fresh = generateRandomPasscode()
+            secure.edit().putString(KEY_PANEL_PASSCODE, fresh).commit()
+            return fresh
+        }
         @Synchronized
         set(value) {
             require(isValidPasscode(value)) { "passcode must be exactly 4 digits" }
             secure.edit().putString(KEY_PANEL_PASSCODE, value).commit()
         }
 
+    /** Per-device secret gating the exported control broadcasts
+     *  (SET_ELEVENLABS_KEY / SET_HERMES_CONFIG / TOGGLE_WEB_SERVER). Senders
+     *  must pass `--es secret <this>`; without it ANY installed app could set
+     *  the user's API keys, repoint the AI backend, or switch on the LAN web
+     *  server. Lazy-generated like the tokens; surfaced read-only in
+     *  Settings → Credentials so the user can copy it into their adb snippets. */
+    val controlSecret: String
+        @Synchronized
+        get() {
+            val existing = secure.getString(KEY_CONTROL_SECRET, null)
+            if (!existing.isNullOrBlank()) return existing
+            val fresh = generateShortSecret()
+            secure.edit().putString(KEY_CONTROL_SECRET, fresh).commit()
+            return fresh
+        }
+
+    @Synchronized
+    fun regenerateControlSecret(): String {
+        val fresh = generateShortSecret()
+        secure.edit().putString(KEY_CONTROL_SECRET, fresh).commit()
+        return fresh
+    }
+
     private fun isValidPasscode(s: String): Boolean =
         s.length == 4 && s.all { it.isDigit() }
+
+    /** Random 4-digit passcode, never the well-known [DEFAULT_PASSCODE]. */
+    private fun generateRandomPasscode(): String {
+        val n = SecureRandom().nextInt(10_000)
+        val code = "%04d".format(n)
+        return if (code == DEFAULT_PASSCODE) "%04d".format((n + 1) % 10_000) else code
+    }
+
+    /** Short (8 hex char) secret the user can realistically type into an adb
+     *  command. Not high-entropy by token standards, but a broadcast carries no
+     *  timing feedback so brute force isn't practical, and it keeps a malicious
+     *  app that doesn't know it out. */
+    private fun generateShortSecret(): String {
+        val bytes = ByteArray(4)
+        SecureRandom().nextBytes(bytes)
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
 
     /** Synchronous write that returns the underlying `Editor.commit()` boolean
      *  so callers can branch on success. The kotlin `edit { }` extension
@@ -155,6 +202,9 @@ class NotifPrefs private constructor(ctx: Context) {
         private const val KEY_TOKEN = "webhook.token"
         private const val KEY_PANEL_TOKEN = "panel.token"
         private const val KEY_PANEL_PASSCODE = "panel.passcode"
+        private const val KEY_CONTROL_SECRET = "control.secret"
+        /** Reserved as the one passcode we refuse to auto-generate — no longer
+         *  used as a fallback default (fresh devices get a random code). */
         const val DEFAULT_PASSCODE = "0000"
 
         @Volatile private var instance: NotifPrefs? = null

@@ -67,6 +67,30 @@ class TranscriberRecordingService : Service() {
          *  the first ~200ms of warm-up. Range [0, 32767]. */
         val peakLevel: Int get() = runCatching { recorder?.maxAmplitude ?: 0 }.getOrDefault(0)
         val activePath: String? get() = outPath
+
+        /**
+         * Synchronously stop + release the MediaRecorder, finalizing the MP4
+         * `moov` atom, and return the output path (or null if not recording).
+         * The caller can upload the file the instant this returns — no waiting
+         * on a startService→onStartCommand delivery whose latency could lose a
+         * race with a fixed delay and upload a truncated/unplayable file. FGS
+         * teardown is left to a follow-up ACTION_STOP (which sees recorder==null
+         * and just drops the notification). MediaRecorder.stop() may block
+         * briefly; call this OFF the main thread.
+         */
+        fun finalizeRecording(): String? = finalizeRecorderInternal()
+    }
+
+    @Synchronized
+    private fun finalizeRecorderInternal(): String? {
+        val r = recorder ?: return null
+        recorder = null
+        val path = outPath
+        // stop() writes the moov atom — file is unreadable until it returns.
+        runCatching { r.stop() }
+        runCatching { r.release() }
+        startedAtMs = 0L
+        return path
     }
 
     private val binder = LocalBinder()

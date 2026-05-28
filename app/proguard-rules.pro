@@ -21,6 +21,23 @@
 -keep class org.bouncycastle.** { *; }
 -dontwarn org.bouncycastle.**
 
+# JavaMail (com.sun.mail:android-mail) + JAF activation, used by SmtpSender for
+# the Meetings email export. These do heavy reflective provider lookup —
+# Transport/Store protocol classes via Class.forName, and content handlers
+# (com.sun.mail.handlers.*) resolved by name through the activation framework.
+# R8 would strip/rename them and multipart SMTP send would break ONLY in the
+# minified release build (never in the debug dev loop). Keep wholesale; the
+# handler class names are also referenced as strings in SmtpSender.ensureMailcap.
+-keep class com.sun.mail.** { *; }
+-keep class javax.mail.** { *; }
+-keep class javax.activation.** { *; }
+-keep class com.sun.activation.** { *; }
+-dontwarn com.sun.mail.**
+-dontwarn javax.mail.**
+-dontwarn javax.activation.**
+-dontwarn com.sun.activation.**
+-dontwarn myjava.awt.datatransfer.**
+
 # OkHttp / Okio / Conscrypt warnings (SSL platform-detection paths we don't hit).
 -dontwarn okhttp3.**
 -dontwarn okio.**

@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,6 +56,9 @@ fun OpenClawQrPanel(
         val colors = LocalR1Colors.current
         val type = LocalR1Type.current
         var scanner by remember { mutableStateOf<DecoratedBarcodeView?>(null) }
+        // Hoisted so the re-arm effect below can reset it. Single-shot per scan
+        // so we don't fire onScanned twice for the same code.
+        val fired = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
 
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
 
@@ -66,11 +70,9 @@ fun OpenClawQrPanel(
                         statusView.visibility = android.view.View.GONE
                         viewFinder.setLaserVisibility(false)
                         decodeContinuous(object : BarcodeCallback {
-                            private var fired = false
                             override fun barcodeResult(result: BarcodeResult?) {
                                 val text = result?.text ?: return
-                                if (fired) return
-                                fired = true
+                                if (!fired.compareAndSet(false, true)) return
                                 pause()
                                 onScanned(text)
                             }
@@ -80,6 +82,16 @@ fun OpenClawQrPanel(
                     }
                 },
             )
+
+            // Re-arm after a rejected decode: a bad/wrong QR sets qrError and we
+            // paused above, so without this the user can't scan a second QR
+            // without leaving and re-entering the panel.
+            LaunchedEffect(state.qrError) {
+                if (state.qrError != null) {
+                    fired.set(false)
+                    runCatching { scanner?.resume() }
+                }
+            }
 
             // QR scanner aims at EXTERNAL codes (posters, screens,
             // packages), so pivot the lens fully away from the user

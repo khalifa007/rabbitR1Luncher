@@ -166,6 +166,17 @@ object OTAUpdater {
                     }
                 }
 
+                // Only a final HTTP 200 is a real APK body. If the loop broke on
+                // a 3xx with no Location (or hit the hop limit), `conn` still
+                // points at that redirect response — streaming it would write a
+                // redirect/error page into the .apk and hand it to pm install.
+                if (conn.responseCode != 200) {
+                    val rc = conn.responseCode
+                    conn.disconnect()
+                    resetState(state, onResult, "Download failed (HTTP $rc)")
+                    return@Thread
+                }
+
                 // Stream download to cacheDir (app has full write access here)
                 FileOutputStream(cacheFile).use { out ->
                     conn.inputStream.use { input ->
@@ -210,8 +221,12 @@ object OTAUpdater {
                 if (rootFunc != null) {
                     val src = cacheFile.absolutePath
                     val dst = "/data/local/tmp/update.apk"
-                    // Copy to world-readable location then install silently via root.
-                    rootFunc("cp \"$src\" $dst && chmod 644 $dst")
+                    // Stage in /data/local/tmp then install via root. chmod 600
+                    // (not 644) — the copy runs as root via carroot so the file
+                    // is root-owned, and a root `pm install` reads it fine; 600
+                    // keeps any other local process from reading the staged APK
+                    // during the install window.
+                    rootFunc("cp \"$src\" $dst && chmod 600 $dst")
                     notify(onResult, "Installing update...")
                     // sendToCarroot returns true on socket-write success, NOT on
                     // command success — pm install can fail (signature mismatch,

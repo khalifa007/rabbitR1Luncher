@@ -51,9 +51,14 @@ class StreamingAudioCapture {
     fun stop() { stopRequested = true }
 
     fun close() {
+        // Non-blocking: callers run on the main looper and a blocking join was
+        // up to 500ms of UI jank on every push-to-talk release. The capture
+        // thread checks stopRequested each read and releases the AudioRecord +
+        // effects in its finally, nulling `feeder` itself — so this instance's
+        // re-entry guard still holds. (Cross-instance mic overlap is bounded by
+        // the caller's 200ms mic-open delay, same as the old join(500), which
+        // could time out and proceed anyway.)
         stopRequested = true
-        feeder?.let { runCatching { it.join(500) } }
-        feeder = null
     }
 
     private fun runCapture(cb: Callback) {
