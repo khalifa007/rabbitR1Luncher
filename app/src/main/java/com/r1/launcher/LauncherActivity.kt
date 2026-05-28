@@ -159,6 +159,12 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private val NOTIF_SOUND_MIN_GAP_MS = 3000L
     private val wifiSharePrefs by lazy { com.r1.launcher.wifishare.WifiSharePrefs.get(this) }
     private var wifiShareTimerEndMs: Long = 0L
+    // True while a user-initiated toggle is mid-verification — suppresses the
+    // refreshNetwork() reconcile so a transient ap0 reading can't fight it.
+    @Volatile private var wifiShareToggleInFlight = false
+    // True while a reconcile check is already running — coalesces the burst of
+    // refreshNetwork() calls during softap up/down into one ap0 probe.
+    @Volatile private var wifiShareSyncInFlight = false
     private val wifiShareTimerRunnable = Runnable { toggleWifiShare(false) }
     private val wifiShareCountdownRunnable = object : Runnable {
         override fun run() {
@@ -931,6 +937,36 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             }.start()
         } else {
             state.wifiConnectedSsid = ""
+        }
+
+        // Reconcile the hotspot toggle with the real ap0 interface. wifiShareEnabled
+        // defaults false and is otherwise only flipped by a manual toggle, so a softap
+        // that's actually up (process restart, prior session, externally started) would
+        // wrongly read OFF in Settings. isWifiShareEnabled() does blocking carroot I/O,
+        // so probe off-thread and post the result. Guards: skip while a user toggle is
+        // verifying, and coalesce concurrent refreshNetwork() calls into one probe.
+        if (!wifiShareToggleInFlight && !wifiShareSyncInFlight) {
+            wifiShareSyncInFlight = true
+            Thread {
+                val up = isWifiShareEnabled()
+                ui.post {
+                    if (!wifiShareToggleInFlight && state.wifiShareEnabled != up) {
+                        state.wifiShareEnabled = up
+                        if (up) {
+                            armWifiShareTimer()
+                            ui.removeCallbacks(wifiShareClientPollRunnable)
+                            ui.post(wifiShareClientPollRunnable)
+                        } else {
+                            ui.removeCallbacks(wifiShareTimerRunnable)
+                            ui.removeCallbacks(wifiShareCountdownRunnable)
+                            ui.removeCallbacks(wifiShareClientPollRunnable)
+                            state.wifiShareTimerRemainingSec = 0
+                            state.wifiShareConnectedClients.clear()
+                        }
+                    }
+                }
+                wifiShareSyncInFlight = false
+            }.start()
         }
     }
 
@@ -1966,6 +2002,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     }
 
     override fun toggleWifiShare(enable: Boolean) {
+        wifiShareToggleInFlight = true
         state.wifiShareEnabled = enable
         if (!enable) {
             ui.removeCallbacks(wifiShareTimerRunnable)
@@ -2011,6 +2048,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     state.wifiShareEnabled = !enable
                     toastFail((if (enable) "Hotspot failed: " else "Stop failed: ") + reason.take(80))
                 }
+                wifiShareToggleInFlight = false
                 return@Thread
             }
             ui.post {
@@ -2021,6 +2059,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     ui.post(wifiShareClientPollRunnable)
                 }
             }
+            wifiShareToggleInFlight = false
         }.start()
     }
 
