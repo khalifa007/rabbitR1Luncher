@@ -163,7 +163,7 @@ object WebRpc {
                 put("cwd", state.terminalCwd)
                 put("busy", state.terminalBusy)
                 put("lines", buildJsonArray {
-                    state.terminalOutput.toList().forEach { add(JsonPrimitive(it)) }
+                    state.terminalOutput.toList().forEach { add(JsonPrimitive(it.text)) }
                 })
             }
         }

@@ -23,7 +23,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -67,23 +68,12 @@ fun TerminalPanel(
         exit = fadeOut(tween(ANIM_CLOSE_MS)) +
             slideOutVertically(tween(ANIM_CLOSE_MS)) { it },
     ) {
-        val output = state.terminalOutput
         val listState = rememberLazyListState()
         // Use the locale-aware display family for UI chrome (back pill, status,
         // pills, empty hint) so Arabic glyphs render in Tajawal-Bold instead of
         // the system Monospace fallback. Actual shell output, prompt $, cwd
         // path, and input text stay Monospace — they're shell content.
         val ui = LocalR1Type.current.appCard.fontFamily
-
-        // Auto-snap to bottom when new lines arrive AND user hasn't scrolled up
-        // (terminalScrollIndex==0 means "show latest"). When the user scrolls up
-        // we map the offset relative to the bottom so the view stays anchored.
-        LaunchedEffect(output.size, state.terminalScrollIndex) {
-            if (output.isEmpty()) return@LaunchedEffect
-            val target = (output.lastIndex - state.terminalScrollIndex)
-                .coerceIn(0, output.lastIndex)
-            listState.scrollToItem(target)
-        }
 
         var showPaste by remember { mutableStateOf(false) }
         var pasteText by remember { mutableStateOf("") }
@@ -119,38 +109,19 @@ fun TerminalPanel(
             )
 
             // --- output scrollback ---
-            Box(
+            // Isolated in its own composable so it's the SOLE reader of
+            // state.terminalOutput — appending a streamed line invalidates only
+            // this child (and just the one new LazyColumn item via the stable
+            // id key), not the parent header/input row.
+            TerminalOutput(
+                state = state,
+                listState = listState,
+                uiFamily = ui,
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
                     .padding(horizontal = 10.dp),
-            ) {
-                if (output.isEmpty()) {
-                    Text(
-                        text = stringResource(R.string.terminal_empty_hint),
-                        color = Color(0xFF777777),
-                        fontSize = 13.sp,
-                        fontFamily = ui,
-                        modifier = Modifier.align(Alignment.Center),
-                    )
-                } else {
-                    LazyColumn(
-                        state = listState,
-                        contentPadding = PaddingValues(vertical = 6.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
-                        modifier = Modifier.fillMaxSize(),
-                    ) {
-                        itemsIndexed(output) { _, line ->
-                            Text(
-                                text = line,
-                                color = lineColor(line),
-                                fontSize = 13.sp,
-                                fontFamily = FontFamily.Monospace,
-                            )
-                        }
-                    }
-                }
-            }
+            )
 
             // --- input row ---
             Row(
@@ -255,6 +226,56 @@ fun TerminalPanel(
             },
             onDismiss = { showPaste = false },
         )
+        }
+    }
+}
+
+/** Scrollback area + auto-scroll. Sole reader of [LauncherState.terminalOutput]
+ *  so streamed-line appends recompose only here. */
+@Composable
+private fun TerminalOutput(
+    state: LauncherState,
+    listState: LazyListState,
+    uiFamily: FontFamily?,
+    modifier: Modifier = Modifier,
+) {
+    val output = state.terminalOutput
+
+    // Auto-snap to bottom when new lines arrive AND user hasn't scrolled up
+    // (terminalScrollIndex==0 means "show latest"). When the user scrolls up
+    // we map the offset relative to the bottom so the view stays anchored.
+    LaunchedEffect(output.size, state.terminalScrollIndex) {
+        if (output.isEmpty()) return@LaunchedEffect
+        val target = (output.lastIndex - state.terminalScrollIndex)
+            .coerceIn(0, output.lastIndex)
+        listState.scrollToItem(target)
+    }
+
+    Box(modifier = modifier) {
+        if (output.isEmpty()) {
+            Text(
+                text = stringResource(R.string.terminal_empty_hint),
+                color = Color(0xFF777777),
+                fontSize = 13.sp,
+                fontFamily = uiFamily,
+                modifier = Modifier.align(Alignment.Center),
+            )
+        } else {
+            LazyColumn(
+                state = listState,
+                contentPadding = PaddingValues(vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                items(output, key = { it.id }) { line ->
+                    Text(
+                        text = line.text,
+                        color = lineColor(line.text),
+                        fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            }
         }
     }
 }

@@ -240,6 +240,14 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
     private var transcriberCurrentMeeting: Meeting? = null
     private var transcriberPlayer: MediaPlayer? = null
     private val transcriberExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    // Single shared worker for cold-start + app-open encrypted-prefs hydration.
+    // EncryptedSharedPreferences.create does a MasterKey keystore/TEE round-trip
+    // + AES-SIV decrypt (20-100ms each on the A53); doing six of them serially on
+    // the main thread before setContent delays first paint, and the same cost
+    // recurs on the Hermes/Translator app-open tap (prefs build + history JSON
+    // decode of up to 200/100 entries). Read off-thread, post values back into
+    // LauncherState (which already carries defaults) a frame or two later.
+    private val prefsHydrationExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     private val transcriberPollRunnable = object : Runnable {
         override fun run() {
             val b = transcriberBinder
@@ -641,52 +649,137 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
             toast(msg)
         }
 
-        // Hydrate transcriber prefs cache for the UI thread.
-        refreshTranscriberPrefsCache()
         // Pre-bind to the recording service so a recovery from low-mem-kill
         // (FGS survives, activity doesn't) immediately sees the active recording.
         bindTranscriberService()
 
-        state.openClawHideChat = openClawPrefs.hideChat
-        state.chatFontSize = openClawPrefs.chatFontSize
-        hydrateHermesStateFromPrefs()
-        // Hydrate global voice state from prefs.
-        state.voiceEnabled = voicePrefs.enabled
-        state.voiceId = voicePrefs.voiceId
-        state.voiceCustomId = voicePrefs.customVoiceId.orEmpty()
-        state.talkShortcut = voicePrefs.talkShortcut
-        state.voiceModel = voicePrefs.model
-        state.voiceStability = voicePrefs.stability
-        state.voiceSimilarity = voicePrefs.similarity
-        state.voiceStyle = voicePrefs.style
-        state.voiceSpeed = voicePrefs.speed
-        state.voiceSpeakerBoost = voicePrefs.speakerBoost
-        refreshVoiceKeyState()
-        state.wifiShareSsid = wifiSharePrefs.ssid
-        state.wifiSharePassword = wifiSharePrefs.password
-        state.wifiShareTimerMinutes = wifiSharePrefs.timerMinutes
-        // Hydrate notifications from disk so the HOME badge is correct on
-        // first paint after a cold start. Append-only JSON, oldest-first.
-        state.notificationSoundEnabled = notifPrefs.soundEnabled
-        // 4-digit web-panel passcode — shown in Settings → Network so the user
-        // can read what to type on their phone. Loaded once at start; updated
-        // in-place by [panelPasscodeSave].
-        state.panelPasscode = notifPrefs.panelPasscode
-        // Screen-recording audio toggles — mirror prefs into state so the
-        // Remote Panel settings page renders the right checkmarks on first
-        // open. setCapture*Enabled writes back through here for live updates.
+        // Screen-recording audio toggles — plain prefs (cheap), so kept on the
+        // main thread. setCapture*Enabled writes back through here for live updates.
         state.captureMicEnabled = com.r1.launcher.media.MediaCapturePrefs.micEnabled(this)
         state.capturePlaybackEnabled = com.r1.launcher.media.MediaCapturePrefs.playbackEnabled(this)
-        runCatching {
-            val persisted = com.r1.launcher.notifications.NotificationStore.all(this)
-            state.notifications.clear()
-            state.notifications.addAll(persisted)
-            state.notificationsUnread = persisted.count { !it.read }
+
+        // Defer every EncryptedSharedPreferences-backed hydration off the main
+        // thread. Each .create is a MasterKey keystore round-trip + AES-SIV
+        // decrypt; six of them serially before setContent is what stalls first
+        // paint. None of these gate HOME (the first frame) — LauncherState already
+        // carries safe defaults, so reading them a frame or two later is fine.
+        // Transcriber / OpenClaw / Hermes / Voice / WifiShare / Notif live here.
+        prefsHydrationExecutor.execute {
+            // Read everything off-thread first (this is where the keystore +
+            // AES-SIV + history-JSON cost lives), then apply to state on the UI
+            // thread in one post so Compose sees a consistent snapshot.
+            val openClawHideChat = openClawPrefs.hideChat
+            val chatFontSize = openClawPrefs.chatFontSize
+            val voiceEnabled = voicePrefs.enabled
+            val voiceId = voicePrefs.voiceId
+            val voiceCustomId = voicePrefs.customVoiceId.orEmpty()
+            val talkShortcut = voicePrefs.talkShortcut
+            val voiceModel = voicePrefs.model
+            val voiceStability = voicePrefs.stability
+            val voiceSimilarity = voicePrefs.similarity
+            val voiceStyle = voicePrefs.style
+            val voiceSpeed = voicePrefs.speed
+            val voiceSpeakerBoost = voicePrefs.speakerBoost
+            val wifiShareSsid = wifiSharePrefs.ssid
+            val wifiSharePassword = wifiSharePrefs.password
+            val wifiShareTimerMinutes = wifiSharePrefs.timerMinutes
+            val notificationSoundEnabled = notifPrefs.soundEnabled
+            val panelPasscode = notifPrefs.panelPasscode
+            // Transcriber SMTP display mirrors (encrypted).
+            val hasSmtp = transcriberPrefs.hasSmtp()
+            val smtpHost = transcriberPrefs.smtpHost
+            val smtpPort = transcriberPrefs.smtpPort
+            val smtpUser = transcriberPrefs.smtpUser ?: ""
+            val defaultRecipient = transcriberPrefs.defaultRecipient
+            // Voice key display (encrypted).
+            val voiceKey = voicePrefs.elevenlabsKey
+            // Hermes: connections + active + per-connection history. `active`
+            // decrypts the connection list (AES-SIV); the history load is a file
+            // readText + JSON decode of up to 200 entries — all of it off-thread.
+            val hermesActive = hermesPrefs.active
+            val hermesUrl = hermesActive?.url.orEmpty()
+            val hermesKey = hermesActive?.apiKey.orEmpty()
+            val hermesModel = hermesPrefs.model
+            val hermesFontSize = hermesPrefs.fontSize
+            val hermesHideChat = hermesPrefs.hideChat
+            val hermesConnections = hermesPrefs.connections
+            val hermesActiveId = hermesActive?.id
+            val hermesHistory = if (hermesActiveId != null)
+                com.r1.launcher.hermes.HermesHistoryStore.load(this, hermesActiveId)
+            else emptyList()
+            // Credentials panel: webhook token + control secret (encrypted notif).
+            val webhookTokenTail = notifPrefs.webhookToken.takeLast(8)
+            val controlSecret = notifPrefs.controlSecret
+            // Notifications from disk — append-only JSON, oldest-first. File IO,
+            // not encrypted, but still off the first-paint path; badge updates
+            // a frame or two later.
+            val persistedNotifs = runCatching {
+                com.r1.launcher.notifications.NotificationStore.all(this)
+            }.getOrNull()
+            ui.post {
+                state.openClawHideChat = openClawHideChat
+                state.chatFontSize = chatFontSize
+                state.voiceEnabled = voiceEnabled
+                state.voiceId = voiceId
+                state.voiceCustomId = voiceCustomId
+                state.talkShortcut = talkShortcut
+                state.voiceModel = voiceModel
+                state.voiceStability = voiceStability
+                state.voiceSimilarity = voiceSimilarity
+                state.voiceStyle = voiceStyle
+                state.voiceSpeed = voiceSpeed
+                state.voiceSpeakerBoost = voiceSpeakerBoost
+                state.wifiShareSsid = wifiShareSsid
+                state.wifiSharePassword = wifiSharePassword
+                state.wifiShareTimerMinutes = wifiShareTimerMinutes
+                state.notificationSoundEnabled = notificationSoundEnabled
+                // 4-digit web-panel passcode — shown in Settings → Network.
+                state.panelPasscode = panelPasscode
+                if (persistedNotifs != null) {
+                    state.notifications.clear()
+                    state.notifications.addAll(persistedNotifs)
+                    state.notificationsUnread = persistedNotifs.count { !it.read }
+                }
+                // Transcriber SMTP display (mirrors refreshTranscriberPrefsCache).
+                state.hasSmtp = hasSmtp
+                state.smtpHostDisplay = smtpHost
+                state.smtpPortDisplay = smtpPort
+                state.smtpUserDisplay = smtpUser
+                state.defaultRecipientDisplay = defaultRecipient
+                // Voice key display (mirrors refreshVoiceKeyState).
+                if (voiceKey.isNullOrBlank()) {
+                    state.hasVoiceKey = false
+                    state.voiceKeyTail = ""
+                } else {
+                    state.hasVoiceKey = true
+                    state.voiceKeyTail = voiceKey.takeLast(4)
+                }
+                // Hermes (mirrors hydrateHermesStateFromPrefs). Only seed history
+                // if the in-memory list is still empty — the user may have opened
+                // the chat and loaded/typed before this post landed.
+                state.hermesServerUrl = hermesUrl
+                state.hermesApiKeyTail = if (hermesKey.length > 6) "…" + hermesKey.takeLast(4)
+                    else if (hermesKey.isNotEmpty()) "set" else ""
+                state.hermesModel = hermesModel
+                state.hermesFontSize = hermesFontSize
+                state.hermesHideChat = hermesHideChat
+                state.hermesServerUrlInput = hermesUrl
+                state.hermesApiKeyInput = ""
+                state.hermesConnections.clear()
+                state.hermesConnections.addAll(hermesConnections)
+                state.hermesActiveId = hermesActiveId
+                if (hermesActiveId != null && hermesHistory.isNotEmpty()) {
+                    val list = state.hermesActiveHistory()
+                    if (list != null && list.isEmpty()) list.addAll(hermesHistory)
+                }
+                // Credentials panel display mirrors (mirrors refreshCredentialsDisplay;
+                // ElevenLabs/voice key already handled above).
+                state.hasHermesKey = hermesKey.isNotBlank()
+                state.hermesKeyTail = if (hermesKey.isNotBlank()) hermesKey.takeLast(4) else ""
+                state.webhookTokenDisplay = webhookTokenTail
+                state.controlSecretDisplay = controlSecret
+            }
         }
-        // Credentials panel display mirrors. Anthropic key isn't in a
-        // SharedPreferences — probe the file via the existing claude auth
-        // status path which already handles the carroot read.
-        refreshCredentialsDisplay()
         // ntfy.sh subscriber: hydrate display state + auto-start if the
         // user previously enabled it (matches webserver auto-on pattern).
         // ensureTopic() seeds a random per-device topic on first cold boot
@@ -906,6 +999,7 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         transcriberPlayer = null
         unbindTranscriberService()
         runCatching { transcriberExecutor.shutdownNow() }
+        runCatching { prefsHydrationExecutor.shutdownNow() }
     }
 
     override fun onBackPressed() {
@@ -1140,8 +1234,17 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         if (activeId != null) {
             val list = state.hermesActiveHistory() ?: return
             if (list.isEmpty()) {
-                val persisted = com.r1.launcher.hermes.HermesHistoryStore.load(this, activeId)
-                if (persisted.isNotEmpty()) list.addAll(persisted)
+                // History load is a file readText + JSON decode of up to 200
+                // entries — move it off the (app-open) main thread. Re-check the
+                // list is still empty on the UI thread before seeding so a
+                // concurrent send/load isn't clobbered.
+                prefsHydrationExecutor.execute {
+                    val persisted = com.r1.launcher.hermes.HermesHistoryStore.load(this, activeId)
+                    if (persisted.isNotEmpty()) ui.post {
+                        val live = state.hermesActiveHistory()
+                        if (live != null && live.isEmpty()) live.addAll(persisted)
+                    }
+                }
             }
         }
     }
@@ -1681,11 +1784,19 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
                     if (turnId == openClawStreamingTtsTurnId) drainStreamingSpeechQueue()
                     true
                 }
-                prepare()
-                start()
+                // Async prepare — a synchronous prepare() here parses the MP3
+                // header + spins up the codec on the main thread, repeated once
+                // per streamed sentence while the chat panel animates. start()
+                // fires from onPrepared instead. Gate flags are set below before
+                // prepareAsync() returns so the drain loop can't double-start a
+                // second player while this one prepares.
+                setOnPreparedListener { mp ->
+                    mp.start()
+                    voiceSpeakingStartedAtMs = System.currentTimeMillis()
+                }
+                prepareAsync()
             }
             openClawSpeechPlaying = true; state.openClawSpeaking = true
-            voiceSpeakingStartedAtMs = System.currentTimeMillis()
         }.onFailure {
             openClawSpeechPlaying = false; state.openClawSpeaking = false
             runCatching { file.delete() }
@@ -2699,13 +2810,17 @@ class LauncherActivity : ComponentActivity(), LauncherHost {
         return t
     }
 
+    /** Monotonic id source for [TerminalLine] so the output list keeps stable
+     *  row identity across the FIFO cap. */
+    private var terminalLineSeq = 0L
+
     private fun appendTerminalLine(line: String) {
-        state.terminalOutput.add(line)
+        state.terminalOutput.add(TerminalLine(terminalLineSeq++, line))
         while (state.terminalOutput.size > state.terminalOutputMax) {
             state.terminalOutput.removeAt(0)
         }
         // Fan out to any connected web clients so the Terminal tab mirrors
-        // the on-device buffer in real time.
+        // the on-device buffer in real time. (raw string, unchanged wire format)
         runCatching { webServer?.broadcastTerminalOutput(line, state.terminalCwd) }
     }
 
@@ -3824,12 +3939,20 @@ override fun hermesPasteServerUrlFromClipboard() {
                     }
                     true
                 }
-                prepare()
-                start()
+                // Async prepare — a synchronous prepare() here parses the MP3
+                // header + spins up the codec on the main thread, repeated once
+                // per streamed sentence while the chat panel animates. start()
+                // fires from onPrepared instead. Gate flags are set below before
+                // prepareAsync() returns so the drain loop can't double-start a
+                // second player while this one prepares.
+                setOnPreparedListener { mp ->
+                    mp.start()
+                    voiceSpeakingStartedAtMs = System.currentTimeMillis()
+                }
+                prepareAsync()
             }
             hermesSpeechPlaying = true
             state.hermesSpeaking = true
-            voiceSpeakingStartedAtMs = System.currentTimeMillis()
         }.onFailure {
             hermesSpeechPlaying = false
             runCatching { file.delete() }
@@ -3929,8 +4052,15 @@ override fun hermesPasteServerUrlFromClipboard() {
         state.translatorClaudeHasKey = translatorPrefs.hasKey(com.r1.launcher.translator.ProviderId.ANTHROPIC)
         state.translatorClaudeKeyTail = translatorPrefs.keyTail(com.r1.launcher.translator.ProviderId.ANTHROPIC)
         if (state.translatorMessages.isEmpty()) {
-            val persisted = com.r1.launcher.translator.TranslationHistoryStore.load(this)
-            if (persisted.isNotEmpty()) state.translatorMessages.addAll(persisted)
+            // History load is a file readText + JSON decode of up to 100 entries
+            // — move it off the (app-open) main thread. Re-check still-empty on
+            // the UI thread before seeding so a concurrent translate isn't lost.
+            prefsHydrationExecutor.execute {
+                val persisted = com.r1.launcher.translator.TranslationHistoryStore.load(this)
+                if (persisted.isNotEmpty()) ui.post {
+                    if (state.translatorMessages.isEmpty()) state.translatorMessages.addAll(persisted)
+                }
+            }
         }
     }
 
@@ -4303,12 +4433,18 @@ override fun hermesPasteServerUrlFromClipboard() {
                 state.translatorSpeaking = false
                 true
             }
-            mp.prepare()
+            // Async prepare — a synchronous prepare() here parses the MP3 header
+            // + spins up the codec on the main thread. start() fires from
+            // onPrepared instead. State is set below before prepareAsync()
+            // returns so the player/file refs are live for the listeners.
+            mp.setOnPreparedListener {
+                it.start()
+                voiceSpeakingStartedAtMs = System.currentTimeMillis()
+            }
             translatorSpeechPlayer = mp
             translatorSpeechFile = file
-            mp.start()
             state.translatorSpeaking = true
-            voiceSpeakingStartedAtMs = System.currentTimeMillis()
+            mp.prepareAsync()
         }.onFailure {
             runCatching { mp.release() }
             translatorSpeechPlayer = null

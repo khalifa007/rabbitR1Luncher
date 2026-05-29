@@ -29,6 +29,11 @@ enum class WifiShareEditTarget { SSID, PASSWORD }
 /** Kind of toast — drives the edge color in [com.r1.launcher.ui.ToastOverlay]. */
 enum class ToastKind { INFO, SUCCESS, FAIL }
 
+/** One terminal scrollback line. [id] is a monotonic counter so the output
+ *  LazyColumn can key on stable identity even as the FIFO cap shifts indices
+ *  (keying on [text] alone would collide on duplicate lines). */
+data class TerminalLine(val id: Long, val text: String)
+
 /**
  * Single in-flight toast. [id] makes consecutive identical messages distinct
  * for `LaunchedEffect` re-keying; [expiresAtMs] is the wall-clock dismiss time
@@ -310,8 +315,11 @@ class LauncherState {
     /** Working directory tracked client-side (parsed from `cd ...`); prepended
      *  to every command since each carroot connection gets a fresh shell. */
     var terminalCwd by mutableStateOf("/sdcard")
-    /** Output scrollback. Capped at 500 lines (FIFO) to bound memory. */
-    val terminalOutput = mutableStateListOf<String>()
+    /** Output scrollback. Capped at 500 lines (FIFO) to bound memory.
+     *  Each line carries a monotonic [TerminalLine.id] so the LazyColumn can
+     *  key on stable identity — under the FIFO cap indices shift on every
+     *  append, which would otherwise recompose every visible row. */
+    val terminalOutput = mutableStateListOf<TerminalLine>()
     val terminalOutputMax = 500
     /** True between submit and command exit. Blocks concurrent submissions. */
     var terminalBusy by mutableStateOf(false)
