@@ -22,15 +22,17 @@ import java.util.concurrent.TimeUnit
  *   wss://api.elevenlabs.io/v1/speech-to-text/realtime
  *     ?model_id=scribe_v2_realtime
  *     &audio_format=pcm_16000
- *     &language_code=en
- *     &commit_strategy=vad
+ *     &commit_strategy=manual
  *
  * Auth via `xi-api-key` header. Audio chunks are JSON messages with the PCM
  * base64-encoded — base64-in-JSON is what the API requires (no binary frames).
  *
  * Server emits `partial_transcript` (live updates) and `committed_transcript`
- * (final, fired by VAD-detected silence or when client sets `commit:true` on
- * the last chunk). On any error the client falls back to a single onError().
+ * (final). With `commit_strategy=manual` the committed frame fires ONLY when
+ * the client sends `commit:true` — i.e. on button release via finish() — never
+ * on server-side VAD silence. That is what makes hold-to-talk truly
+ * release-to-send (see finish() + the init block for why VAD was dropped).
+ * On any error the client falls back to a single onError().
  *
  * One session = one user turn. Caller opens, streams PCM via sendPcm(), then
  * calls finish() to send the last chunk with commit=true and close cleanly.
@@ -54,11 +56,11 @@ class ElevenLabsRealtimeClient private constructor(
     @Volatile private var ws: WebSocket? = null
     @Volatile private var closed = false
     // Latched once the first committed/final frame is delivered. Any further
-    // `partial_transcript` events from the server are dropped — otherwise late
-    // partials (buffered audio after VAD commit, or a new utterance fragment
-    // after VAD auto-commit while the user is still holding the button) would
-    // repopulate the chat panel's pending bubble *after* the consumer cleared
-    // it on commit, leaving a duplicate gray bubble next to the orange one.
+    // `partial_transcript` events from the server are dropped — otherwise a
+    // late partial (buffered audio still being transcribed when the commit
+    // lands) would repopulate the chat panel's pending bubble *after* the
+    // consumer cleared it on commit, leaving a duplicate gray bubble next to
+    // the orange one.
     @Volatile private var committed = false
 
     init {
@@ -66,10 +68,17 @@ class ElevenLabsRealtimeClient private constructor(
         // language per utterance (Arabic, Spanish, French, English, etc.).
         // Hardcoding language_code=en forced English-only transcription and
         // garbled non-English speech.
+        // commit_strategy=manual: the server finalizes a transcript ONLY when
+        // we send commit:true (finish(), on button release) — never on its own
+        // VAD silence detection. We deliberately do NOT use commit_strategy=vad:
+        // with VAD a ~1.5s pause mid-hold auto-commits, the consumer auto-sends
+        // to the agent before release ("pause-to-send"), and the client then
+        // latches `committed` + closes the mic, dropping the rest of the hold.
+        // Manual makes the whole hold one utterance, delivered on release.
         val url = "wss://api.elevenlabs.io/v1/speech-to-text/realtime" +
             "?model_id=scribe_v2_realtime" +
             "&audio_format=pcm_16000" +
-            "&commit_strategy=vad"
+            "&commit_strategy=manual"
         val req = Request.Builder()
             .url(url)
             .header("xi-api-key", apiKey)
@@ -94,9 +103,10 @@ class ElevenLabsRealtimeClient private constructor(
     }
 
     /** Send a zero-byte chunk with commit=true and close after the final
-     *  `committed_transcript` arrives. The VAD strategy will usually have
-     *  committed already if the user paused, but explicit commit is a safety
-     *  net for "release to send" UX. */
+     *  `committed_transcript` arrives. With commit_strategy=manual this is the
+     *  SOLE commit trigger — the server won't finalize until it sees this
+     *  commit:true, so calling finish() on button release is what delivers the
+     *  transcript ("release to send"). */
     fun finish() {
         if (closed) return
         val socket = ws ?: return
